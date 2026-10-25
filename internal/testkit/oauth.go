@@ -51,6 +51,8 @@ type OAuthOptions struct {
 	Iss bool
 	// NoRefreshToken issues no refresh tokens.
 	NoRefreshToken bool
+	// ExpiresIn, if set, is the raw JSON of expires_in in token answers, in place of the TTL.
+	ExpiresIn string
 	// MetadataIssuer, if set, is the issuer the metadata claims, in place of the real one.
 	MetadataIssuer string
 }
@@ -402,6 +404,9 @@ func (s *OAuthServer) issue(w http.ResponseWriter, client, keep string) {
 	at := fmt.Sprintf("at-%d-%s", s.n, rand.Text()[:6])
 	s.access[at] = time.Now().Add(ttl)
 	resp := map[string]any{"access_token": at, "token_type": "Bearer", "expires_in": int(ttl.Seconds())}
+	if s.opts.ExpiresIn != "" {
+		resp["expires_in"] = json.RawMessage(s.opts.ExpiresIn)
+	}
 	if !s.opts.NoRefreshToken && keep == "" {
 		rt := fmt.Sprintf("rt-%d-%s", s.n, rand.Text()[:6])
 		s.refresh[rt] = client

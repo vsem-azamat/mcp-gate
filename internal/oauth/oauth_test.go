@@ -620,3 +620,16 @@ func TestSpacedRefusals(t *testing.T) {
 		t.Errorf("login required %v after %d refreshes", src.LoginRequired(), srv.Refreshes())
 	}
 }
+
+func TestExpiresInForms(t *testing.T) {
+	for _, tc := range []struct {
+		ttl  string
+		want bool
+	}{{"3600", true}, {"3600.0", true}, {`"3600"`, true}, {"0", false}, {"null", false}, {`"soon"`, false}, {"-5", false}} {
+		srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}, ExpiresIn: tc.ttl})
+		g := login(t, srv, config.OAuth{}, nil)
+		if !g.Expiry.IsZero() != tc.want {
+			t.Errorf("expires_in %s: expiry %v", tc.ttl, g.Expiry)
+		}
+	}
+}

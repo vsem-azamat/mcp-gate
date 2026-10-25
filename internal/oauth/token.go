@@ -165,11 +165,11 @@ func (tr *tokenResponse) expiry(now time.Time) time.Time {
 	if raw == "" || raw == "null" {
 		return time.Time{}
 	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n <= 0 {
+	f, err := strconv.ParseFloat(raw, 64) // some servers send 3600.0 or "3600"
+	if err != nil || !(f >= 1) {
 		return time.Time{}
 	}
-	return now.Add(time.Duration(min(n, 10*365*24*3600)) * time.Second)
+	return now.Add(time.Duration(min(f, 10*365*24*3600)) * time.Second)
 }
 
 // errorCode returns an OAuth error code when it is one (RFC 6749 codes are lower-case words
