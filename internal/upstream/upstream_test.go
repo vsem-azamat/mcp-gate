@@ -1,0 +1,263 @@
+package upstream
+
+import (
+	"bytes"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/auth"
+)
+
+func TestTokens(t *testing.T) {
+	tokens := NewTokens(map[string]string{"laptop": "secret-a", "phone": "secret-b"})
+	for secret, want := range map[string]string{"secret-a": "laptop", "secret-b": "phone", "secret-c": "", "": "", "secret-": ""} {
+		name, ok := tokens.Lookup(secret)
+		if name != want || ok != (want != "") {
+			t.Errorf("Lookup(%q) = %q %v, want %q", secret, name, ok, want)
+		}
+	}
+	var none *Tokens
+	if _, ok := none.Lookup("x"); ok {
+		t.Error("a nil token set matched")
+	}
+}
+
+func TestCredential(t *testing.T) {
+	for header, want := range map[string]string{
+		"Bearer abc":   "abc",
+		"bearer abc":   "abc",
+		"BEARER  abc ": "abc",
+		"abc":          "abc",
+		" abc ":        "abc",
+		"Bearer":       "Bearer",
+		"":             "",
+		"Basic abc":    "Basic abc",
+	} {
+		if got := Credential(header); got != want {
+			t.Errorf("Credential(%q) = %q, want %q", header, got, want)
+		}
+	}
+}
+
+func TestRequireToken(t *testing.T) {
+	var principal string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal = Principal(auth.TokenInfoFromContext(r.Context()))
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := RequireToken(NewTokens(map[string]string{"laptop": "secret-a"}), next)
+	for _, c := range []struct {
+		header string
+		code   int
+	}{
+		{"Bearer secret-a", http.StatusNoContent},
+		{"secret-a", http.StatusNoContent},
+		{"bearer secret-a", http.StatusNoContent},
+		{"Bearer secret-b", http.StatusUnauthorized},
+		{"Bearer secret-a extra", http.StatusUnauthorized},
+		{"", http.StatusUnauthorized},
+	} {
+		principal = ""
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/s/mcp", nil)
+		if c.header != "" {
+			req.Header.Set("Authorization", c.header)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != c.code {
+			t.Errorf("%q: status %d, want %d", c.header, rec.Code, c.code)
+		}
+		if c.code == http.StatusUnauthorized && rec.Body.String() != "Unauthorized\n" {
+			t.Errorf("%q: body %q", c.header, rec.Body.String())
+		}
+		if c.code == http.StatusNoContent && principal != "laptop" {
+			t.Errorf("%q: principal %q", c.header, principal)
+		}
+	}
+	if Principal(nil) != "" {
+		t.Error("Principal(nil) is not empty")
+	}
+}
+
+func TestAllowHosts(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	h := AllowHosts([]string{"mcp.example.com", "other.example.com:8443", "[::1]"}, next)
+	for host, want := range map[string]int{
+		"mcp.example.com":        http.StatusNoContent,
+		"MCP.example.com:443":    http.StatusNoContent,
+		"other.example.com:8443": http.StatusNoContent,
+		"other.example.com":      http.StatusForbidden,
+		"evil.example.com":       http.StatusForbidden,
+		"[::1]:9090":             http.StatusNoContent,
+	} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/s/mcp", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Errorf("Host %s: %d, want %d", host, rec.Code, want)
+		}
+	}
+	if got := AllowHosts(nil, next); got == nil {
+		t.Error("AllowHosts(nil) returned nil")
+	}
+}
+
+func TestRemote(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32"), netip.MustParsePrefix("10.0.0.0/8")}
+	cases := []struct {
+		behind bool
+		peer   string
+		xff    []string
+		want   string
+	}{
+		{false, "127.0.0.1:5000", []string{"192.0.2.1"}, "127.0.0.1"},
+		{true, "127.0.0.1:5000", nil, "127.0.0.1"},
+		{true, "127.0.0.1:5000", []string{"192.0.2.1"}, "192.0.2.1"},
+		{true, "127.0.0.1:5000", []string{"198.51.100.7, 192.0.2.1, 10.1.1.1"}, "192.0.2.1"},
+		{true, "127.0.0.1:5000", []string{"198.51.100.7", "192.0.2.1"}, "192.0.2.1"},
+		{true, "127.0.0.1:5000", []string{"10.1.1.1"}, "127.0.0.1"},
+		{true, "127.0.0.1:5000", []string{"192.0.2.1, junk"}, "127.0.0.1"},
+		{true, "192.0.2.9:5000", []string{"198.51.100.7"}, "192.0.2.9"}, // an untrusted peer
+		{true, "[::ffff:127.0.0.1]:5000", []string{"192.0.2.1"}, "192.0.2.1"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+		req.RemoteAddr = c.peer
+		for _, v := range c.xff {
+			req.Header.Add("X-Forwarded-For", v)
+		}
+		if got := NewRemote(c.behind, trusted)(req); got != c.want {
+			t.Errorf("behind %v, peer %s, XFF %v: %s, want %s", c.behind, c.peer, c.xff, got, c.want)
+		}
+	}
+}
+
+func TestReadBody(t *testing.T) {
+	var got []byte
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := ReadBody(8, time.Second, next)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader("12345678")))
+	if rec.Code != http.StatusNoContent || string(got) != "12345678" {
+		t.Errorf("a body at the limit: %d %q", rec.Code, got)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader("123456789")))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("a body over the limit: %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("no body: %d", rec.Code)
+	}
+}
+
+func TestRecover(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	h := Recover(logger, "s", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("secret-value") }))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d", rec.Code)
+	}
+	if strings.Contains(logs.String(), "secret-value") || !strings.Contains(logs.String(), "handler panicked") {
+		t.Errorf("log %q", logs.String())
+	}
+}
+
+func TestHealthHandler(t *testing.T) {
+	info := HealthInfo{Name: "gate", Version: "v1", ServerCount: 2}
+	const prefix = `{"name":"gate","serverCount":2,"status":`
+	cases := []struct {
+		name string
+		rep  *Readiness
+		code int
+		body string
+	}{
+		{"liveness", nil, http.StatusOK, prefix + `"ok","version":"v1"}`},
+		{"initializing", &Readiness{}, http.StatusServiceUnavailable, prefix + `"initializing","version":"v1"}`},
+		{"ok", &Readiness{Started: true, Mounted: 2}, http.StatusOK, prefix + `"ok","version":"v1"}`},
+		{"one mounted", &Readiness{Started: true, Mounted: 1}, http.StatusOK, prefix + `"ok","version":"v1"}`},
+		{"degraded", &Readiness{Started: true, Mounted: 2, Unhealthy: []string{"a"}}, http.StatusServiceUnavailable, prefix + `"degraded","unhealthy":["a"],"version":"v1"}`},
+		{"unavailable", &Readiness{Started: true}, http.StatusServiceUnavailable, prefix + `"unavailable","version":"v1"}`},
+	}
+	for _, c := range cases {
+		var readiness func() Readiness
+		if c.rep != nil {
+			rep := *c.rep
+			readiness = func() Readiness { return rep }
+		}
+		h := HealthHandler(info, readiness)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_readyz", nil))
+		if rec.Code != c.code || strings.TrimSpace(rec.Body.String()) != c.body || rec.Header().Get("Content-Type") != "application/json" {
+			t.Errorf("%s: %d %q", c.name, rec.Code, rec.Body.String())
+		}
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodHead, "/_readyz", nil))
+		if rec.Code != c.code || rec.Body.Len() != 0 {
+			t.Errorf("%s: HEAD %d %q", c.name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestStatusHandler(t *testing.T) {
+	h := StatusHandler(NewTokens(map[string]string{"owner": "admin-secret"}), func() any { return map[string]int{"servers": 1} })
+	for header, want := range map[string]int{"Bearer admin-secret": http.StatusOK, "admin-secret": http.StatusOK, "Bearer nope": http.StatusUnauthorized, "": http.StatusUnauthorized} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_status", nil)
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != want || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("%q: %d %v", header, rec.Code, rec.Header())
+		}
+		if want == http.StatusOK && !strings.Contains(rec.Body.String(), `"servers": 1`) {
+			t.Errorf("%q: body %q", header, rec.Body.String())
+		}
+	}
+}
+
+func TestLogRequests(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	h := LogRequests(logger, "s", func(*http.Request) string { return "192.0.2.1" },
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/s/mcp?key=secret-value", nil)
+	req.Header.Set("Authorization", "Bearer secret-value")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	line := logs.String()
+	if !strings.Contains(line, "status=418") || !strings.Contains(line, "remote=192.0.2.1") || strings.Contains(line, "secret-value") {
+		t.Errorf("log %q", line)
+	}
+}
+
+func TestSDKLogger(t *testing.T) {
+	var logs bytes.Buffer
+	logger := SDKLogger(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})).With("server", "s"))
+	logger.Info("session connected")
+	logger.Warn("something odd")
+	out := logs.String()
+	if strings.Contains(out, "session connected") || !strings.Contains(out, `"level":"WARN"`) || !strings.Contains(out, `"server":"s"`) {
+		t.Errorf("at info level: %q", out)
+	}
+	logs.Reset()
+	logger = SDKLogger(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	logger.Info("session connected")
+	if !strings.Contains(logs.String(), `"level":"DEBUG","msg":"session connected"`) {
+		t.Errorf("at debug level: %q", logs.String())
+	}
+}

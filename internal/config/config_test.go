@@ -21,6 +21,17 @@ func noEnv(string) (string, bool) { return "", false }
 const fullConfig = `
 version: 1
 name: gate-test
+listen:
+  addr: "0.0.0.0:8080"
+  behindProxy: true
+  trustedProxies: [10.0.0.0/8]
+  allowedHosts: [mcp.example.com]
+startupGracePeriod: 90s
+logLevel: debug
+auth:
+  tokens: {laptop: "${LAPTOP_TOKEN}"}
+admin:
+  tokens: {owner: "${ADMIN_TOKEN}"}
 servers:
   notes:
     stdio:
@@ -34,17 +45,27 @@ servers:
     protocolVersion: "2025-11-25"
     probeInterval: 10s
     restart: {maxBackoff: 1m}
+    tools: {allow: [search, read]}
+    prompts: {allow: []}
+    resources: {deny: ["notes://private"]}
+    log: {requests: true}
+    redact: {ru: true, highEntropy: true, disableRules: [jwt]}
   shop:
     http:
       url: https://shop.example.com/mcp
       headers: {X-Api-Key: "${SHOP_KEY}"}
     disabled: true
+    auth:
+      inherit: false
+      tokens: {phone: "${PHONE_TOKEN}"}
+    redact: {enabled: false}
 `
 
 func TestParseFull(t *testing.T) {
 	t.Parallel()
 	c, err := Parse([]byte(fullConfig), env(map[string]string{
 		"NOTES_DB": "/srv/notes/db", "NOTES_TOKEN": "tok-123", "SHOP_KEY": "key-456",
+		"LAPTOP_TOKEN": "lt", "ADMIN_TOKEN": "at", "PHONE_TOKEN": "pt",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -70,11 +91,88 @@ func TestParseFull(t *testing.T) {
 	if s.HTTP.Headers["X-Api-Key"] != "key-456" || !s.Disabled {
 		t.Errorf("shop = %+v", s)
 	}
+	if c.Listen.Addr != "0.0.0.0:8080" || !c.Listen.BehindProxy || c.StartupGracePeriod.D() != 90*time.Second ||
+		c.LogLevel != "debug" || c.Admin.Tokens["owner"] != "at" {
+		t.Errorf("top level = %+v", c)
+	}
+	if !slices.Equal(n.Tools.Allow, []string{"search", "read"}) || n.Prompts.Allow == nil || len(n.Prompts.Allow) != 0 ||
+		n.Resources.Deny[0] != "notes://private" || !n.Log.Requests || !*n.Redact.Enabled || !n.Redact.RU {
+		t.Errorf("notes policy = %+v", n)
+	}
+	if got := c.EffectiveTokens("notes"); len(got) != 1 || got["laptop"] != "lt" {
+		t.Errorf("notes tokens = %v", got)
+	}
+	if got := c.EffectiveTokens("shop"); len(got) != 1 || got["phone"] != "pt" || *s.Redact.Enabled {
+		t.Errorf("shop tokens = %v, redact %v", got, *s.Redact.Enabled)
+	}
+}
+
+func TestServingDefaults(t *testing.T) {
+	t.Parallel()
+	c, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n"+
+		"  b:\n    stdio: {command: srv}\n    auth: {public: true}\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen.Addr != DefaultListenAddr || !slices.Equal(c.Listen.TrustedProxies, DefaultTrustedProxies) ||
+		c.StartupGracePeriod.D() != DefaultStartupGracePeriod || c.LogLevel != DefaultLogLevel {
+		t.Errorf("defaults = %+v", c)
+	}
+	a := c.Servers["a"]
+	if !*a.Redact.Enabled || a.Redact.RU || !*a.Auth.Inherit || a.Tools != nil {
+		t.Errorf("server defaults = %+v", a)
+	}
+	if c.EffectiveTokens("b") != nil {
+		t.Error("a public server has tokens")
+	}
+}
+
+func TestServingErrors(t *testing.T) {
+	t.Parallel()
+	const srv = "servers:\n  a:\n    stdio: {command: x}\n"
+	cases := []struct{ name, doc, want string }{
+		{"no tokens", "version: 1\n" + srv, "servers.a.auth: the server accepts no token"},
+		{"bad token name", "version: 1\nauth: {tokens: {Laptop: x}}\n" + srv, "auth.tokens.Laptop: token names"},
+		{"empty token", "version: 1\nauth: {tokens: {a: ''}}\n" + srv, "auth.tokens.a: must be a non-empty token"},
+		{"token with space", "version: 1\nauth: {tokens: {a: 'b c'}}\n" + srv, "auth.tokens.a: must be a non-empty token"},
+		{"token with a no-break space", "version: 1\nauth: {tokens: {a: \"b\\u00a0c\"}}\n" + srv, "auth.tokens.a: must be a non-empty token"},
+		{"same value", "version: 1\nauth: {tokens: {a: s, b: s}}\n" + srv, "the tokens a and b have the same value"},
+		{"shadowed name", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    auth: {tokens: {a: t}}\n", "servers.a.auth.tokens.a: is also a global token name"},
+		{"inherit nothing", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    auth: {inherit: false}\n", "accepts no token"},
+		{"public with tokens", "version: 1\n" + srv + "    auth: {public: true, tokens: {a: s}}\n", "servers.a.auth.public: excludes tokens"},
+		{"both lists", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    tools: {allow: [x], deny: [y]}\n", "servers.a.tools: needs exactly one of allow and deny"},
+		{"no list", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    prompts: {}\n", "servers.a.prompts: needs exactly one"},
+		{"empty entry", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    resources: {deny: [' ']}\n", "servers.a.resources[0]: cannot be empty"},
+		{"unknown rule", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {disableRules: [nope]}\n", "servers.a.redact.disableRules: names an unknown rule"},
+		{"bad addr", "version: 1\nlisten: {addr: localhost}\nauth: {tokens: {a: s}}\n" + srv, "listen.addr: must be host:port"},
+		{"bad cidr", "version: 1\nlisten: {trustedProxies: [10.0.0.1]}\nauth: {tokens: {a: s}}\n" + srv, "listen.trustedProxies[0]: must be a CIDR"},
+		{"bad host", "version: 1\nlisten: {allowedHosts: ['a/b']}\nauth: {tokens: {a: s}}\n" + srv, "listen.allowedHosts[0]"},
+		{"bad level", "version: 1\nlogLevel: loud\nauth: {tokens: {a: s}}\n" + srv, "logLevel: must be one of"},
+		{"zero grace", "version: 1\nstartupGracePeriod: 0s\nauth: {tokens: {a: s}}\n" + srv, "startupGracePeriod: must be positive"},
+		{"empty meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: ['']\n", "servers.a.forwardMeta[0]: cannot be empty"},
+		{"blank meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: ['  ']\n", "servers.a.forwardMeta[0]: cannot be empty"},
+		{"duplicate meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [x/a, x/a]\n", "servers.a.forwardMeta[1]: is listed twice"},
+		{"progress token", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [progressToken]\n", "servers.a.forwardMeta[0]: is a key mcp-gate sets itself"},
+		{"reserved meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [io.modelcontextprotocol/clientInfo]\n", "servers.a.forwardMeta[0]: is a key mcp-gate sets itself"},
+		{"escrow keys", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {fileTools: [x]}\n", "field fileTools not found"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(c.doc), noEnv)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error = %v, want it to contain %q", err, c.want)
+			}
+			if err != nil && (strings.Contains(err.Error(), "b c") || strings.Contains(err.Error(), ": s ")) {
+				t.Errorf("the error quotes a token: %v", err)
+			}
+		})
+	}
 }
 
 func TestDefaults(t *testing.T) {
 	t.Parallel()
-	c, err := Parse([]byte("version: 1\nservers:\n  a:\n    stdio: {command: srv}\n  b:\n    stdio: {command: srv, inheritEnv: []}\n"), noEnv)
+	c, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n  b:\n    stdio: {command: srv, inheritEnv: []}\n"), noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,12 +191,12 @@ func TestDefaults(t *testing.T) {
 
 func TestParseErrors(t *testing.T) {
 	t.Parallel()
-	const head = "version: 1\nservers:\n  a:\n"
+	const head = "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n"
 	cases := []struct {
 		name, doc, want string
 	}{
 		{"empty", "", "empty"},
-		{"unknown key", head + "    stdio: {command: x}\n    tools: {allow: [a]}\n", "field tools not found"},
+		{"unknown key", head + "    stdio: {command: x}\n    escrow: {ttl: 1h}\n", "field escrow not found"},
 		{"duplicate key", head + "    stdio: {command: x}\n    disabled: true\n    disabled: false\n", "already defined"},
 		{"two documents", head + "    stdio: {command: x}\n---\nversion: 1\n", "more than one"},
 		{"no version", "servers:\n  a:\n    stdio: {command: x}\n", "version: is required"},
@@ -112,8 +210,8 @@ func TestParseErrors(t *testing.T) {
 		{"small size", head + "    stdio: {command: x}\n    maxMessageBytes: 1KiB\n", "maxMessageBytes: must be between"},
 		{"short probe", head + "    stdio: {command: x}\n    probeInterval: 10ms\n", "probeInterval: must be at least"},
 		{"short backoff", head + "    stdio: {command: x}\n    restart: {maxBackoff: 0s}\n", "maxBackoff: must be at least"},
-		{"bad name", "version: 1\nservers:\n  Notes:\n    stdio: {command: x}\n", "servers.Notes: server names"},
-		{"underscore name", "version: 1\nservers:\n  _status:\n    stdio: {command: x}\n", "server names"},
+		{"bad name", "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  Notes:\n    stdio: {command: x}\n", "servers.Notes: server names"},
+		{"underscore name", "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  _status:\n    stdio: {command: x}\n", "server names"},
 		{"no transport", head + "    disabled: true\n", "needs stdio or http"},
 		{"two transports", head + "    stdio: {command: x}\n    http: {url: 'https://a.example.com/mcp'}\n", "both stdio and http"},
 		{"no command", head + "    stdio: {args: [x]}\n", "command: is required"},
@@ -149,7 +247,7 @@ func TestParseErrors(t *testing.T) {
 
 func TestErrorsCollectedWithoutValues(t *testing.T) {
 	t.Parallel()
-	doc := "version: 1\nservers:\n  a:\n    http: {url: 'https://user:hunter22@a.example.com/mcp?k=${KEY}'}\n" +
+	doc := "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    http: {url: 'https://user:hunter22@a.example.com/mcp?k=${KEY}'}\n" +
 		"  b:\n    stdio: {command: x, cwd: rel}\n"
 	_, err := Parse([]byte(doc), env(map[string]string{"KEY": "s3cr3t-value"}))
 	if err == nil {
@@ -170,19 +268,19 @@ func TestErrorsCollectedWithoutValues(t *testing.T) {
 
 func TestDecodeErrorsHideValues(t *testing.T) {
 	t.Parallel()
-	_, err := Parse([]byte("version: 1\nservers:\n  a:\n    stdio: {command: x, args: ghp_abcdefghijklmnop}\n"), noEnv)
+	_, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x, args: ghp_abcdefghijklmnop}\n"), noEnv)
 	if err == nil || strings.Contains(err.Error(), "ghp_") {
 		t.Errorf("err = %v", err)
 	}
-	_, err = Parse([]byte("version: 1\nservers:\n  a:\n    stdio: {command: x}\n    callTimeout: 30\n"), noEnv)
-	if err == nil || !strings.Contains(err.Error(), "line 5") {
+	_, err = Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x}\n    callTimeout: 30\n"), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "line 6") {
 		t.Errorf("a duration error does not say where: %v", err)
 	}
 }
 
 func TestExpansionCannotInjectStructure(t *testing.T) {
 	t.Parallel()
-	doc := "version: 1\nservers:\n  a:\n    stdio:\n      command: x\n      args: ['${EVIL}']\n"
+	doc := "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio:\n      command: x\n      args: ['${EVIL}']\n"
 	c, err := Parse([]byte(doc), env(map[string]string{"EVIL": "y\n    disabled: true"}))
 	if err != nil {
 		t.Fatal(err)
@@ -255,10 +353,32 @@ func TestLoad(t *testing.T) {
 	if err := os.WriteFile(path, []byte(fullConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path, env(map[string]string{"NOTES_DB": "d", "NOTES_TOKEN": "t", "SHOP_KEY": "k"})); err != nil {
+	if _, err := Load(path, env(map[string]string{
+		"NOTES_DB": "d", "NOTES_TOKEN": "t", "SHOP_KEY": "k",
+		"LAPTOP_TOKEN": "l", "ADMIN_TOKEN": "a", "PHONE_TOKEN": "p",
+	})); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml"), noEnv); err == nil {
 		t.Error("Load of a missing file succeeded")
+	}
+}
+
+func TestForwardMeta(t *testing.T) {
+	t.Parallel()
+	c, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n    forwardMeta: [example.com/trace, plain]\n  b:\n    stdio: {command: srv}\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(c.Servers["a"].ForwardMeta, []string{"example.com/trace", "plain"}) || c.Servers["b"].ForwardMeta != nil {
+		t.Errorf("forwardMeta = %v, %v", c.Servers["a"].ForwardMeta, c.Servers["b"].ForwardMeta)
+	}
+	for k, want := range map[string]bool{
+		"io.modelcontextprotocol/clientInfo": true, "dev.mcp/x": true, "mcp/x": true, "modelcontextprotocol.io/x": true,
+		"mcpish.example.com/x": false, "example.com/mcp": false, "plain": false, "progressToken": false,
+	} {
+		if got := ReservedMetaKey(k); got != want {
+			t.Errorf("ReservedMetaKey(%q) = %v", k, got)
+		}
 	}
 }

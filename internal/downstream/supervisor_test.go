@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -543,4 +544,82 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+func TestNotifications(t *testing.T) {
+	var progress, changed atomic.Int32
+	var sessions atomic.Int32
+	o := stdioOptions(t, testkit.Fake{})
+	o.Notifications = Notifications{
+		ToolsChanged: func() { changed.Add(1) },
+		Progress:     func(*mcp.ProgressNotificationParams) { progress.Add(1) },
+	}
+	o.OnSession = func(*mcp.ClientSession) { sessions.Add(1) }
+	s := start(t, o)
+	waitReady(t, s)
+	err := s.Call(t.Context(), func(ctx context.Context, cs *mcp.ClientSession) error {
+		params := &mcp.CallToolParams{Name: "progress", Arguments: map[string]any{"steps": 2, "ms": 10}}
+		params.SetProgressToken("p")
+		if _, err := cs.CallTool(ctx, params); err != nil {
+			return err
+		}
+		_, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "addtool", Arguments: map[string]any{"name": "fresh"}})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for progress.Load() == 0 || changed.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("progress %d, changed %d", progress.Load(), changed.Load())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if sessions.Load() != 1 {
+		t.Errorf("OnSession called %d times", sessions.Load())
+	}
+}
+
+// TestRejectedListen connects to a server that rejects subscriptions/listen without it, and
+// reports list changes after every successful probe instead.
+func TestRejectedListen(t *testing.T) {
+	var changed atomic.Int32
+	o := stdioOptions(t, testkit.Fake{RejectListen: true})
+	o.ProbeInterval = 50 * time.Millisecond
+	o.Notifications = Notifications{ToolsChanged: func() { changed.Add(1) }}
+	s := start(t, o)
+	if st := waitReady(t, s); st.ProtocolVersion != "2026-07-28" {
+		t.Fatalf("status %+v", st)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for changed.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("changed %d", changed.Load())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mustEcho(t, s)
+}
+
+// TestAcknowledgedListen reports no list change after probes on a session whose server
+// acknowledged the subscription.
+func TestAcknowledgedListen(t *testing.T) {
+	for _, transport := range []string{"stdio", "http"} {
+		t.Run(transport, func(t *testing.T) {
+			var changed atomic.Int32
+			o := stdioOptions(t, testkit.Fake{})
+			if transport == "http" {
+				o, _ = httpOptions(t, testkit.Fake{}, testkit.FakeHTTPOptions{})
+			}
+			o.ProbeInterval = 50 * time.Millisecond
+			o.Notifications = Notifications{ToolsChanged: func() { changed.Add(1) }}
+			s := start(t, o)
+			waitReady(t, s)
+			time.Sleep(400 * time.Millisecond)
+			if n := changed.Load(); n != 0 {
+				t.Errorf("changed %d times without a change", n)
+			}
+		})
+	}
 }

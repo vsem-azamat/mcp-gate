@@ -4,13 +4,23 @@
 
 mcp-gate reads one YAML file. The behaviour is specified in [`openspec/specs/config/spec.md`](../../openspec/specs/config/spec.md); this page is the reference. `mcp-gate check <file>` validates a file (see [check](../commands/check.md)), and `mcp-gate import` writes one from an mcp-proxy `config.json` (see [import](../commands/import.md)).
 
-The schema holds only what this build implements, so an unknown key is an error rather than a setting that is silently ignored. So far only `mcp-gate check` reads the file; with `-connect` it connects to the servers.
+The schema holds only what this build implements, so an unknown key is an error rather than a setting that is silently ignored. `mcp-gate serve` serves the file (see [serve](../commands/serve.md)); `mcp-gate check -connect` connects to its servers and stops.
 
 ## Example
 
 ```yaml
 version: 1
 name: mcp-gate
+listen:
+  addr: 127.0.0.1:9090
+  behindProxy: true
+  allowedHosts: [mcp.example.com]
+startupGracePeriod: 90s
+logLevel: info
+auth:
+  tokens: {laptop: "${GATE_TOKEN_LAPTOP}", phone: "${GATE_TOKEN_PHONE}"}
+admin:
+  tokens: {owner: "${GATE_ADMIN_TOKEN}"}
 servers:
   notes:
     stdio:
@@ -20,6 +30,10 @@ servers:
       env: {NOTES_DB: /srv/notes/db, NOTES_TOKEN: "${NOTES_TOKEN}"}
       inheritEnv: [PATH, HOME, LANG]
     callTimeout: 3m
+    tools: {allow: [search, read_note]}
+    prompts: {allow: []}
+    redact: {ru: true}
+    log: {requests: true}
   shop:
     http:
       url: https://shop.example.com/mcp
@@ -27,6 +41,10 @@ servers:
     callTimeout: 2m
     maxMessageBytes: 8MiB
     protocolVersion: "2025-11-25"
+    resources: {deny: ["shop://orders/private"]}
+    auth:
+      inherit: false
+      tokens: {shop-bot: "${GATE_TOKEN_SHOP}"}
     disabled: true
 ```
 
@@ -35,7 +53,15 @@ servers:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `version` | required | Always `1` |
-| `name` | `mcp-gate` | Client name sent to the servers |
+| `name` | `mcp-gate` | Client name sent to the servers, and the `name` of `/_healthz` and `/_readyz` |
+| `listen.addr` | `127.0.0.1:9090` | `host:port` to serve on |
+| `listen.behindProxy` | `false` | The gate sits behind a reverse proxy: the SDK's DNS-rebinding check (a loopback listener only answers loopback Host names) is off, and the request log reads `X-Forwarded-For` from `trustedProxies` |
+| `listen.trustedProxies` | `127.0.0.1/32 ::1/128` | CIDRs of the proxies whose `X-Forwarded-For` is believed |
+| `listen.allowedHosts` | none (any) | Host names, optionally with a port, the MCP routes answer; others get 403. Set it when `behindProxy` is on; without it the gate logs a warning at start |
+| `startupGracePeriod` | `30s` | Longest time `/_readyz` reports `initializing` while servers connect |
+| `logLevel` | `info` | `debug`, `info`, `warn` or `error`; `debug` adds the servers' own log messages |
+| `auth.tokens` | none | Client tokens by name, accepted by every server that inherits them. The name identifies the caller in the audit log |
+| `admin.tokens` | none | Tokens by name that may read `/_status`; without them `/_status` is 404 |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |
@@ -50,8 +76,20 @@ servers:
 | `probeInterval` | `30s` | Time between liveness probes, at least `1s` |
 | `restart.maxBackoff` | `30s` | Longest wait between restarts, at least `1s` |
 | `disabled` | `false` | Never start the server |
+| `tools` | all | `{allow: [names]}` or `{deny: [names]}`. An empty allow list exposes every tool, as mcp-proxy's `toolFilter` did |
+| `prompts` | all | `{allow: [...]}` or `{deny: [...]}` by prompt name. An empty allow list exposes none and the capability is not advertised |
+| `resources` | all | The same, matching a resource's URI or name and a template's URI template or name. Under a deny list, a read of a denied URI through a template is refused too, in any spelling the gate can tell is the same; an allow list is the safer choice |
+| `auth.inherit` | `true` | Accept the global `auth.tokens` too |
+| `auth.tokens` | none | Tokens this server accepts in addition; with `inherit`, their names differ from the global ones |
+| `auth.public` | `false` | Serve without a token. Excludes `tokens` and `inherit` |
+| `log.requests` | `false` | Log each HTTP request to the route: method, status, duration, remote address |
+| `redact.enabled` | `true` | Redact results; see [Redaction](../architecture/redaction.md) |
+| `redact.ru` | `false` | Add the Russian label rules |
+| `redact.highEntropy` | `false` | Add the high-entropy rule |
+| `redact.disableRules` | none | Redaction kinds never reported, such as `jwt` |
+| `forwardMeta` | none | `_meta` keys of a client request passed to the server, by exact name, such as `example.com/trace`. Others are dropped: they describe the client. `progressToken` and `mcp`/`modelcontextprotocol`-prefixed keys are the gate's and cannot be listed |
 
-Each server has exactly one of `stdio` and `http`.
+Each server has exactly one of `stdio` and `http`. Every server that is not `public` must accept at least one token, and no two tokens a server accepts may have the same value. Token names are lower-case letters, digits, `.`, `_` and `-`; values may not contain spaces or control characters.
 
 ## Values
 

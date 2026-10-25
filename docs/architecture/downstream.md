@@ -2,7 +2,7 @@
 
 [Docs](../README.md) / [Architecture](README.md) / **Downstream servers**
 
-How mcp-gate connects to the MCP servers behind it. The behaviour is specified in [`openspec/specs/downstream-lifecycle/spec.md`](../../openspec/specs/downstream-lifecycle/spec.md). So far only `mcp-gate check -connect` runs supervisors.
+How mcp-gate connects to the MCP servers behind it. The behaviour is specified in [`openspec/specs/downstream-lifecycle/spec.md`](../../openspec/specs/downstream-lifecycle/spec.md). `mcp-gate serve` runs one supervisor per enabled server (see [Serving](serving.md)); `mcp-gate check -connect` runs them to try a config.
 
 ## Packages
 
@@ -14,7 +14,9 @@ How mcp-gate connects to the MCP servers behind it. The behaviour is specified i
 
 ## Supervisor
 
-`downstream.New(opts)` builds a supervisor and `Start` runs its loop in one goroutine: connect, watch the session, tear it down, wait in backoff, connect again. Callers use `Call(ctx, fn)`, which hands `fn` the current `*mcp.ClientSession` and counts the call as in flight; `Status` and `Wait` report the state. `Stop` ends the loop and the child.
+`downstream.New(opts)` builds a supervisor and `Start` runs its loop in one goroutine: connect, watch the session, tear it down, wait in backoff, connect again. Callers use `Call(ctx, fn)`, which hands `fn` the current `*mcp.ClientSession` and counts the call as in flight; `Status` and `Wait` report the state. `Stop` ends the loop and the child and cancels the calls in flight, since closing a session waits for them.
+
+`Options.Notifications` holds the handlers for the server's progress, log messages and list changes, which the SDK calls one at a time on the session's reader, and `OnSession` is called with each new session once it is ready. On `2026-07-28` sessions the SDK opens `subscriptions/listen` for the list changes it has handlers for, but does not wait for the answer, so a server that rejects it would never report a change. A receiving middleware records the session whose server sent `notifications/subscriptions/acknowledged`; until then, every successful probe calls the list-changed handlers, and the mirror lists again.
 
 Connecting builds a fresh transport each time. Without a pin, the handshake runs under a 5 s sub-deadline: the SDK client sends `server/discover` first and falls back to `initialize` only on an error reply, so a server that ignores discover would otherwise block until the connect timeout (60 s) and then fail. When the sub-deadline expires, the attempt is torn down and repeated offering `2025-11-25`. Silence alone cannot tell a server that ignores discover from one that is slow to start (a cold `npx` cache), so the pin is kept for later connects, and reported through `OnPinLearned`, only when the pinned handshake completes within the sub-deadline; otherwise the next connect tries discover again.
 

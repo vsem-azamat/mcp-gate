@@ -22,7 +22,12 @@
       "timeout": "120s",
       "options": {
         "toolFilter": {"mode": "allow", "list": ["read_file", "list_files"]},
-        "redact": {"enabled": true, "escrowTTL": "24h", "fileTools": ["download_file"], "fileRoots": ["/srv/downloads"]}
+        "redact": {"enabled": true, "escrowTTL": "24h", "fileTools": ["download_file"], "fileRoots": ["/srv/downloads"]},
+        "authTokens": ["${HUB_TOKEN_LAPTOP}", "${HUB_TOKEN_PHONE}"],
+        "logEnabled": false,
+        "Disabled": false,
+        "promptFilter": {"mode": "allow", "list": []},
+        "resourceFilter": {"mode": "allow", "list": []}
       }
     },
     "mail": {
@@ -42,7 +47,7 @@
     "browser": {
       "command": "/usr/bin/env",
       "args": ["-u", "HUB_TOKEN_LAPTOP", "-u", "HUB_TOKEN_PHONE", "browser-server", "--headless"],
-      "options": {"toolFilter": {"mode": "block", "list": ["eval"]}}
+      "options": {"toolFilter": {"mode": "block", "list": ["eval"]}, "redact": {"enabled": true, "fileTools": [], "fileRoots": []}}
     },
     "legacy": {
       "url": "https://legacy.example.com/sse"

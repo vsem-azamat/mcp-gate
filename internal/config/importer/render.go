@@ -39,9 +39,22 @@ func (d *document) render(unimplemented []string) ([]byte, error) {
 	if d.name != "" {
 		add(root, "name", str(d.name), "")
 	}
+	if d.addr != "" {
+		l := mapping()
+		add(l, "addr", str(d.addr), "mcp-proxy mcpProxy.addr")
+		add(root, "listen", l, "")
+	}
+	if d.grace != nil {
+		add(root, "startupGracePeriod", str(config.FormatDuration(*d.grace)), "")
+	}
+	if len(d.tokens) > 0 {
+		a := mapping()
+		add(a, "tokens", d.tokenMap(d.tokens), "")
+		add(root, "auth", a, "")
+	}
 	servers := mapping()
 	for _, s := range d.servers {
-		node := s.node()
+		node := s.node(d)
 		add(servers, s.name, node, "")
 		key := servers.Content[len(servers.Content)-2]
 		key.HeadComment = comment(append(append([]string(nil), s.notes...), perServer[s.name]...))
@@ -60,7 +73,16 @@ func (d *document) render(unimplemented []string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (s *server) node() *yaml.Node {
+// tokenMap writes tokens by name.
+func (d *document) tokenMap(tokens []string) *yaml.Node {
+	m := map[string]string{}
+	for _, v := range tokens {
+		m[d.names[v]] = v
+	}
+	return strMap(m)
+}
+
+func (s *server) node(d *document) *yaml.Node {
 	n := mapping()
 	if st := s.stdio; st != nil {
 		m := mapping()
@@ -100,6 +122,51 @@ func (s *server) node() *yaml.Node {
 	if s.disabled {
 		add(n, "disabled", scalar("true", "!!bool"), "")
 	}
+	for kind, f := range s.filters {
+		if f == nil {
+			continue
+		}
+		m := mapping()
+		if f.Allow != nil {
+			add(m, "allow", strList(f.Allow), "")
+		} else {
+			add(m, "deny", strList(f.Deny), "")
+		}
+		m.Style = yaml.FlowStyle
+		add(n, filterWords[kind], m, s.fNotes[kind])
+	}
+	switch {
+	case s.public != "":
+		a := mapping()
+		add(a, "public", scalar("true", "!!bool"), s.public)
+		add(n, "auth", a, "")
+	case s.tokens != nil:
+		a := mapping()
+		add(a, "inherit", scalar("false", "!!bool"), "mcp-proxy: per-server authTokens replace the global ones")
+		add(a, "tokens", d.tokenMap(s.tokens), "")
+		add(n, "auth", a, "")
+	}
+	if s.requests {
+		l := mapping()
+		add(l, "requests", scalar("true", "!!bool"), "mcp-proxy logEnabled")
+		add(n, "log", l, "")
+	}
+	r := mapping()
+	switch {
+	case !s.redact.present:
+		add(r, "enabled", scalar("false", "!!bool"), "mcp-proxy did not redact this server; consider turning it on")
+	case !s.redact.enabled:
+		add(r, "enabled", scalar("false", "!!bool"), "")
+	default:
+		add(r, "ru", scalar("true", "!!bool"), "mcp-proxy always ran the Russian rules")
+		if s.redact.highEntropy {
+			add(r, "highEntropy", scalar("true", "!!bool"), "")
+		}
+		if len(s.redact.disableRules) > 0 {
+			add(r, "disableRules", strList(s.redact.disableRules), "")
+		}
+	}
+	add(n, "redact", r, "")
 	return n
 }
 

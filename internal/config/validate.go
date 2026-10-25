@@ -3,7 +3,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -14,6 +16,8 @@ import (
 	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/vsem-azamat/mcp-gate/internal/redact"
 )
 
 // Bounds checked by validation.
@@ -69,6 +73,15 @@ func (c *Config) validate(errs *[]error, skip map[string]bool) {
 	if len(c.Name) > maxNameLen || strings.ContainsFunc(c.Name, func(r rune) bool { return !unicode.IsPrint(r) }) {
 		add("name", "must be at most %d printable characters", maxNameLen)
 	}
+	c.Listen.validate(add)
+	if c.StartupGracePeriod != nil && c.StartupGracePeriod.D() == 0 {
+		add("startupGracePeriod", "must be positive")
+	}
+	if c.LogLevel != "" && !slices.Contains(LogLevels, c.LogLevel) {
+		add("logLevel", "must be one of %s", strings.Join(LogLevels, ", "))
+	}
+	validateTokens("auth.tokens", c.Auth.Tokens, add)
+	validateTokens("admin.tokens", c.Admin.Tokens, add)
 	if len(c.Servers) == 0 {
 		add("servers", "at least one server is required")
 	}
@@ -89,6 +102,85 @@ func (c *Config) validate(errs *[]error, skip map[string]bool) {
 			continue
 		}
 		s.validate(path, add)
+		c.validateServerAuth(name, path+".auth", add)
+	}
+}
+
+// TokenNameRE is the form of a token name, which identifies the caller in logs.
+var TokenNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
+func validateTokens(path string, tokens map[string]string, add func(path, format string, args ...any)) {
+	for _, name := range sortedKeys(tokens) {
+		p := path + "." + name
+		if !TokenNameRE.MatchString(name) {
+			add(p, "token names are lower-case letters, digits, '.', '_' and '-', start with a letter or digit and are at most 63 characters")
+		}
+		if v := tokens[name]; v == "" || strings.ContainsFunc(v, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+			add(p, "must be a non-empty token without spaces or control characters")
+		}
+	}
+}
+
+func (c *Config) validateServerAuth(name, path string, add func(path, format string, args ...any)) {
+	a := c.Servers[name].Auth
+	validateTokens(path+".tokens", a.Tokens, add)
+	if a.Public {
+		if len(a.Tokens) > 0 || a.Inherit != nil {
+			add(path+".public", "excludes tokens and inherit")
+		}
+		return
+	}
+	inherit := a.Inherit == nil || *a.Inherit
+	if inherit {
+		for _, k := range sortedKeys(a.Tokens) {
+			if _, ok := c.Auth.Tokens[k]; ok {
+				add(path+".tokens."+k, "is also a global token name; with inherit, the names must differ")
+			}
+		}
+	}
+	tokens := c.EffectiveTokens(name)
+	if len(tokens) == 0 {
+		add(path, "the server accepts no token; add tokens, or set public: true to serve it without one")
+	}
+	seen := map[string]string{}
+	for _, k := range sortedKeys(tokens) {
+		if other, ok := seen[tokens[k]]; ok {
+			add(path, "the tokens %s and %s have the same value", other, k)
+		}
+		seen[tokens[k]] = k
+	}
+}
+
+func (l *Listen) validate(add func(path, format string, args ...any)) {
+	if l.Addr != "" {
+		if _, port, err := net.SplitHostPort(l.Addr); err != nil || port == "" {
+			add("listen.addr", "must be host:port, such as 127.0.0.1:9090")
+		}
+	}
+	for i, p := range l.TrustedProxies {
+		if _, err := netip.ParsePrefix(p); err != nil {
+			add(fmt.Sprintf("listen.trustedProxies[%d]", i), "must be a CIDR, such as 127.0.0.1/32")
+		}
+	}
+	for i, h := range l.AllowedHosts {
+		if h == "" || strings.ContainsAny(h, "/ \t@") {
+			add(fmt.Sprintf("listen.allowedHosts[%d]", i), "must be a host name, optionally with a port")
+		}
+	}
+}
+
+func (f *Filter) validate(path string, add func(path, format string, args ...any)) {
+	if f == nil {
+		return
+	}
+	if (f.Allow == nil) == (f.Deny == nil) {
+		add(path, "needs exactly one of allow and deny")
+		return
+	}
+	for i, v := range append(append([]string(nil), f.Allow...), f.Deny...) {
+		if strings.TrimSpace(v) == "" {
+			add(fmt.Sprintf("%s[%d]", path, i), "cannot be empty")
+		}
 	}
 }
 
@@ -114,6 +206,25 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	}
 	if s.Restart.MaxBackoff != nil && s.Restart.MaxBackoff.D() < MinMaxBackoff {
 		add(path+".restart.maxBackoff", "must be at least %s", MinMaxBackoff)
+	}
+	s.Tools.validate(path+".tools", add)
+	s.Prompts.validate(path+".prompts", add)
+	s.Resources.validate(path+".resources", add)
+	seen := map[string]bool{}
+	for i, k := range s.ForwardMeta {
+		p := fmt.Sprintf("%s.forwardMeta[%d]", path, i)
+		switch {
+		case strings.TrimSpace(k) == "":
+			add(p, "cannot be empty")
+		case seen[k]:
+			add(p, "is listed twice")
+		case k == "progressToken" || ReservedMetaKey(k):
+			add(p, "is a key mcp-gate sets itself: progressToken and keys with an mcp or modelcontextprotocol prefix cannot be forwarded")
+		}
+		seen[k] = true
+	}
+	if _, err := redact.New(redact.Options{DisableRules: s.Redact.DisableRules}); err != nil {
+		add(path+".redact.disableRules", "names an unknown rule; known: %s", strings.Join(redact.Kinds(), ", "))
 	}
 }
 
@@ -187,4 +298,19 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// ReservedMetaKey reports whether a _meta key has a prefix the MCP specification reserves: one
+// whose labels include "modelcontextprotocol" or "mcp", such as "io.modelcontextprotocol/".
+func ReservedMetaKey(k string) bool {
+	prefix, _, ok := strings.Cut(k, "/")
+	if !ok {
+		return false
+	}
+	for label := range strings.SplitSeq(prefix, ".") {
+		if label == "modelcontextprotocol" || label == "mcp" {
+			return true
+		}
+	}
+	return false
 }

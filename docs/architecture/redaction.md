@@ -2,7 +2,7 @@
 
 [Docs](../README.md) / [Architecture](README.md) / **Redaction**
 
-Redaction replaces credentials in what downstream servers return. The behaviour is specified in [`openspec/specs/redaction/spec.md`](../../openspec/specs/redaction/spec.md). It is a library; the `mcp-gate` binary does not call it.
+Redaction replaces credentials in what downstream servers return. The behaviour is specified in [`openspec/specs/redaction/spec.md`](../../openspec/specs/redaction/spec.md). `mcp-gate serve` applies it to every result of a server with `redact.enabled` (see [Serving](serving.md)), and the supervisors use the engine for error messages and child stderr.
 
 ## Packages
 

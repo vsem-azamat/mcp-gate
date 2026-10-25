@@ -1,13 +1,19 @@
 {
   "mcpProxy": {
+    "baseURL": "https://hub.example.com",
+    "addr": "127.0.0.1:9090",
     "name": "hub-example",
     "version": "1.0.0",
     "type": "streamable-http",
+    "startupGracePeriod": "90s",
     "options": {
       "panicIfInvalid": false,
       "autoReconnect": true,
+      "logEnabled": true,
       "reconnectInterval": "30s",
-      "pingInterval": 20000000000
+      "pingInterval": 20000000000,
+      "authTokens": ["${HUB_TOKEN_LAPTOP}", "$HUB_TOKEN_PHONE"],
+      "redact": {"enabled": true, "highEntropy": true, "disableRules": ["jwt"]}
     }
   },
   "mcpServers": {
@@ -16,29 +22,40 @@
       "args": ["-u", "SECRET_ONE", "-u", "SECRET_TWO", "-u", "HOME", "NOTES_MODE=fast", "HOME=/srv/notes-home", "notes-server", "--transport", "stdio"],
       "env": {"NOTES_DB": "$NOTES_DB_PATH", "SECRET_ONE": "removed-by-wrapper"},
       "timeout": "180s",
-      "options": {"toolFilter": {"mode": "allow", "list": []}}
+      "options": {
+        "toolFilter": {"mode": "allow", "list": []},
+        "promptFilter": {"mode": "allow", "list": []},
+        "resourceFilter": {"mode": "Block", "list": ["notes://private"]}
+      }
     },
     "clean-room": {
       "command": "env",
       "args": ["-i", "--chdir=/srv/clean", "ONLY=this", "clean-server"],
-      "options": {"Disabled": true}
+      "options": {"Disabled": true, "toolFilter": {"mode": "block", "list": ["eval"]}}
     },
     "plain": {
       "command": "plain-server",
       "args": ["--price", "$5", "--token", "${PLAIN_TOKEN}"],
       "timeout": 5,
-      "options": {"pingInterval": "10s", "reconnectInterval": "200ms"}
+      "options": {"pingInterval": "10s", "reconnectInterval": "200ms", "authTokens": []}
     },
     "shop": {
       "transportType": "streamable-http",
       "url": "https://shop.example.com/mcp",
       "headers": {"X-Api-Key": "${SHOP_KEY}", "Accept-Encoding": "identity"},
-      "timeout": "120s"
+      "timeout": "120s",
+      "options": {
+        "authTokens": ["${HUB_TOKEN_SHOP}"],
+        "logEnabled": false,
+        "redact": {"enabled": false},
+        "resourceFilter": {"mode": "allow", "list": []}
+      }
     },
     "wrapped-oddly": {
       "command": "/usr/bin/env",
       "args": ["-S", "odd-server --flag"],
-      "timeout": "2m"
+      "timeout": "2m",
+      "options": {"toolFilter": {"mode": "allow", "list": ["read", "search"]}, "authTokens": ["${HUB_TOKEN_PHONE}", "${HUB_TOKEN_LAPTOP}"]}
     }
   }
 }
