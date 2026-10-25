@@ -104,14 +104,14 @@ func TestFindsKnownSecretFormats(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(fmt.Sprintf("%+v/%s", opts, tt.name), func(t *testing.T) {
 				t.Parallel()
-				got := e.RedactString(tt.text, Marker)
+				got := e.RedactString(tt.text, Marker{})
 				if strings.Contains(got, tt.secret) {
 					t.Fatalf("secret survived: %q", got)
 				}
 				if !strings.Contains(got, MarkerText(tt.kind)) {
 					t.Fatalf("want marker %s in %q", MarkerText(tt.kind), got)
 				}
-				if again := e.RedactString(got, Marker); again != got {
+				if again := e.RedactString(got, Marker{}); again != got {
 					t.Fatalf("a second pass changed %q to %q", got, again)
 				}
 			})
@@ -158,10 +158,50 @@ func TestLeavesOrdinaryTextAlone(t *testing.T) {
 	for _, opts := range optionSets {
 		e := newEngine(t, opts)
 		for _, text := range texts {
-			if got := e.RedactString(text, Marker); got != text {
+			if got := e.RedactString(text, Marker{}); got != text {
 				t.Errorf("%+v: %q was changed to %q", opts, text, got)
 			}
 		}
+	}
+}
+
+func TestExactOutput(t *testing.T) {
+	t.Parallel()
+
+	e := newEngine(t, Options{})
+	for text, want := range map[string]string{
+		"the password: Summer-Blue-77! ok":                "the password: [REDACTED:password] ok",
+		"login admin pwd=hunter22.":                       "login admin pwd=[REDACTED:password].",
+		"db_pass: pw-last-word\ndbPwd: pw-camel-77":       "db_pass: [REDACTED:password]\ndbPwd: [REDACTED:password]",
+		"Authorization: Bearer " + fake("", 30) + " tail": "Authorization: Bearer [REDACTED:auth_header] tail",
+	} {
+		if got := e.RedactString(text, Marker{}); got != want {
+			t.Errorf("%q -> %q, want %q", text, got, want)
+		}
+	}
+}
+
+func TestPlaceholdersAreNotSecrets(t *testing.T) {
+	t.Parallel()
+
+	e := newEngine(t, Options{Russian: true, HighEntropy: true})
+	for _, value := range []string{"{{ .Token }}", "%(password)s", "<your-token>", "xxxx", "$TOKEN", "${DB_PASSWORD}", "ab", "redacted", "[REDACTED:password]", "•••••"} {
+		for _, text := range []string{"password: " + value, `{"password":"` + value + `"}`} {
+			if got := e.RedactString(text, Marker{}); got != text {
+				t.Errorf("%q changed to %q", text, got)
+			}
+		}
+	}
+}
+
+func TestHeaderMembers(t *testing.T) {
+	t.Parallel()
+
+	e := newEngine(t, Options{})
+	doc := `{"Proxy-Authorization":"Basic abc123def","Cookie":"sid=abc123def","set-cookie":"sid=abc123def","db_token":"abc123def"}`
+	want := `{"Proxy-Authorization":"[REDACTED:auth_header]","Cookie":"[REDACTED:auth_header]","set-cookie":"[REDACTED:auth_header]","db_token":"abc123def"}`
+	if got := e.RedactString(doc, Marker{}); got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
 	}
 }
 
@@ -169,10 +209,10 @@ func TestHighEntropyIsOptIn(t *testing.T) {
 	t.Parallel()
 
 	text := "here is " + fake("", 32) + " for you"
-	if got := newEngine(t, Options{}).RedactString(text, Marker); got != text {
+	if got := newEngine(t, Options{}).RedactString(text, Marker{}); got != text {
 		t.Fatalf("highEntropy off changed %q to %q", text, got)
 	}
-	got := newEngine(t, Options{HighEntropy: true}).RedactString(text, Marker)
+	got := newEngine(t, Options{HighEntropy: true}).RedactString(text, Marker{})
 	if strings.Contains(got, fake("", 32)) || !strings.Contains(got, MarkerText("high_entropy")) {
 		t.Fatalf("highEntropy on: got %q", got)
 	}
@@ -184,12 +224,12 @@ func TestDisableRules(t *testing.T) {
 	jwt := "eyJ" + fake("", 20) + ".eyJ" + fake("", 30) + "." + fake("", 43)
 	text := "a " + jwt + " password: hunter22"
 	e := newEngine(t, Options{DisableRules: []string{"jwt", "password"}})
-	if got := e.RedactString(text, Marker); got != text {
+	if got := e.RedactString(text, Marker{}); got != text {
 		t.Fatalf("disabled rules still applied: %q", got)
 	}
 	// A disabled kind is not reported under a secret JSON member either.
 	doc := `{"password":"hunter22","pin":12345}`
-	if got := e.RedactString(doc, Marker); got != doc {
+	if got := e.RedactString(doc, Marker{}); got != doc {
 		t.Fatalf("disabled kind replaced in JSON: %s", got)
 	}
 }
@@ -310,7 +350,7 @@ func TestJSONTextIsRewrittenValueByValue(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := e.RedactString(tt.text, Marker)
+			got := e.RedactString(tt.text, Marker{})
 			if !json.Valid([]byte(got)) {
 				t.Fatalf("result is not valid JSON: %s", got)
 			}
@@ -332,7 +372,7 @@ func TestRedactJSON(t *testing.T) {
 	t.Parallel()
 
 	e := newEngine(t, Options{})
-	got, err := e.RedactJSON([]byte(` {"b":2, "note":"password: hunter22", "a":[1,2]} `), Marker)
+	got, err := e.RedactJSON([]byte(` {"b":2, "note":"password: hunter22", "a":[1,2]} `), Marker{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +380,7 @@ func TestRedactJSON(t *testing.T) {
 		t.Errorf("RedactJSON = %s, want %s", got, want)
 	}
 	for _, bad := range []string{``, `{`, `{"a":1}x`, `password: hunter22`} {
-		if out, err := e.RedactJSON([]byte(bad), Marker); err == nil || out != nil {
+		if out, err := e.RedactJSON([]byte(bad), Marker{}); err == nil || out != nil {
 			t.Errorf("RedactJSON(%q) = %q, %v; want ErrInvalidJSON", bad, out, err)
 		}
 	}
@@ -354,9 +394,21 @@ func TestRedactJSON(t *testing.T) {
 		}
 		nested = string(raw)
 	}
-	out, err := e.RedactJSON([]byte(nested), Marker)
+	out, err := e.RedactJSON([]byte(nested), Marker{})
 	if err != nil || strings.Contains(string(out), "hunter22") || !json.Valid(out) {
 		t.Errorf("deeply nested secret: %s, %v", out, err)
+	}
+	// Only the JSON rewrite finds a numeric password, so this one shows nesting is followed.
+	nested = `{"password":12345678}`
+	for range 4 {
+		raw, err := json.Marshal(map[string]string{"x": nested})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nested = string(raw)
+	}
+	if out, err := e.RedactJSON([]byte(nested), Marker{}); err != nil || strings.Contains(string(out), "12345678") {
+		t.Errorf("nested numeric password: %s, %v", out, err)
 	}
 }
 
@@ -423,12 +475,12 @@ func TestEngineIsSafeForConcurrentUse(t *testing.T) {
 
 	e := newEngine(t, Options{Russian: true, HighEntropy: true})
 	text := `{"password":"hunter22","text":"token: ` + fake("", 30) + ` пароль: Qwerty-123"}`
-	want := e.RedactString(text, Marker)
+	want := e.RedactString(text, Marker{})
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
 			for range 50 {
-				if got := e.RedactString(text, Marker); got != want {
+				if got := e.RedactString(text, Marker{}); got != want {
 					t.Errorf("concurrent result %q, want %q", got, want)
 					return
 				}

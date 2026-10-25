@@ -2,7 +2,7 @@
 
 [Docs](../README.md) / [Architecture](README.md) / **Redaction**
 
-Redaction replaces credentials in what downstream servers return. The behaviour is specified in [`openspec/specs/redaction/spec.md`](../../openspec/specs/redaction/spec.md). It is a library; no command uses it yet.
+Redaction replaces credentials in what downstream servers return. The behaviour is specified in [`openspec/specs/redaction/spec.md`](../../openspec/specs/redaction/spec.md). It is a library; the `mcp-gate` binary does not call it.
 
 ## Packages
 
@@ -15,7 +15,7 @@ Redaction replaces credentials in what downstream servers return. The behaviour 
 
 ## Engine
 
-`redact.New(redact.Options{Russian, HighEntropy, DisableRules})` builds an engine. It holds no mutable state, so one engine serves any number of goroutines. Every call takes a `Replacer`, which returns the text for each finding; `redact.Marker` writes `[REDACTED:<kind>]`, and a caller that keeps the value somewhere implements its own.
+`redact.New(redact.Options{Russian, HighEntropy, DisableRules})` builds an engine. It holds no mutable state, so one engine serves any number of goroutines. Every call takes a `Replacer`, which returns the text for each finding; `redact.Marker{}` writes `[REDACTED:<kind>]`, and a caller that keeps the value somewhere implements its own.
 
 A text is scanned as follows:
 
@@ -43,4 +43,4 @@ To add a rule, give it a free priority in the right band, a kind (a new kind is 
 
 `mcpredact.New(engine, maxTextBytes)` returns a `Redactor` with `CallToolResult`, `GetPromptResult`, `ReadResourceResult` and `Error`. Each copies what it changes and leaves its input untouched. Structured values (`structuredContent`, `_meta`, tool-use input) are encoded, passed through `RedactJSON` and decoded again only when something was found.
 
-Any failure returns an error wrapping `mcpredact.ErrWithheld` and no result: an encode or decode error, an unknown content type, a text over `maxTextBytes`, or a panic, which is recovered. Error messages name the field that failed but never quote content. A redacted error hides the original from `errors.Unwrap`; `errors.Is` still sees the original's targets and `errors.As` finds a redacted `*jsonrpc.Error` with the original code.
+Any failure returns an error wrapping `mcpredact.ErrWithheld` and no result: an encode or decode error, an unknown content type, a text over `maxTextBytes`, a text blob over `MaxBlobBytes` (8 MiB), a multi-round-trip result (input requests or request state, which are not redacted), or a panic, which is recovered. Error messages name the field that failed but never quote content. A redacted error hides the original from `errors.Unwrap`; `errors.Is` still sees the original's targets and `errors.As` finds a redacted `*jsonrpc.Error` with the original code. Only an unwrapped `*jsonrpc.Error` is returned as one, with its data; the SDK takes just the code from a wrapped one.

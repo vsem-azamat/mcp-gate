@@ -98,7 +98,10 @@ type ReplacerFunc func(f Finding) string
 func (fn ReplacerFunc) Replace(f Finding) string { return fn(f) }
 
 // Marker is the default Replacer: it writes MarkerText(f.Kind).
-var Marker Replacer = ReplacerFunc(func(f Finding) string { return MarkerText(f.Kind) })
+type Marker struct{}
+
+// Replace returns MarkerText(f.Kind).
+func (Marker) Replace(f Finding) string { return MarkerText(f.Kind) }
 
 // MarkerText is the default replacement for a finding of the given kind: "[REDACTED:<kind>]".
 func MarkerText(kind string) string {

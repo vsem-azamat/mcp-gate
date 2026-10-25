@@ -61,12 +61,12 @@ func TestRussianLabels(t *testing.T) {
 	for _, highEntropy := range []bool{false, true} {
 		e := newEngine(t, Options{Russian: true, HighEntropy: highEntropy})
 		for text, secret := range positives {
-			if got := e.RedactString(text, Marker); strings.Contains(got, secret) || !strings.Contains(got, markerPrefix) {
+			if got := e.RedactString(text, Marker{}); strings.Contains(got, secret) || !strings.Contains(got, markerPrefix) {
 				t.Errorf("highEntropy=%v: %q -> %q, secret survived", highEntropy, text, got)
 			}
 		}
 		for _, text := range negatives {
-			if got := e.RedactString(text, Marker); got != text {
+			if got := e.RedactString(text, Marker{}); got != text {
 				t.Errorf("highEntropy=%v: %q changed to %q", highEntropy, text, got)
 			}
 		}
@@ -75,14 +75,14 @@ func TestRussianLabels(t *testing.T) {
 	// Without Options.Russian the labels are ordinary words.
 	e := newEngine(t, Options{})
 	for _, text := range []string{"Пароль: Summer-Blue-77!", "токен: abcdef123456", "логин/пароль: admin / Qwerty123"} {
-		if got := e.RedactString(text, Marker); got != text {
+		if got := e.RedactString(text, Marker{}); got != text {
 			t.Errorf("Russian off: %q changed to %q", text, got)
 		}
 	}
 }
 
-// The rule order is part of the behaviour: the earlier rule wins an overlap. It must match
-// what the rules were ported from, whatever the options.
+// The rule order is part of the behaviour: the earlier rule wins an overlap. It is the same
+// whatever the options.
 func TestRuleOrder(t *testing.T) {
 	t.Parallel()
 
@@ -177,10 +177,9 @@ func TestPriorityDecidesOverlaps(t *testing.T) {
 	}
 }
 
-// Overlapping findings from several rules and whitespace-free input must stay linear; both
-// were quadratic once.
+// Overlapping findings from several rules and whitespace-free input must stay linear. Not
+// parallel, so that other tests do not slow it down.
 func TestLargeInputsStayFast(t *testing.T) {
-	t.Parallel()
 	if testing.Short() {
 		t.Skip("timing test")
 	}
@@ -197,7 +196,7 @@ func TestLargeInputsStayFast(t *testing.T) {
 	e := newEngine(t, Options{Russian: true, HighEntropy: true})
 	for _, text := range inputs {
 		start := time.Now()
-		_ = e.RedactString(text, Marker)
+		_ = e.RedactString(text, Marker{})
 		if elapsed := time.Since(start); elapsed > limit {
 			t.Errorf("%d bytes took %v", len(text), elapsed)
 		}

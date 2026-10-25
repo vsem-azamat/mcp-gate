@@ -71,7 +71,7 @@ func FuzzRedactText(f *testing.F) {
 		if got != want.String() {
 			t.Fatalf("RedactText = %q, want %q", got, want.String())
 		}
-		if utf8.ValidString(text) && !utf8.ValidString(e.RedactString(text, Marker)) {
+		if utf8.ValidString(text) && !utf8.ValidString(e.RedactString(text, Marker{})) {
 			t.Fatal("redaction broke UTF-8")
 		}
 	})

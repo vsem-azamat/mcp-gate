@@ -9,8 +9,8 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
 )
 
-// Error returns err with every secret in its message, and in the data of a JSON-RPC error,
-// replaced. An error without findings is returned as it is. A JSON-RPC error keeps its code. A
+// Error returns err with every secret in its message, and in the message and data of a
+// JSON-RPC error in it, replaced. Only the data of an unwrapped JSON-RPC error reaches the wire. An error without findings is returned as it is. A JSON-RPC error keeps its code. A
 // redacted error matches errors.Is targets as err does, and errors.As finds a *jsonrpc.Error
 // with the redacted message and data, but it does not unwrap to err. When the error cannot be
 // redacted, the result is an ErrWithheld error that says nothing of err.
@@ -50,18 +50,19 @@ func (p *pass) error(err error) error {
 			data = nil
 		}
 	}
-	if redactedMsg == msg && bytes.Equal(data, wire.Data) {
+	wireMsg := redactedMsg
+	if wire.Message != msg {
+		if !p.checkSize(len(wire.Message), "error message") {
+			return nil
+		}
+		wireMsg = p.engine.RedactText(wire.Message, p.replacer)
+	}
+	if redactedMsg == msg && wireMsg == wire.Message && bytes.Equal(data, wire.Data) {
 		return err
 	}
-	sanitized := &jsonrpc.Error{Code: wire.Code, Message: wire.Message, Data: data}
+	sanitized := &jsonrpc.Error{Code: wire.Code, Message: wireMsg, Data: data}
 	if direct, ok := err.(*jsonrpc.Error); ok && direct == wire { //nolint:errorlint // only an unwrapped *jsonrpc.Error is replaced by a copy of its own type
-		sanitized.Message = redactedMsg
 		return sanitized
-	}
-	if wire.Message == msg {
-		sanitized.Message = redactedMsg
-	} else {
-		sanitized.Message = p.engine.RedactText(wire.Message, p.replacer)
 	}
 	return &redactedError{msg: redactedMsg, cause: err, wire: sanitized}
 }

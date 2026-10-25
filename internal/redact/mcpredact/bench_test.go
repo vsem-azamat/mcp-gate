@@ -30,7 +30,7 @@ func BenchmarkCallToolResult(b *testing.B) {
 	b.SetBytes(int64(sb.Len()))
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := r.CallToolResult(res, redact.Marker); err != nil {
+		if _, err := r.CallToolResult(res, redact.Marker{}); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -24,8 +24,8 @@ import (
 // content that failed.
 var ErrWithheld = errors.New("result withheld: it could not be redacted")
 
-// MaxBlobBytes is the largest blob with a text MIME type that is decoded and scanned. Larger
-// blobs pass through unscanned.
+// MaxBlobBytes is the largest blob with a text MIME type that is scanned; a larger one fails
+// the result.
 const MaxBlobBytes = 8 << 20
 
 // Redactor redacts MCP results with one engine. It is safe for concurrent use.
@@ -68,14 +68,16 @@ func (r *Redactor) run(replacer redact.Replacer, fn func(p *pass)) (err error) {
 	return p.err
 }
 
-// CallToolResult returns res with every secret replaced: in text content, embedded resources,
-// resource links, nested tool-use and tool-result content, structuredContent and every _meta.
+// CallToolResult returns res with the secrets in its text fields replaced: text content,
+// embedded resources, resource links, nested tool-use and tool-result content,
+// structuredContent and every _meta. A result with input requests fails.
 func (r *Redactor) CallToolResult(res *mcp.CallToolResult, replacer redact.Replacer) (*mcp.CallToolResult, error) {
 	if res == nil {
 		return nil, nil
 	}
 	var out *mcp.CallToolResult
 	err := r.run(replacer, func(p *pass) {
+		p.noInputRequests(len(res.InputRequests), res.RequestState)
 		cp := *res
 		cp.Content = p.contents(res.Content, "content")
 		cp.StructuredContent = p.anyValue(res.StructuredContent, "structuredContent")
@@ -96,8 +98,9 @@ func (r *Redactor) GetPromptResult(res *mcp.GetPromptResult, replacer redact.Rep
 	}
 	var out *mcp.GetPromptResult
 	err := r.run(replacer, func(p *pass) {
+		p.noInputRequests(len(res.InputRequests), res.RequestState)
 		cp := *res
-		cp.Description = p.text(res.Description, "description")
+		cp.Description = p.plainText(res.Description, "description")
 		cp.Meta = p.meta(res.Meta, "_meta")
 		if res.Messages != nil {
 			cp.Messages = make([]*mcp.PromptMessage, len(res.Messages))
@@ -125,6 +128,7 @@ func (r *Redactor) ReadResourceResult(res *mcp.ReadResourceResult, replacer reda
 	}
 	var out *mcp.ReadResourceResult
 	err := r.run(replacer, func(p *pass) {
+		p.noInputRequests(len(res.InputRequests), res.RequestState)
 		cp := *res
 		cp.Meta = p.meta(res.Meta, "_meta")
 		if res.Contents != nil {
@@ -139,6 +143,14 @@ func (r *Redactor) ReadResourceResult(res *mcp.ReadResourceResult, replacer reda
 		return nil, err
 	}
 	return out, nil
+}
+
+// noInputRequests fails a result that asks the client for input (a multi-round-trip result):
+// its requests and state are not redacted, so it is withheld.
+func (p *pass) noInputRequests(requests int, state string) {
+	if requests > 0 || state != "" {
+		p.fail("input requests are not supported")
+	}
 }
 
 func (p *pass) contents(blocks []mcp.Content, where string) []mcp.Content {
@@ -172,8 +184,10 @@ func (p *pass) content(c mcp.Content, where string) mcp.Content {
 	case *mcp.ResourceLink:
 		cp := *v
 		cp.URI = p.plainText(v.URI, where+".uri")
+		cp.Name = p.plainText(v.Name, where+".name")
 		cp.Title = p.plainText(v.Title, where+".title")
 		cp.Description = p.plainText(v.Description, where+".description")
+		cp.Icons = p.icons(v.Icons, where+".icons")
 		cp.Meta = p.meta(v.Meta, where+"._meta")
 		return &cp
 	case *mcp.EmbeddedResource:
@@ -203,10 +217,26 @@ func (p *pass) resource(c *mcp.ResourceContents, where string) *mcp.ResourceCont
 		return nil
 	}
 	cp := *c
+	cp.URI = p.plainText(c.URI, where+".uri")
 	cp.Text = p.text(c.Text, where+".text")
 	cp.Blob = p.blob(c.Blob, c.MIMEType, where+".blob")
 	cp.Meta = p.meta(c.Meta, where+"._meta")
 	return &cp
+}
+
+// icons redacts icon sources that are URLs; data URIs hold image data and pass unchanged.
+func (p *pass) icons(icons []mcp.Icon, where string) []mcp.Icon {
+	if icons == nil {
+		return nil
+	}
+	out := make([]mcp.Icon, len(icons))
+	for i, icon := range icons {
+		if !strings.HasPrefix(strings.ToLower(icon.Source), "data:") {
+			icon.Source = p.plainText(icon.Source, fmt.Sprintf("%s[%d].src", where, i))
+		}
+		out[i] = icon
+	}
+	return out
 }
 
 // checkSize fails the pass for a text over the limit.
@@ -234,13 +264,17 @@ func (p *pass) plainText(s, where string) string {
 	return p.engine.RedactText(s, p.replacer)
 }
 
-// blob redacts a blob with a text MIME type that is valid UTF-8 and at most MaxBlobBytes.
-// Other blobs pass through unchanged.
+// blob redacts a blob with a text MIME type that is valid UTF-8. A text blob over
+// MaxBlobBytes fails the result; other blobs pass through unchanged.
 func (p *pass) blob(b []byte, mimeType, where string) []byte {
-	if len(b) == 0 || len(b) > MaxBlobBytes || p.err != nil || !textMIMEType(mimeType) || !utf8.Valid(b) {
+	if len(b) == 0 || p.err != nil || !textMIMEType(mimeType) {
 		return b
 	}
-	if !p.checkSize(len(b), where) {
+	if len(b) > MaxBlobBytes {
+		p.fail("%s: %d-byte text blob is over the %d-byte scan limit", where, len(b), MaxBlobBytes)
+		return b
+	}
+	if !utf8.Valid(b) || !p.checkSize(len(b), where) {
 		return b
 	}
 	text := string(b)

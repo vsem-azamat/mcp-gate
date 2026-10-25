@@ -82,10 +82,13 @@ func TestCallToolResultCoversEveryTextField(t *testing.T) {
 		Meta: mcp.Meta{"note": "token: " + secret, "progressToken": 7},
 		Content: []mcp.Content{
 			&mcp.TextContent{Text: "plain " + secret, Meta: mcp.Meta{"x": secret}},
-			&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{URI: "x://1", Text: "embedded " + secret}},
+			&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{URI: "x://1", Text: "embedded " + secret, Meta: mcp.Meta{"r": secret}}, Meta: mcp.Meta{"e": secret}},
 			&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{URI: "x://2", MIMEType: "text/plain; charset=utf-8", Blob: []byte("blob " + secret)}},
-			&mcp.ResourceLink{URI: "postgres://app:link-pw-9@db.example.com/x", Name: "db", Title: "title " + secret, Description: "token: " + secret},
-			&mcp.ToolUseContent{ID: "1", Name: "n", Input: map[string]any{"api_key": "in-put-key-1", "q": "plain " + secret}},
+			&mcp.ResourceLink{
+				URI: "postgres://app:link-pw-9@db.example.com/x", Name: "name " + secret, Title: "title " + secret, Description: "token: " + secret,
+				Icons: []mcp.Icon{{Source: "https://u:icon-pw-7@example.com/i.png"}, {Source: "data:image/png;base64,AAAA"}},
+			},
+			&mcp.ToolUseContent{ID: "1", Name: "n", Input: map[string]any{"api_key": "in-put-key-1", "q": "plain " + secret}, Meta: mcp.Meta{"u": secret}},
 			&mcp.ToolResultContent{
 				ToolUseID:         "1",
 				Content:           []mcp.Content{&mcp.TextContent{Text: "nested " + secret}},
@@ -97,12 +100,12 @@ func TestCallToolResultCoversEveryTextField(t *testing.T) {
 		},
 		StructuredContent: map[string]any{"b": 2, "note": secret, "a": 1},
 	}
-	got, err := r.CallToolResult(res, redact.Marker)
+	got, err := r.CallToolResult(res, redact.Marker{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := wire(t, got)
-	for _, leaked := range []string{"link-pw-9", "in-put-key-1", "nested-pw-1"} {
+	for _, leaked := range []string{"link-pw-9", "icon-pw-7", "in-put-key-1", "nested-pw-1"} {
 		if strings.Contains(out, leaked) {
 			t.Errorf("%q survived: %s", leaked, out)
 		}
@@ -134,7 +137,7 @@ func TestCallToolResultDecodedFromTheWire(t *testing.T) {
 	r := newRedactor(t, 0)
 	res := decodeResult(t, `{"content":[{"type":"text","text":"{\"text\":\"`+secret+`\",\"id\":42}"}],`+
 		`"structuredContent":{"text":"`+secret+`","pin":123456,"n":1.5},"isError":true,"_meta":{"k":"v"}}`)
-	got, err := r.CallToolResult(res, redact.Marker)
+	got, err := r.CallToolResult(res, redact.Marker{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +164,7 @@ func TestInputIsNotModified(t *testing.T) {
 		`"structuredContent":{"token":"abc-123-def"},"_meta":{"t":"` + secret + `"}}`
 	res := decodeResult(t, raw)
 	before := wire(t, res)
-	if _, err := r.CallToolResult(res, redact.Marker); err != nil {
+	if _, err := r.CallToolResult(res, redact.Marker{}); err != nil {
 		t.Fatal(err)
 	}
 	if after := wire(t, res); after != before {
@@ -178,6 +181,51 @@ func textOf(t *testing.T, c mcp.Content) string {
 	return text.Text
 }
 
+func TestPromptAndResourceInputsAreNotModified(t *testing.T) {
+	t.Parallel()
+
+	r := newRedactor(t, 0)
+	prompt := &mcp.GetPromptResult{
+		Description: "token: " + secret,
+		Messages:    []*mcp.PromptMessage{{Role: "user", Content: &mcp.ToolResultContent{Content: []mcp.Content{&mcp.TextContent{Text: secret}}}}},
+	}
+	before := wire(t, prompt)
+	if _, err := r.GetPromptResult(prompt, redact.Marker{}); err != nil {
+		t.Fatal(err)
+	}
+	if after := wire(t, prompt); after != before {
+		t.Errorf("prompt changed:\n%s\n%s", before, after)
+	}
+	resource := &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "x://1", MIMEType: "text/plain", Blob: []byte(secret), Text: secret}}}
+	before = wire(t, resource)
+	if _, err := r.ReadResourceResult(resource, redact.Marker{}); err != nil {
+		t.Fatal(err)
+	}
+	if after := wire(t, resource); after != before {
+		t.Errorf("resource changed:\n%s\n%s", before, after)
+	}
+}
+
+func TestInputRequestsAreWithheld(t *testing.T) {
+	t.Parallel()
+
+	r := newRedactor(t, 0)
+	for name, res := range map[string]*mcp.CallToolResult{
+		"input requests": decodeResult(t, `{"content":[],"resultType":"input_required","inputRequests":{"a":{"method":"elicitation/create","params":{"message":"token: `+secret+`","requestedSchema":{"type":"object"}}}}}`),
+		"request state":  {RequestState: "state " + secret},
+	} {
+		if got, err := r.CallToolResult(res, redact.Marker{}); !errors.Is(err, ErrWithheld) || got != nil {
+			t.Errorf("%s: got %v, %v; want ErrWithheld", name, got, err)
+		}
+	}
+	if _, err := r.GetPromptResult(&mcp.GetPromptResult{RequestState: "s"}, redact.Marker{}); !errors.Is(err, ErrWithheld) {
+		t.Errorf("prompt with request state: %v", err)
+	}
+	if _, err := r.ReadResourceResult(&mcp.ReadResourceResult{RequestState: "s"}, redact.Marker{}); !errors.Is(err, ErrWithheld) {
+		t.Errorf("resource with request state: %v", err)
+	}
+}
+
 func b64(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
 }
@@ -189,7 +237,7 @@ func TestNothingFoundKeepsTheResult(t *testing.T) {
 	raw := `{"content":[{"type":"text","text":"hello"},{"type":"image","data":"AAAA","mimeType":"image/png"}],` +
 		`"structuredContent":{"n":12345678901234567890,"s":"x"},"_meta":{"k":"v"}}`
 	res := decodeResult(t, raw)
-	got, err := r.CallToolResult(res, redact.Marker)
+	got, err := r.CallToolResult(res, redact.Marker{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,19 +277,27 @@ func TestBlobs(t *testing.T) {
 		mimeType string
 		blob     []byte
 		redacted bool
+		wantErr  bool
 	}{
-		{"text", "text/markdown", []byte(secret), true},
-		{"json suffix", "application/vnd.api+json", []byte(`{"token":"abc-123-def"}`), true},
-		{"pem", "application/x-pem-file", []byte(secret), true},
-		{"binary type", "application/octet-stream", []byte(secret), false},
-		{"no type", "", []byte(secret), false},
-		{"not UTF-8", "text/plain", append([]byte{0xff, 0xfe}, secret...), false},
-		{"over the cap", "text/plain", big, false},
+		{"text", "text/markdown", []byte(secret), true, false},
+		{"json suffix", "application/vnd.api+json", []byte(`{"token":"abc-123-def"}`), true, false},
+		{"pem", "application/x-pem-file", []byte(secret), true, false},
+		{"binary type", "application/octet-stream", []byte(secret), false, false},
+		{"no type", "", []byte(secret), false, false},
+		{"not UTF-8", "text/plain", append([]byte{0xff, 0xfe}, secret...), false, false},
+		{"text over the cap", "text/plain", big, false, true},
+		{"binary over the cap", "application/octet-stream", big, false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			res := &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "x://1", MIMEType: tt.mimeType, Blob: tt.blob}}}
-			got, err := r.ReadResourceResult(res, redact.Marker)
+			got, err := r.ReadResourceResult(res, redact.Marker{})
+			if tt.wantErr {
+				if !errors.Is(err, ErrWithheld) || got != nil {
+					t.Fatalf("got %v, %v; want ErrWithheld", got, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -266,7 +322,7 @@ func TestPromptAndResourceResults(t *testing.T) {
 		},
 		Meta: mcp.Meta{"s": secret},
 	}
-	gotPrompt, err := r.GetPromptResult(prompt, redact.Marker)
+	gotPrompt, err := r.GetPromptResult(prompt, redact.Marker{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,18 +334,18 @@ func TestPromptAndResourceResults(t *testing.T) {
 	}
 
 	resource := &mcp.ReadResourceResult{
-		Contents: []*mcp.ResourceContents{{URI: "x://env", MIMEType: "text/plain", Text: "API_KEY=" + fake("", 20)}, nil},
+		Contents: []*mcp.ResourceContents{{URI: "postgres://app:uri-pw-5@db.example.com/x", MIMEType: "text/plain", Text: "API_KEY=" + fake("", 20)}, nil},
 		Meta:     mcp.Meta{"s": secret},
 	}
-	gotResource, err := r.ReadResourceResult(resource, redact.Marker)
+	gotResource, err := r.ReadResourceResult(resource, redact.Marker{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out := wire(t, gotResource); strings.Contains(out, fake("", 20)) || strings.Contains(out, secret) {
+	if out := wire(t, gotResource); strings.Contains(out, fake("", 20)) || strings.Contains(out, secret) || strings.Contains(out, "uri-pw-5") {
 		t.Errorf("resource not redacted: %s", out)
 	}
 
-	for _, res := range []any{must(r.CallToolResult(nil, redact.Marker)), must(r.GetPromptResult(nil, redact.Marker)), must(r.ReadResourceResult(nil, redact.Marker))} {
+	for _, res := range []any{must(r.CallToolResult(nil, redact.Marker{})), must(r.GetPromptResult(nil, redact.Marker{})), must(r.ReadResourceResult(nil, redact.Marker{}))} {
 		if !reflect.ValueOf(res).IsNil() {
 			t.Errorf("nil result redacted to %v", res)
 		}
@@ -372,7 +428,7 @@ func TestFailsClosed(t *testing.T) {
 				rd = tt.r
 			}
 			if replacer == nil {
-				replacer = redact.Marker
+				replacer = redact.Marker{}
 			}
 			got, err := rd.CallToolResult(tt.res, replacer)
 			if !errors.Is(err, ErrWithheld) || got != nil {
@@ -386,10 +442,10 @@ func TestFailsClosed(t *testing.T) {
 
 	// The limit applies to every text the adapter scans, in prompts and resources too.
 	small := newRedactor(t, 8)
-	if _, err := small.GetPromptResult(&mcp.GetPromptResult{Description: "a long description"}, redact.Marker); !errors.Is(err, ErrWithheld) {
+	if _, err := small.GetPromptResult(&mcp.GetPromptResult{Description: "a long description"}, redact.Marker{}); !errors.Is(err, ErrWithheld) {
 		t.Errorf("prompt description over the limit: %v", err)
 	}
-	if _, err := small.ReadResourceResult(&mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "x://1", Text: "a long resource text"}}}, redact.Marker); !errors.Is(err, ErrWithheld) {
+	if _, err := small.ReadResourceResult(&mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "x://1", Text: "a long resource text"}}}, redact.Marker{}); !errors.Is(err, ErrWithheld) {
 		t.Errorf("resource text over the limit: %v", err)
 	}
 }
@@ -402,7 +458,7 @@ func TestErrors(t *testing.T) {
 	t.Run("plain error", func(t *testing.T) {
 		t.Parallel()
 		cause := fmt.Errorf("bad credentials for %s: %w", secret, context.DeadlineExceeded)
-		err := r.Error(cause, redact.Marker)
+		err := r.Error(cause, redact.Marker{})
 		if err.Error() != "bad credentials for "+marker+": context deadline exceeded" {
 			t.Errorf("message = %q", err)
 		}
@@ -421,7 +477,7 @@ func TestErrors(t *testing.T) {
 	t.Run("JSON-RPC error", func(t *testing.T) {
 		t.Parallel()
 		cause := &jsonrpc.Error{Code: -32001, Message: "token: " + secret, Data: json.RawMessage(`{"password":"wire-pw-1","n":1}`)}
-		err := r.Error(cause, redact.Marker)
+		err := r.Error(cause, redact.Marker{})
 		got, ok := err.(*jsonrpc.Error) //nolint:errorlint // the direct type is the contract
 		if !ok {
 			t.Fatalf("got %T, want *jsonrpc.Error", err)
@@ -437,7 +493,7 @@ func TestErrors(t *testing.T) {
 	t.Run("wrapped JSON-RPC error", func(t *testing.T) {
 		t.Parallel()
 		inner := &jsonrpc.Error{Code: -32002, Message: "inner " + secret}
-		err := r.Error(fmt.Errorf("call failed: %w", inner), redact.Marker)
+		err := r.Error(fmt.Errorf("call failed: %w", inner), redact.Marker{})
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("message = %q", err)
 		}
@@ -450,10 +506,23 @@ func TestErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("JSON-RPC error behind a message that hides it", func(t *testing.T) {
+		t.Parallel()
+		inner := &jsonrpc.Error{Code: -32003, Message: "inner " + secret}
+		err := r.Error(hidingError{inner}, redact.Marker{})
+		var wireErr *jsonrpc.Error
+		if !errors.As(err, &wireErr) || wireErr.Code != -32003 || strings.Contains(wireErr.Message, secret) {
+			t.Errorf("errors.As found %+v", wireErr)
+		}
+		if err.Error() != "call failed" {
+			t.Errorf("message = %q", err)
+		}
+	})
+
 	t.Run("JSON-RPC data that is not JSON is dropped", func(t *testing.T) {
 		t.Parallel()
 		cause := &jsonrpc.Error{Code: 1, Message: "m", Data: json.RawMessage(`not json ` + secret)}
-		got := r.Error(cause, redact.Marker).(*jsonrpc.Error) //nolint:errorlint,forcetypeassert // the direct type is the contract
+		got := r.Error(cause, redact.Marker{}).(*jsonrpc.Error) //nolint:errorlint,forcetypeassert // the direct type is the contract
 		if got.Data != nil || got.Message != "m" {
 			t.Errorf("error = %+v", got)
 		}
@@ -462,10 +531,10 @@ func TestErrors(t *testing.T) {
 	t.Run("nothing found", func(t *testing.T) {
 		t.Parallel()
 		cause := fmt.Errorf("not found: %w", context.Canceled)
-		if err := r.Error(cause, redact.Marker); err != cause { //nolint:errorlint // identity is the contract
+		if err := r.Error(cause, redact.Marker{}); err != cause { //nolint:errorlint // identity is the contract
 			t.Errorf("got %v, want the same error", err)
 		}
-		if r.Error(nil, redact.Marker) != nil {
+		if r.Error(nil, redact.Marker{}) != nil {
 			t.Error("nil error redacted to non-nil")
 		}
 	})
@@ -476,11 +545,17 @@ func TestErrors(t *testing.T) {
 		if !errors.Is(err, ErrWithheld) || strings.Contains(err.Error(), secret) {
 			t.Errorf("err = %v", err)
 		}
-		if err := newRedactor(t, 4).Error(errors.New("a long message"), redact.Marker); !errors.Is(err, ErrWithheld) {
+		if err := newRedactor(t, 4).Error(errors.New("a long message"), redact.Marker{}); !errors.Is(err, ErrWithheld) {
 			t.Errorf("message over the limit: %v", err)
 		}
 	})
 }
+
+// hidingError wraps an error without repeating its message.
+type hidingError struct{ cause error }
+
+func (e hidingError) Error() string { return "call failed" }
+func (e hidingError) Unwrap() error { return e.cause }
 
 func TestTextMIMEType(t *testing.T) {
 	t.Parallel()

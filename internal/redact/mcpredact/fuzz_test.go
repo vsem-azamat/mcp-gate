@@ -10,7 +10,8 @@ import (
 )
 
 // FuzzCallToolResult decodes arbitrary bytes as an MCP client would and checks that every
-// result the SDK accepts redacts without error and re-encodes.
+// result the SDK accepts and can encode again redacts without error (or is withheld when it
+// must be), leaves its input unchanged and re-encodes.
 func FuzzCallToolResult(f *testing.F) {
 	for _, seed := range []string{
 		`{"content":[]}`,
@@ -30,12 +31,34 @@ func FuzzCallToolResult(f *testing.F) {
 		if json.Unmarshal(data, &res) != nil {
 			return
 		}
-		got, err := r.CallToolResult(&res, redact.Marker)
+		before, err := json.Marshal(&res)
+		if err != nil {
+			return // the SDK decodes some results it cannot encode again
+		}
+		got, err := r.CallToolResult(&res, redact.Marker{})
+		if len(res.InputRequests) > 0 || res.RequestState != "" || hasLargeTextBlob(&res) {
+			if err == nil {
+				t.Fatal("a result that must be withheld was redacted")
+			}
+			return
+		}
 		if err != nil {
 			t.Fatalf("decoded result failed: %v", err)
+		}
+		if after, _ := json.Marshal(&res); string(after) != string(before) {
+			t.Fatal("the input was modified")
 		}
 		if _, err := json.Marshal(got); err != nil {
 			t.Fatalf("redacted result does not encode: %v", err)
 		}
 	})
+}
+
+func hasLargeTextBlob(res *mcp.CallToolResult) bool {
+	for _, c := range res.Content {
+		if e, ok := c.(*mcp.EmbeddedResource); ok && e.Resource != nil && len(e.Resource.Blob) > MaxBlobBytes && textMIMEType(e.Resource.MIMEType) {
+			return true
+		}
+	}
+	return false
 }

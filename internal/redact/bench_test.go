@@ -25,7 +25,7 @@ func benchmarkRedactString(b *testing.B, opts Options, text string) {
 	b.SetBytes(int64(len(text)))
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = e.RedactString(text, Marker)
+		_ = e.RedactString(text, Marker{})
 	}
 }
 
