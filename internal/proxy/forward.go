@@ -270,6 +270,8 @@ func downstreamMeta(meta mcp.Meta, forward []string) mcp.Meta {
 	var out mcp.Meta
 	for _, k := range forward {
 		v, ok := meta[k]
+		// Config validation already refuses these; checked again so that no caller can pass the
+		// client's own.
 		if !ok || k == "progressToken" || config.ReservedMetaKey(k) {
 			continue
 		}

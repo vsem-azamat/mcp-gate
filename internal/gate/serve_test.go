@@ -139,6 +139,15 @@ func TestForwardMeta(t *testing.T) {
 			t.Errorf("%s: the server got _meta %v, want %v", name, meta, want)
 		}
 	}
+	// Without a progress token, a server that lists nothing gets no _meta at all.
+	cs := r.connect(t, "unlisted", clientOpts{version: "2026-07-28"})
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "meta", Meta: mcp.Meta{"example.com/trace": "abc"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := textOf(t, res); got != "null" && got != "{}" {
+		t.Errorf("unlisted, no progress: the server got _meta %s", got)
+	}
 }
 
 // TestCancellation pins down what a client that gives up does to the downstream call. A

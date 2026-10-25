@@ -4,9 +4,9 @@
 // A Mirror keeps the last catalog it listed, filtered by the server's policy, registered on its
 // *mcp.Server; a restart or a failed listing leaves it in place. It resyncs on every new session
 // and on list-changed notifications, and changes only the entries that differ. Calls go through
-// the server's supervisor with a downstream _meta built from an allow-list, progress remapped to
-// the upstream request, and results redacted, failing closed. Every call is logged as one audit
-// line.
+// the server's supervisor with a downstream _meta holding only the keys in the server's
+// forwardMeta, progress remapped to the upstream request, and results redacted, failing closed.
+// Every call is logged as one audit line.
 package proxy
 
 import (

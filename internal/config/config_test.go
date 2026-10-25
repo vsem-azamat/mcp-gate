@@ -150,6 +150,7 @@ func TestServingErrors(t *testing.T) {
 		{"bad level", "version: 1\nlogLevel: loud\nauth: {tokens: {a: s}}\n" + srv, "logLevel: must be one of"},
 		{"zero grace", "version: 1\nstartupGracePeriod: 0s\nauth: {tokens: {a: s}}\n" + srv, "startupGracePeriod: must be positive"},
 		{"empty meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: ['']\n", "servers.a.forwardMeta[0]: cannot be empty"},
+		{"blank meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: ['  ']\n", "servers.a.forwardMeta[0]: cannot be empty"},
 		{"duplicate meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [x/a, x/a]\n", "servers.a.forwardMeta[1]: is listed twice"},
 		{"progress token", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [progressToken]\n", "servers.a.forwardMeta[0]: is a key mcp-gate sets itself"},
 		{"reserved meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [io.modelcontextprotocol/clientInfo]\n", "servers.a.forwardMeta[0]: is a key mcp-gate sets itself"},
