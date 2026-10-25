@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache-dependency-path: "**/go.sum"
+          cache: false # this job holds a write token; it neither reads nor writes a shared cache
       - name: Test
         run: make test
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0

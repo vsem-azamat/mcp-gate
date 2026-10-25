@@ -1,14 +1,28 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directories:
-      - /
-      - /tools
-      - /tools/lint
+    directory: /
     schedule:
       interval: weekly
     groups:
       go:
+        patterns: ["*"]
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # Every requirement of the tool modules is indirect, and Dependabot updates only direct
+  # dependencies by default, so all dependency types are allowed here.
+  - package-ecosystem: gomod
+    directories:
+      - /tools
+      - /tools/lint
+    allow:
+      - dependency-type: all
+    schedule:
+      interval: weekly
+    groups:
+      tools:
         patterns: ["*"]
     commit-message:
       prefix: chore

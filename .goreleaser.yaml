@@ -23,9 +23,21 @@ archives:
   - id: mcp-gate
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # fixed file times and owners, so the same commit gives the same archives and checksums
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+      owner: root
+      group: root
+      mode: 0755
     files:
-      - LICENSE
-      - README.md
+      - src: LICENSE
+        info: &file-info
+          mtime: "{{ .CommitDate }}"
+          owner: root
+          group: root
+          mode: 0644
+      - src: README.md
+        info: *file-info
 
 checksum:
   name_template: "checksums.txt"
