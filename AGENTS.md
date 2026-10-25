@@ -56,8 +56,11 @@ This repository is public. Before every commit and PR, check that nothing privat
 
 | Path | Contents |
 | --- | --- |
-| `cmd/mcp-gate/` | The `mcp-gate` binary |
+| `cmd/mcp-gate/` | The `mcp-gate` binary: subcommands, flags, environment |
+| `internal/compare/` | Catalog reading, normalisation, diff and snapshots for `mcp-gate compare` |
+| `internal/testkit/` | Fake MCP servers for tests |
 | `internal/version/` | Build version and commit |
+| `openspec/specs/` | Behavior specifications, one directory per capability |
 | [`docs/`](docs/README.md) | Engineering documentation |
 | `scripts/` | Repository checks run by `make repo` |
 | `.githooks/` | Versioned git hooks, enabled by `make hooks` |

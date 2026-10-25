@@ -11,10 +11,12 @@ linters:
     - bodyclose
     - contextcheck
     - copyloopvar
+    - depguard
     - durationcheck
     - errchkjson
     - errorlint
     - exhaustive
+    - forbidigo
     - forcetypeassert
     - gosec
     - intrange
@@ -32,6 +34,23 @@ linters:
     - usetesting
     - wastedassign
   settings:
+    depguard:
+      rules:
+        mcp-library:
+          list-mode: lax
+          deny:
+            - pkg: github.com/mark3labs/mcp-go
+              desc: github.com/modelcontextprotocol/go-sdk is the only MCP library
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^fmt\.Print(f|ln)?$
+          msg: write to an io.Writer; only cmd/ prints
+        - pattern: ^os\.(Getenv|LookupEnv|Environ)$
+          msg: only cmd/ reads the environment; pass values in
+        - pattern: ^log\.
+          pkg: ^log$
+          msg: use log/slog, not the standard log package
     gosec:
       excludes:
         - G104 # unchecked errors: errcheck reports these
@@ -65,6 +84,10 @@ linters:
       # Test helpers keep explicit arguments so call sites read like the scenario.
       - path: _test\.go
         linters: [unparam]
+      # The command is where output is printed and the environment is read.
+      - path: ^cmd/
+        linters: [forbidigo]
+        text: (fmt\.Print|os\.(Getenv|LookupEnv|Environ))
 
 formatters:
   enable:
