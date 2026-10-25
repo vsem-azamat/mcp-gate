@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Fast checks on what is about to be committed: Go formatting of the staged Go files, editorconfig
+# rules on the staged files, and the repository policy (forbidden files, action pins, hook modes).
+# The full checks run in pre-push and in CI. Install with `make hooks`.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+mapfile -d '' staged < <(git diff --cached --name-only --diff-filter=ACMR -z)
+[ "${#staged[@]}" -gt 0 ] || exit 0
+fail=0
+
+# Formatting is checked on the staged content, not the working tree, and nothing is rewritten.
+unformatted=()
+for f in "${staged[@]}"; do
+  [[ "$f" == *.go ]] || continue
+  want=$(git show ":$f" | go tool -modfile=tools/lint/go.mod golangci-lint fmt --stdin) || {
+    echo "pre-commit: $f: could not be formatted (syntax error?)" >&2
+    fail=1
+    continue
+  }
+  [ "$want" = "$(git show ":$f")" ] || unformatted+=("$f")
+done
+if [ "${#unformatted[@]}" -gt 0 ]; then
+  printf 'pre-commit: not formatted: %s\n' "${unformatted[@]}" >&2
+  echo "pre-commit: run make fmt and stage the result" >&2
+  fail=1
+fi
+
+# editorconfig-checker reads the working tree, which matches the index unless a file is
+# partially staged.
+go tool -modfile=tools/go.mod editorconfig-checker -- "${staged[@]}" || {
+  echo "pre-commit: fix the editorconfig findings above" >&2
+  fail=1
+}
+
+scripts/repo-policy-check.sh >/dev/null || fail=1
+
+exit "$fail"
