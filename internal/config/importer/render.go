@@ -119,6 +119,10 @@ func (s *server) node(d *document) *yaml.Node {
 		if len(h.Headers) > 0 {
 			add(m, "headers", strMap(h.Headers), "")
 		}
+		if a := h.OAuth; a != nil {
+			add(m, "oauth", oauthNode(a), "")
+			m.Content[len(m.Content)-2].HeadComment = "# log in with: mcp-gate auth login <config> " + s.name
+		}
 		add(n, "http", m, "")
 	}
 	add(n, "callTimeout", str(config.FormatDuration(s.timeout)), s.tNote)
@@ -244,4 +248,25 @@ func nonEmpty(s string) []string {
 		return nil
 	}
 	return []string{s}
+}
+
+func oauthNode(a *config.OAuth) *yaml.Node {
+	m := mapping()
+	for _, kv := range [][2]string{
+		{"clientID", a.ClientID},
+		{"clientSecret", a.ClientSecret},
+		{"redirectURL", a.RedirectURL},
+		{"authServerMetadataURL", a.AuthServerMetadataURL},
+	} {
+		if kv[1] != "" {
+			add(m, kv[0], str(kv[1]), "")
+		}
+	}
+	if len(a.Scopes) > 0 {
+		add(m, "scopes", strList(a.Scopes), "")
+	}
+	if len(m.Content) == 0 {
+		m.Style = yaml.FlowStyle
+	}
+	return m
 }

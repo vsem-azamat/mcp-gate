@@ -30,6 +30,7 @@ Commands:
   check      validate a config, and with -connect connect to its servers
   compare    compare the catalogs that MCP endpoints or snapshots serve
   import     convert an mcp-proxy config.json into an mcp-gate config
+  auth       log in to, and out of, the servers that use OAuth
   help       show this help
   version    print the version and commit
 `
@@ -59,6 +60,8 @@ func run(ctx context.Context, args []string, env lookupEnv, stdout, stderr io.Wr
 		return runCompare(ctx, args[1:], env, stdout, stderr)
 	case "import":
 		return runImport(args[1:], stdout, stderr)
+	case "auth":
+		return runAuth(ctx, args[1:], env, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		_, _ = io.WriteString(stdout, usage)
 		return exitOK

@@ -22,6 +22,8 @@ type Readiness struct {
 	Mounted int
 	// Unhealthy names, sorted, the mounted servers that lost their connection.
 	Unhealthy []string
+	// NeedsLogin names, sorted, the servers waiting for an OAuth login, mounted or not.
+	NeedsLogin []string
 }
 
 type healthBody struct {
@@ -29,6 +31,7 @@ type healthBody struct {
 	ServerCount int      `json:"serverCount"`
 	Status      string   `json:"status"`
 	Unhealthy   []string `json:"unhealthy,omitempty"`
+	NeedsLogin  []string `json:"needsLogin,omitempty"`
 	Version     string   `json:"version"`
 }
 
@@ -36,13 +39,17 @@ type healthBody struct {
 // status; it is registered for GET, so the mux answers other methods with 405. /_healthz is 200
 // while the process serves. /_readyz is 503 "initializing" before startup completes, 503
 // "degraded" with the unhealthy servers named, 503 "unavailable" when servers are enabled but
-// none is mounted, and 200 "ok" otherwise.
+// none is mounted, 503 "degraded" while a server waits for an OAuth login, and 200 "ok"
+// otherwise. The servers waiting for a login are named in every answer after startup.
 func HealthHandler(info HealthInfo, readiness func() Readiness) http.HandlerFunc {
 	base := healthBody{Name: info.Name, ServerCount: info.ServerCount, Status: "ok", Version: info.Version}
 	return func(w http.ResponseWriter, r *http.Request) {
 		code, body := http.StatusOK, base
 		if readiness != nil {
 			rep := readiness()
+			if rep.Started {
+				body.NeedsLogin = rep.NeedsLogin
+			}
 			switch {
 			case !rep.Started:
 				code, body.Status = http.StatusServiceUnavailable, "initializing"
@@ -50,6 +57,8 @@ func HealthHandler(info HealthInfo, readiness func() Readiness) http.HandlerFunc
 				code, body.Status, body.Unhealthy = http.StatusServiceUnavailable, "degraded", rep.Unhealthy
 			case rep.Mounted == 0 && info.ServerCount > 0:
 				code, body.Status = http.StatusServiceUnavailable, "unavailable"
+			case len(rep.NeedsLogin) > 0:
+				code, body.Status = http.StatusServiceUnavailable, "degraded"
 			}
 		}
 		if r.Method == http.MethodHead {

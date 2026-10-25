@@ -26,10 +26,13 @@ const (
 	MaxMaxMessageBytes = 1 << 30
 	MinProbeInterval   = time.Second
 	MinMaxBackoff      = time.Second
-	MaxEscrowEntries   = 100000
-	MinFileMaxBytes    = 1 << 10
-	MaxFileMaxBytes    = 1 << 30
-	maxNameLen         = 64
+	// MaxMaxBackoff keeps connect attempts (backoff plus the 60 s connect timeout) within the
+	// 10 minutes in which the OAuth client counts a server's 401s as one run.
+	MaxMaxBackoff    = 5 * time.Minute
+	MaxEscrowEntries = 100000
+	MinFileMaxBytes  = 1 << 10
+	MaxFileMaxBytes  = 1 << 30
+	maxNameLen       = 64
 )
 
 // ServerNameRE is the form of a server name: it becomes the path /<name>/mcp.
@@ -213,8 +216,8 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	if s.ProbeInterval != nil && s.ProbeInterval.D() < MinProbeInterval {
 		add(path+".probeInterval", "must be at least %s", MinProbeInterval)
 	}
-	if s.Restart.MaxBackoff != nil && s.Restart.MaxBackoff.D() < MinMaxBackoff {
-		add(path+".restart.maxBackoff", "must be at least %s", MinMaxBackoff)
+	if s.Restart.MaxBackoff != nil && (s.Restart.MaxBackoff.D() < MinMaxBackoff || s.Restart.MaxBackoff.D() > MaxMaxBackoff) {
+		add(path+".restart.maxBackoff", "must be between %s and %s", FormatDuration(MinMaxBackoff), FormatDuration(MaxMaxBackoff))
 	}
 	s.Tools.validate(path+".tools", add)
 	s.Prompts.validate(path+".prompts", add)
@@ -312,6 +315,70 @@ func (h *HTTP) validate(path string, add func(path, format string, args ...any))
 		}
 		seen[canonical] = true
 	}
+	if h.OAuth != nil {
+		if _, ok := seen["Authorization"]; ok {
+			add(path+".headers.Authorization", "cannot be set with oauth, which sets it")
+		}
+		if err := CheckURL(h.URL); err == nil && !SecureURL(h.URL) {
+			add(path+".url", "must be an https URL, or http on a loopback address, with oauth")
+		}
+		h.OAuth.validate(path+".oauth", add)
+	}
+}
+
+func (o *OAuth) validate(path string, add func(path, format string, args ...any)) {
+	if o.ClientSecret != "" && o.ClientID == "" {
+		add(path+".clientSecret", "needs clientID")
+	}
+	if o.ClientID != "" && strings.ContainsFunc(o.ClientID, unicode.IsControl) {
+		add(path+".clientID", "contains a control character")
+	}
+	if o.RedirectURL != "" {
+		if err := CheckURL(o.RedirectURL); err != nil {
+			add(path+".redirectURL", "%v", err)
+		} else if !SecureURL(o.RedirectURL) {
+			add(path+".redirectURL", "must be an https URL, or http on a loopback address")
+		}
+	}
+	if o.AuthServerMetadataURL != "" {
+		if err := CheckURL(o.AuthServerMetadataURL); err != nil {
+			add(path+".authServerMetadataURL", "%v", err)
+		} else if !SecureURL(o.AuthServerMetadataURL) {
+			add(path+".authServerMetadataURL", "must be an https URL, or http on a loopback address")
+		}
+	}
+	seen := map[string]bool{}
+	for i, sc := range o.Scopes {
+		p := fmt.Sprintf("%s.scopes[%d]", path, i)
+		switch {
+		case sc == "" || strings.ContainsFunc(sc, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }):
+			add(p, "must be a scope token: printable ASCII without spaces, quotes or backslashes")
+		case seen[sc]:
+			add(p, "is listed twice")
+		}
+		seen[sc] = true
+	}
+}
+
+// SecureURL reports whether a valid absolute URL is https, or http on a loopback address, and
+// so may carry an OAuth credential.
+func SecureURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		h := u.Hostname()
+		if strings.EqualFold(h, "localhost") {
+			return true
+		}
+		ip, err := netip.ParseAddr(h)
+		return err == nil && ip.IsLoopback()
+	}
+	return false
 }
 
 // CheckURL accepts an absolute http(s) URL without user information or a fragment. Its errors

@@ -135,21 +135,53 @@ func TestNameTokens(t *testing.T) {
 	}
 }
 
+// unimplementedDoc holds keys this build does not implement.
+const unimplementedDoc = `{
+  "mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${HUB_TOKEN_A}"]}},
+  "mcpServers": {
+    "files": {"url": "https://files.example.com/mcp", "transportType": "streamable-http",
+      "oauth": {"clientId": "c", "pkceDisabled": true, "tokenUrl": "https://auth.example.com/token"}},
+    "legacy": {"url": "https://legacy.example.com/sse", "oauth": {}}
+  }
+}`
+
+func TestImportProductionShape(t *testing.T) {
+	t.Parallel()
+	res, err := importFile(t, "production-shape.json", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "production-shape.yaml", res.YAML)
+	c, err := config.Parse(res.YAML, anyValue)
+	if err != nil {
+		t.Fatalf("the import does not load: %v", err)
+	}
+	if o := c.Servers["mail"].HTTP.OAuth; o == nil || o.RedirectURL != config.DefaultRedirectURL || o.ClientID != "" {
+		t.Errorf("mail oauth = %+v", o)
+	}
+	o := c.Servers["docs"].HTTP.OAuth
+	if o == nil || o.AuthServerMetadataURL != "https://auth.example.com/.well-known/oauth-authorization-server/tenant" ||
+		!slices.Equal(o.Scopes, []string{"docs.read", "offline_access"}) {
+		t.Errorf("docs oauth = %+v", o)
+	}
+}
+
 func TestImportUnimplemented(t *testing.T) {
 	t.Parallel()
-	_, err := importFile(t, "production-shape.json", Options{})
+	_, err := Import([]byte(unimplementedDoc), Options{})
 	var unimpl *UnimplementedError
 	if !errors.As(err, &unimpl) {
 		t.Fatalf("err = %v, want an UnimplementedError", err)
 	}
 	want := []string{
+		"mcpServers.files.oauth.pkceDisabled (true): mcp-gate always uses PKCE",
+		"mcpServers.files.oauth.tokenUrl",
 		"mcpServers.legacy (sse transport)",
-		"mcpServers.mail.oauth",
 	}
 	if !slices.Equal(unimpl.Keys, want) {
 		t.Errorf("unimplemented =\n  %s\nwant\n  %s", strings.Join(unimpl.Keys, "\n  "), strings.Join(want, "\n  "))
 	}
-	for _, secret := range []string{"HUB_TOKEN", "files.example.com", "download_file", "read_file"} {
+	for _, secret := range []string{"HUB_TOKEN", "auth.example.com", "files.example.com"} {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("the error quotes a value (%s): %v", secret, err)
 		}
@@ -158,13 +190,12 @@ func TestImportUnimplemented(t *testing.T) {
 
 func TestImportPartial(t *testing.T) {
 	t.Parallel()
-	res, err := importFile(t, "production-shape.json", Options{Partial: true})
+	res, err := Import([]byte(unimplementedDoc), Options{Partial: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	golden(t, "production-shape.yaml", res.YAML)
-	if len(res.Unimplemented) == 0 {
-		t.Error("no unimplemented keys reported")
+	if len(res.Unimplemented) != 3 || !strings.Contains(string(res.YAML), config.PartialMarker+": mcpServers.files.oauth.tokenUrl") {
+		t.Errorf("unimplemented keys = %v\n%s", res.Unimplemented, res.YAML)
 	}
 	if _, err := config.Parse(res.YAML, anyValue); err == nil || !strings.Contains(err.Error(), "--partial") {
 		t.Errorf("config.Parse of a partial import: err = %v, want a rejection", err)
@@ -178,6 +209,50 @@ func TestImportPartial(t *testing.T) {
 	}
 	if _, err := config.Parse([]byte(strings.Join(kept, "\n")), anyValue); err != nil {
 		t.Errorf("the accepted partial import does not load: %v", err)
+	}
+}
+
+func TestImportOAuth(t *testing.T) {
+	t.Parallel()
+	doc := `{"mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${T_A}"]}},
+  "mcpServers": {
+    "a": {"url": "https://a.example.com/mcp", "transportType": "streamable-http",
+      "oauth": {"ClientID": "$CLIENT_ID", "clientSecret": "written-secret", "redirectUri": "https://app.example.com/cb", "pkceDisabled": false}},
+    "s": {"command": "x", "oauth": {}}
+  }}`
+	res, err := Import([]byte(doc), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Parse(res.YAML, anyValue)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, res.YAML)
+	}
+	o := c.Servers["a"].HTTP.OAuth
+	if o.ClientID != "value-CLIENT_ID" || o.ClientSecret != "written-secret" || o.RedirectURL != "https://app.example.com/cb" {
+		t.Errorf("oauth = %+v", o)
+	}
+	warnings := strings.Join(res.Warnings, "\n")
+	for _, want := range []string{"mcpServers.a.oauth.clientSecret is written in the file", "mcpServers.s.oauth is dropped"} {
+		if !strings.Contains(warnings, want) {
+			t.Errorf("warnings lack %q:\n%s", want, warnings)
+		}
+	}
+	if strings.Contains(warnings, "written-secret") {
+		t.Error("a warning quotes the secret")
+	}
+	for name, bad := range map[string]string{ //nolint:gosec // made-up config fragments
+		"plain http":    `"url": "http://a.example.com/mcp", "transportType": "streamable-http", "oauth": {}`,
+		"bad redirect":  `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "oauth": {"redirectUri": "http://app.example.com/cb"}`,
+		"not an object": `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "oauth": true`,
+		"authorization": `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "headers": {"authorization": "x"}, "oauth": {}`,
+		"secret alone":  `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "oauth": {"clientSecret": "x"}`,
+		"spaced scope":  `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "oauth": {"scopes": ["a b"]}`,
+	} {
+		_, err := Import([]byte(`{"mcpProxy": {"type": "streamable-http"}, "mcpServers": {"a": {`+bad+`}}}`), Options{})
+		if err == nil {
+			t.Errorf("%s: imported", name)
+		}
 	}
 }
 
@@ -285,5 +360,25 @@ func TestImportEscrowAndFiles(t *testing.T) {
 		if !strings.Contains(warnings, want) {
 			t.Errorf("warnings lack %q:\n%s", want, warnings)
 		}
+	}
+}
+
+func TestImportLowersReconnectInterval(t *testing.T) {
+	t.Parallel()
+	doc := `{"mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${T_A}"], "reconnectInterval": "1h"}},
+  "mcpServers": {"a": {"command": "x"}}}`
+	res, err := Import([]byte(doc), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Parse(res.YAML, anyValue)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, res.YAML)
+	}
+	if got := c.Servers["a"].Restart.MaxBackoff.D(); got != config.MaxMaxBackoff {
+		t.Errorf("maxBackoff = %v", got)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "mcpServers.a: the reconnect interval is lowered to the maximum of 5m") {
+		t.Errorf("warnings = %v", res.Warnings)
 	}
 }

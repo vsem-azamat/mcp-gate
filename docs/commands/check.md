@@ -22,7 +22,12 @@ A file written by `mcp-gate import -partial` is rejected until the keys it marks
 
 ## Connecting
 
-With `-connect`, check also starts every enabled server at once (stdio children included), waits up to `-timeout` (default 60s) for each, prints what it found and stops them. `-v` logs the supervisors and the children's stderr to stderr.
+With `-connect`, check also starts every enabled server at once (stdio children included), waits up to `-timeout` (default 60s) for each, prints what it found and stops them. `-v` logs the supervisors and the children's stderr to stderr. OAuth servers use the grants in `-state-dir` (default `$STATE_DIRECTORY`), as `serve` does, and may refresh them; one without a grant is reported with the login command:
+
+```console
+$ mcp-gate check -connect -state-dir /var/lib/mcp-gate gate.yaml
+mail: OAuth login required (not logged in): run mcp-gate auth login <config> mail
+```
 
 ```console
 $ mcp-gate check -connect gate.yaml

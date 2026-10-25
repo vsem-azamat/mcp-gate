@@ -110,7 +110,7 @@ const proxyConfig = `{
   "mcpProxy": {"name": "hub", "type": "streamable-http", "options": {"authTokens": ["${TOKEN_A}"], "redact": {"enabled": true, "escrowTTL": "1h"}}},
   "mcpServers": {
     "notes": {"command": "/usr/bin/env", "args": ["-u", "TOKEN_A", "notes-server"], "timeout": "90s"},
-    "shop": {"url": "https://shop.example.com/mcp", "transportType": "streamable-http", "oauth": {}}
+    "shop": {"url": "https://shop.example.com/mcp", "transportType": "streamable-http", "oauth": {"tokenUrl": "x"}}
   }
 }`
 
@@ -118,11 +118,11 @@ func TestImport(t *testing.T) {
 	t.Parallel()
 	path := writeFile(t, "config.json", proxyConfig)
 	r := runCmd(t, noEnv, "import", path)
-	if r.code != exitUsage || !strings.Contains(r.stderr, "mcpServers.shop.oauth") || r.stdout != "" {
+	if r.code != exitUsage || !strings.Contains(r.stderr, "mcpServers.shop.oauth.tokenUrl") || r.stdout != "" {
 		t.Errorf("import without -partial = %+v", r)
 	}
 	r = runCmd(t, noEnv, "import", "-partial", path)
-	if r.code != exitOK || !strings.Contains(r.stderr, "dropped, not implemented: mcpServers.shop.oauth") ||
+	if r.code != exitOK || !strings.Contains(r.stderr, "dropped, not implemented: mcpServers.shop.oauth.tokenUrl") ||
 		!strings.Contains(r.stdout, "command: notes-server") || !strings.Contains(r.stdout, "escrow:\n  ttl: 1h") ||
 		!strings.Contains(r.stdout, config.PartialMarker) {
 		t.Fatalf("import -partial = %+v", r)

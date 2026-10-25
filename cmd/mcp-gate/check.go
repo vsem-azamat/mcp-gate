@@ -18,6 +18,7 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/gate"
+	"github.com/vsem-azamat/mcp-gate/internal/oauth"
 	"github.com/vsem-azamat/mcp-gate/internal/procutil"
 	"github.com/vsem-azamat/mcp-gate/internal/version"
 )
@@ -48,6 +49,7 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 	connect := fs.Bool("connect", false, "also connect to every enabled server")
 	timeout := fs.Duration("timeout", defaultCheckTimeout, "with -connect: time allowed for each server to connect")
 	verbose := fs.Bool("v", false, "with -connect: log the supervisors and child stderr to stderr")
+	stateDir := fs.String("state-dir", defaultStateDir(env), "with -connect: the gate's state directory, which holds the OAuth grants (default $STATE_DIRECTORY)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
@@ -84,11 +86,11 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 	if *verbose {
 		logger = slog.New(slog.NewTextHandler(stderr, nil))
 	}
-	return connectAll(ctx, cfg, names, *timeout, logger, stdout)
+	return connectAll(ctx, cfg, names, oauth.NewStore(*stateDir), *timeout, logger, stdout)
 }
 
 // connectAll connects to every enabled server at once and prints one line per server.
-func connectAll(ctx context.Context, cfg *config.Config, names []string, timeout time.Duration, logger *slog.Logger, stdout io.Writer) int {
+func connectAll(ctx context.Context, cfg *config.Config, names []string, store *oauth.Store, timeout time.Duration, logger *slog.Logger, stdout io.Writer) int {
 	if err := procutil.SetNonDumpable(); err != nil {
 		logger.Warn("cannot make the process non-dumpable", "error", err)
 	}
@@ -108,7 +110,7 @@ func connectAll(ctx context.Context, cfg *config.Config, names []string, timeout
 			continue
 		}
 		wg.Go(func() {
-			line, ok := connectOne(ctx, cfg, name, s, timeout, logger)
+			line, ok := connectOne(ctx, cfg, name, s, store, timeout, logger)
 			mu.Lock()
 			lines[i], failed = line, failed || !ok
 			mu.Unlock()
@@ -124,8 +126,8 @@ func connectAll(ctx context.Context, cfg *config.Config, names []string, timeout
 	return exitOK
 }
 
-func connectOne(ctx context.Context, cfg *config.Config, name string, s *config.Server, timeout time.Duration, logger *slog.Logger) (string, bool) {
-	sup, err := downstream.New(gate.DownstreamOptions(cfg, name, s, parentEnviron(), version.Get().Version, logger))
+func connectOne(ctx context.Context, cfg *config.Config, name string, s *config.Server, store *oauth.Store, timeout time.Duration, logger *slog.Logger) (string, bool) {
+	sup, err := downstream.New(gate.DownstreamOptions(cfg, name, s, parentEnviron(), version.Get().Version, store, logger))
 	if err != nil {
 		return fmt.Sprintf("%s: failed: %v", name, err), false
 	}
@@ -138,9 +140,12 @@ func connectOne(ctx context.Context, cfg *config.Config, name string, s *config.
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err = sup.Wait(wctx, func(st downstream.Status) bool {
-		return st.State == downstream.Ready || st.State == downstream.Backoff
+		return st.State == downstream.Ready || st.State == downstream.Backoff || st.State == downstream.NeedsLogin
 	})
 	st := sup.Status()
+	if st.State == downstream.NeedsLogin {
+		return fmt.Sprintf("%s: %s", name, st.LastError), false
+	}
 	if err != nil || st.State != downstream.Ready {
 		reason := st.LastError
 		if reason == "" {

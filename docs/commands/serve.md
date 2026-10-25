@@ -11,7 +11,9 @@ mcp-gate serve -state-dir /var/lib/mcp-gate gate.yaml
 
 The config is validated as `check` does; an invalid one exits with status 2 before anything starts. Logs are JSON lines on stderr, at `logLevel` and above. SIGINT and SIGTERM shut the gate down: it stops accepting connections, gives calls in flight 10 seconds, and stops the servers. Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate cannot listen.
 
-`-state-dir` is where the gate keeps the protocol pins it learns (`pins.json`), so that a server that ignores `server/discover` does not cost the 5 second sub-deadline again after a restart. It defaults to the first directory of `$STATE_DIRECTORY`, which systemd sets for a unit with `StateDirectory=`; without one, pins last only while the process runs. Delete the file to make the gate try discover again.
+`-state-dir` is where the gate keeps the protocol pins it learns (`pins.json`), so that a server that ignores `server/discover` does not cost the 5 second sub-deadline again after a restart, and the OAuth grants (`oauth/<server>.json`, see [auth](auth.md)). It defaults to the first directory of `$STATE_DIRECTORY`, which systemd sets for a unit with `StateDirectory=`; without one, pins last only while the process runs and OAuth servers cannot log in. Delete `pins.json` to make the gate try discover again.
+
+An OAuth server without a usable grant is `needs-login`: it sends nothing to the server, its route answers 503 until it has connected once, and its calls fail. It picks up a login made with `mcp-gate auth login` at its next attempt, within `restart.maxBackoff`, without a restart.
 
 ## Clients
 
@@ -36,7 +38,7 @@ A route answers 503 with `Retry-After: 5` until its server has connected once. A
 | Path | Token | Answer |
 | --- | --- | --- |
 | `/_healthz` | none | 200 `ok` while the process serves |
-| `/_readyz` | none | 200 `ok`; 503 `initializing` during `startupGracePeriod`, `degraded` (with `unhealthy`) while a connected server is down, `unavailable` when no server ever connected |
+| `/_readyz` | none | 200 `ok`; 503 `initializing` during `startupGracePeriod`, `degraded` (with `unhealthy`) while a connected server is down or (with `needsLogin`) while a server needs an OAuth login, `unavailable` when no server ever connected |
 | `/_status` | an `admin.tokens` token | Per-server state, protocol version, pins, restarts, last error, PID and memory, catalog counts, call counts |
 
 ```console

@@ -337,9 +337,6 @@ func (im *importer) server(servers *object, name string, global *options) (*serv
 	if err != nil {
 		return nil, err
 	}
-	if _, ok, _ := o.get("oauth"); ok {
-		im.notImplemented(o.sub("oauth"))
-	}
 	switch transport {
 	case "stdio":
 		if !hasCommand || command == "" {
@@ -347,6 +344,9 @@ func (im *importer) server(servers *object, name string, global *options) (*serv
 		}
 		if err := im.stdio(o, s, command); err != nil {
 			return nil, err
+		}
+		if _, ok, _ := o.get("oauth"); ok {
+			im.warn("%s.oauth is dropped: mcp-proxy ignores oauth for stdio", o.path)
 		}
 		if hasTimeout && timeout > 0 && timeout < time.Millisecond {
 			s.tNote = "mcp-proxy discarded its sub-millisecond timeout, so it had none"
@@ -359,12 +359,16 @@ func (im *importer) server(servers *object, name string, global *options) (*serv
 		if err := im.http(o, s, url); err != nil {
 			return nil, err
 		}
+		if s.http.OAuth, err = im.oauth(o); err != nil {
+			return nil, err
+		}
 		if timeout > 0 && timeout < time.Millisecond {
 			return nil, fmt.Errorf("%s.timeout: is shorter than a millisecond; mcp-proxy rejects it too", o.path)
 		}
 	case "sse":
 		im.notImplemented(o.path + " (sse transport)")
 		_, _, _ = o.get("headers")
+		_, _, _ = o.get("oauth")
 		_, _, _ = o.get("options")
 		return nil, nil
 	default:
@@ -389,6 +393,11 @@ func (im *importer) server(servers *object, name string, global *options) (*serv
 	s.backoff = cmpOr(local.reconnectInterval, global.reconnectInterval)
 	s.probe = im.atLeast(s.probe, config.MinProbeInterval, o.path+": the ping interval")
 	s.backoff = im.atLeast(s.backoff, config.MinMaxBackoff, o.path+": the reconnect interval")
+	if s.backoff != nil && *s.backoff > config.MaxMaxBackoff {
+		im.warn("%s: the reconnect interval is lowered to the maximum of %s", o.path, config.FormatDuration(config.MaxMaxBackoff))
+		v := config.MaxMaxBackoff
+		s.backoff = &v
+	}
 	im.ignored(o)
 	return s, nil
 }
@@ -522,6 +531,89 @@ func (im *importer) http(o *object, s *server, url string) error {
 	}
 	s.http = &config.HTTP{URL: url, Headers: headers}
 	return nil
+}
+
+// oauth maps a server's oauth block. Keys mcp-gate does not implement fail the import, though
+// mcp-proxy ignored unknown ones: an OAuth setting silently lost could change whom the server
+// trusts.
+func (im *importer) oauth(o *object) (*config.OAuth, error) {
+	a, err := o.object("oauth")
+	if err != nil || a == nil {
+		return nil, err
+	}
+	out := &config.OAuth{}
+	for _, f := range []struct {
+		key string
+		to  *string
+	}{
+		{"clientId", &out.ClientID},
+		{"clientSecret", &out.ClientSecret},
+		{"redirectUri", &out.RedirectURL},
+		{"authServerMetadataUrl", &out.AuthServerMetadataURL},
+	} {
+		v, _, err := a.str(f.key)
+		if err != nil {
+			return nil, err
+		}
+		*f.to = convertVars(v, &im.warnings, a.sub(f.key))
+	}
+	if out.ClientSecret != "" && out.ClientID == "" {
+		return nil, fmt.Errorf("%s: clientSecret needs clientId", a.path)
+	}
+	if out.ClientSecret != "" && !strings.Contains(out.ClientSecret, "${") {
+		im.warn("%s.clientSecret is written in the file; move it to the environment and write ${VAR}", a.path)
+	}
+	if out.Scopes, err = a.strings("scopes"); err != nil {
+		return nil, err
+	}
+	if len(out.Scopes) == 0 {
+		out.Scopes = nil
+	}
+	for i, sc := range out.Scopes {
+		if sc == "" || strings.ContainsFunc(sc, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }) {
+			return nil, fmt.Errorf("%s[%d]: must be one scope, printable ASCII without spaces, quotes or backslashes", a.sub("scopes"), i)
+		}
+	}
+	for k := range o.m {
+		if strings.EqualFold(k, "headers") {
+			if h, _ := o.m[k].(map[string]any); h != nil {
+				for name := range h {
+					if strings.EqualFold(name, "Authorization") {
+						return nil, fmt.Errorf("%s.headers.%s: cannot be kept with oauth, which sets it", o.path, name)
+					}
+				}
+			}
+		}
+	}
+	if off, _, err := a.boolean("pkceDisabled"); err != nil {
+		return nil, err
+	} else if off {
+		im.notImplemented(a.sub("pkceDisabled") + " (true): mcp-gate always uses PKCE")
+	}
+	for _, k := range []struct{ key, what string }{{"redirectUri", out.RedirectURL}, {"authServerMetadataUrl", out.AuthServerMetadataURL}} {
+		if k.what == "" || strings.Contains(k.what, "$") {
+			continue
+		}
+		if err := config.CheckURL(k.what); err != nil {
+			return nil, fmt.Errorf("%s: %w", a.sub(k.key), err)
+		}
+		if !config.SecureURL(k.what) {
+			return nil, fmt.Errorf("%s: must be an https URL, or http on a loopback address", a.sub(k.key))
+		}
+	}
+	if u := o.sub("url"); !config.SecureURL(urlOf(o)) && !strings.Contains(urlOf(o), "$") {
+		return nil, fmt.Errorf("%s: must be an https URL, or http on a loopback address, with oauth", u)
+	}
+	for _, k := range a.rest() {
+		im.notImplemented(a.sub(k))
+	}
+	return out, nil
+}
+
+// urlOf returns a server's url, which http has checked.
+func urlOf(o *object) string {
+	v, _, _ := o.str("url")
+	return v
 }
 
 var (

@@ -43,3 +43,5 @@ The SDK's streamable client transport gets an `http.Client` whose transport wrap
 - an event stream passes through one event at a time; an event over the limit is dropped and, when it is the response to the call that opened the stream, replaced by an error event. The SDK's own `MaxEventSize` is set slightly higher, as a backstop.
 
 Compressed responses are decoded by the Go transport before the limits apply; `Accept-Encoding` cannot be configured.
+
+A server with an `oauth` block gets an `oauth.Source` as the transport's `OAuthHandler` (see [OAuth](oauth.md)). Before each connect the supervisor asks it for a usable grant; without one, the connect fails with a `LoginRequiredError`, the state becomes `needs-login`, the error is logged once, and the loop keeps trying after the backoff without counting restarts or leaving `needs-login` while the grant is unusable. A call that fails while the grant is unusable kicks the watch loop into a probe once the call has ended, and a failed probe with the grant unusable closes the session at once.

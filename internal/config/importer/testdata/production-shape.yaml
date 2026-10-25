@@ -7,7 +7,6 @@
 # mcp-proxy passed each request's _meta to the server as it was; mcp-gate passes only the keys a server lists in forwardMeta, none by default.
 # logEnabled also turned on the MCP logging capability; mcp-gate does not offer it, and logs requests only.
 # stdio servers no longer inherit the whole environment: only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
-# NOT IMPLEMENTED IN THIS BUILD: mcpServers.legacy (sse transport)
 version: 1
 name: hub-example
 listen:
@@ -35,6 +34,22 @@ servers:
       requests: true # mcp-proxy logEnabled
     redact:
       ru: true # mcp-proxy always ran the Russian rules
+  docs:
+    http:
+      url: https://docs.example.com/mcp
+      # log in with: mcp-gate auth login <config> docs
+      oauth:
+        authServerMetadataURL: https://auth.example.com/.well-known/oauth-authorization-server/tenant
+        scopes:
+          - docs.read
+          - offline_access
+    callTimeout: 1m
+    restart:
+      maxBackoff: 30s # mcp-proxy reconnectInterval
+    log:
+      requests: true # mcp-proxy logEnabled
+    redact:
+      ru: true # mcp-proxy always ran the Russian rules
   files:
     http:
       url: https://files.example.com/mcp
@@ -51,10 +66,11 @@ servers:
         tools: [download_file]
         roots: [/srv/downloads]
         maxBytes: 10MiB
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.oauth
   mail:
     http:
       url: https://mail.example.com/mcp
+      # log in with: mcp-gate auth login <config> mail
+      oauth: {}
     callTimeout: 2m
     restart:
       maxBackoff: 30s # mcp-proxy reconnectInterval

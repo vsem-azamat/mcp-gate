@@ -8,7 +8,7 @@
 
 ### Requirement: serve
 
-`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid, and also when `MCP_HUB_ESCROW_KEY_SHA256` is set to a value that is not a hex SHA-256. Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server, listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. On SIGINT or SIGTERM it SHALL stop accepting connections, end the `subscriptions/listen` streams, give calls in flight up to 10 seconds (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
+`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid, and also when `MCP_HUB_ESCROW_KEY_SHA256` is set to a value that is not a hex SHA-256. Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server (OAuth servers with the grants in the `oauth` directory of the state directory, see the oauth spec), listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. On SIGINT or SIGTERM it SHALL stop accepting connections, end the `subscriptions/listen` streams, give calls in flight up to 10 seconds (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
 
 #### Scenario: Shutdown with a listening client
 
@@ -143,12 +143,17 @@ Every forwarded call, and every tool call or prompt get the SDK refuses before i
 
 ### Requirement: Health
 
-`GET` and `HEAD` of `/_healthz` and `/_readyz` SHALL need no token and answer on any Host; other methods SHALL get 405. GET SHALL return a JSON object with `name` (the config's `name`), `serverCount` (the enabled servers), `status`, `unhealthy` (only when not empty) and `version` (the build's), HEAD only the status code. `/_healthz` SHALL be 200 `ok` while the process serves. `/_readyz` SHALL be 503 `initializing` until every enabled server has had its catalog listed or `startupGracePeriod` has passed since start; then 503 `degraded`, naming them sorted, while any server whose catalog was listed is in a state other than `ready` and `degraded`; 503 `unavailable` when servers are enabled but none was ever listed; and 200 `ok` otherwise.
+`GET` and `HEAD` of `/_healthz` and `/_readyz` SHALL need no token and answer on any Host; other methods SHALL get 405. GET SHALL return a JSON object with `name` (the config's `name`), `serverCount` (the enabled servers), `status`, `unhealthy` (only when not empty), `needsLogin` (only when not empty) and `version` (the build's), HEAD only the status code. `/_healthz` SHALL be 200 `ok` while the process serves. `/_readyz` SHALL be 503 `initializing` until every enabled server has had its catalog listed or is in `needs-login`, or `startupGracePeriod` has passed since start; then 503 `degraded`, naming them sorted in `unhealthy`, while any server whose catalog was listed is in a state other than `ready` and `degraded`; 503 `unavailable` when servers are enabled but none was ever listed; 503 `degraded` while any server is in `needs-login`; and 200 `ok` otherwise. After startup, `needsLogin` SHALL name, sorted, every server in `needs-login`, whether its catalog was listed or not.
 
 #### Scenario: Startup and degradation
 
 - **WHEN** a gate with a good server, a failing server and an HTTP server starts with a 1 second grace period, and the HTTP server later goes down and comes back
 - **THEN** `/_readyz` is `initializing`, then `ok` after the grace period, then `degraded` naming the HTTP server, then `ok` again, while `/_healthz` is `ok` throughout
+
+#### Scenario: Server waiting for a login
+
+- **WHEN** a gate has a stdio server and an OAuth server without a grant, with a 30 second grace period
+- **THEN** `/_readyz` is soon 503 `degraded` with `needsLogin` naming the OAuth server, its route answers 503, `/_status` shows it `needs-login`; once a grant is saved it connects, serves calls and `/_readyz` is `ok`; once the grant is revoked a call fails and it is `needs-login` again
 
 #### Scenario: Nothing mounted
 
