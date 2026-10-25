@@ -67,12 +67,13 @@ systemd-run --user --pty --quiet -p EnvironmentFile="$HOME/.config/mcp-gate/gate
 
 ```sh
 curl -s http://127.0.0.1:9090/_readyz
-printf 'Authorization: Bearer %s\n' "$GATE_ADMIN_TOKEN" | curl -s -H @- http://127.0.0.1:9090/_status
+systemd-run --user --pipe --wait --quiet -p EnvironmentFile="$HOME/.config/mcp-gate/gate.env" \
+  sh -c 'printf "Authorization: Bearer %s\n" "$GATE_ADMIN_TOKEN" | curl -s -H @- http://127.0.0.1:9090/_status'
 journalctl -u mcp-gate -o cat | jq -cR 'fromjson? | select(.msg == "call")'     # the audit lines
 journalctl -u mcp-gate -o cat | jq -cR 'fromjson? | select(.level == "ERROR" or .level == "WARN")'
 ```
 
-`fromjson?` skips the lines that are not JSON, such as a config error printed before the logger starts. `printf` is a shell builtin, so the token does not show up in a process list the way a `-H "Authorization: …"` argument would.
+`GATE_ADMIN_TOKEN` stands for the variable of an `admin.tokens` entry in `gate.env`; `systemd-run` reads it from the file (with `sudo` and `--uid=mcp-gate` for the system unit), and `printf`, a shell builtin, hands it to curl on stdin, so it never shows up in a process list. `fromjson?` skips the lines that are not JSON, such as a config error printed before the logger starts.
 
 `/_readyz` is 503 `initializing` for at most `startupGracePeriod` after a start. Then it is 503 `degraded` while a server that had connected is down (`unhealthy`) or a server waits for an OAuth login (`needsLogin`; it serves nothing until someone runs `mcp-gate auth login` for it), 503 `unavailable` when no server ever connected, and 200 `ok` otherwise. A server that has never connected since the start is not named, so `ok` does not mean that every server is up: `/_status` with an `admin.tokens` token shows each server's state, last error and the end of a stdio child's stderr, and every server in it should be `ready`. The full table is in [serve](../commands/serve.md#health-and-status).
 

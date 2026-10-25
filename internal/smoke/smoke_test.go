@@ -299,7 +299,7 @@ servers:
 	}
 
 	var pids struct{ PID, PGID, Grandchild int }
-	if err := json.Unmarshal([]byte(callText(t, local, "pids", nil)), &pids); err != nil || pids.PID == 0 || pids.Grandchild == 0 {
+	if err := json.Unmarshal([]byte(callText(t, local, "pids", nil)), &pids); err != nil || pids.PID == 0 || pids.Grandchild == 0 || pids.PGID <= 1 || pids.PGID == syscall.Getpgrp() {
 		t.Fatalf("pids = %+v (%v)", pids, err)
 	}
 	// If the test fails before the shutdown, the child's group would outlive it.
@@ -335,7 +335,7 @@ servers:
 	case <-time.After(stopWithin):
 		t.Fatalf("the gate did not stop within %s\n%s", stopWithin, logs)
 	}
-	if len(logs.messages("no state directory: learned protocol pins are not kept across restarts, and OAuth servers cannot log in")) != 0 {
+	if strings.Contains(logs.String(), "no state directory") {
 		t.Error("the gate did not take its state directory from $STATE_DIRECTORY")
 	}
 	if len(logs.messages("stopped")) != 1 {

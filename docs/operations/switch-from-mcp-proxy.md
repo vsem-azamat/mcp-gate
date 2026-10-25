@@ -61,8 +61,10 @@ The imported config keeps every `${VAR}` of the old one, so the gate needs the s
 
 ```sh
 install -m 0600 /path/to/mcp-proxy/env-file ~/.config/mcp-gate/gate.env
-printf 'GATE_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" >> ~/.config/mcp-gate/gate.env
+printf '\nGATE_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" >> ~/.config/mcp-gate/gate.env
 ```
+
+If mcp-proxy's unit sets secrets with `Environment=` lines instead of a file, copy them into `gate.env` as `KEY=value` lines with an editor, not with `echo` on a command line.
 
 and add `admin: {tokens: {owner: "${GATE_ADMIN_TOKEN}"}}` to the config for `/_status`. Keeping `MCP_HUB_ESCROW_KEY_SHA256` means the tools that release secrets keep their key.
 
@@ -81,8 +83,8 @@ gx ~/.local/bin/mcp-gate check -connect ~/.config/mcp-gate/gate.yaml
 systemctl --user start mcp-gate
 journalctl --user -u mcp-gate -o cat -f
 curl -s http://127.0.0.1:9090/_readyz
-printf 'Authorization: Bearer %s\n' "$(. ~/.config/mcp-gate/gate.env; printf %s "$GATE_ADMIN_TOKEN")" |
-  curl -s -H @- http://127.0.0.1:9090/_status | jq '.servers | map_values({state, lastError, stderr})'
+gx sh -c 'printf "Authorization: Bearer %s\n" "$GATE_ADMIN_TOKEN" | curl -s -H @- http://127.0.0.1:9090/_status' |
+  jq '.servers | map_values({state, lastError, stderr})'
 ```
 
 Do not `enable` it yet. `/_readyz` answers `initializing` for at most `startupGracePeriod`, then 503 `degraded` naming the OAuth servers in `needsLogin` until step 6. It does not name a server that never connected, so go by `/_status`: every server but the OAuth ones should be `ready`; one that is not shows its last error and the end of its stderr.
@@ -143,13 +145,15 @@ Keep mcp-proxy's binary, config, environment file and unit as they are: that is 
 
 ## 10. Bring over the servers that were disabled
 
-With mcp-proxy stopped, remove `disabled: true` from those servers, restart the gate, check them against the snapshot, and move their paths to the gate:
+Between step 9 and this step those servers are served by neither, so run it straight after step 9. With mcp-proxy stopped, remove `disabled: true` from those servers, restart the gate, check them against the snapshot, and move their paths to the gate:
 
 ```sh
 systemctl --user restart mcp-gate
 gx ~/.local/bin/mcp-gate compare -a ~/.local/state/mcp-gate/proxy-snapshot.json \
   -b 'http://127.0.0.1:9090/{server}/mcp' -b-token-env HUB_TOKEN_LAPTOP server-b
 ```
+
+The restart reconnects every server and forgets what the gate has escrowed so far: handles in earlier results can no longer be released.
 
 If the gate should take the proxy's old port, change `listen.addr`, restart the gate and move the reverse proxy's upstream, checking `/_status` in between.
 
