@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/vsem-azamat/mcp-gate/internal/version"
 )
 
 func TestRun(t *testing.T) {
@@ -18,6 +20,7 @@ func TestRun(t *testing.T) {
 		{name: "no command", args: nil, wantCode: exitUsage, wantStderr: usage},
 		{name: "help", args: []string{"help"}, wantCode: exitOK, wantStdout: usage},
 		{name: "help flag", args: []string{"--help"}, wantCode: exitOK, wantStdout: usage},
+		{name: "version", args: []string{"version"}, wantCode: exitOK, wantStdout: "mcp-gate " + version.Get().String() + "\n"},
 		{
 			name:       "unknown command",
 			args:       []string{"serve-everything"},

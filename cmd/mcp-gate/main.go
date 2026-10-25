@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/vsem-azamat/mcp-gate/internal/version"
 )
 
 // Exit codes returned by run.
@@ -16,7 +18,8 @@ const (
 const usage = `Usage: mcp-gate <command>
 
 Commands:
-  help    show this help
+  help       show this help
+  version    print the version and commit
 `
 
 func main() {
@@ -32,6 +35,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "help", "-h", "-help", "--help":
 		_, _ = io.WriteString(stdout, usage)
+		return exitOK
+	case "version", "--version":
+		_, _ = fmt.Fprintf(stdout, "mcp-gate %s\n", version.Get())
 		return exitOK
 	default:
 		_, _ = fmt.Fprintf(stderr, "mcp-gate: unknown command %q\n\n%s", args[0], usage)
