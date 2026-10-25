@@ -14,8 +14,9 @@ import (
 // rule finds one kind of secret in text.
 type rule struct {
 	kind string
-	// priority orders the rules: a lower number runs first, and when two findings overlap the
-	// one from the rule with the lower number wins. Every rule has its own number.
+	// priority orders the rules: a lower number runs first, and when findings overlap, the
+	// merged finding takes the kind of the rule with the lowest number. Every rule has its own
+	// number.
 	priority int
 	// set is the option that enables the rule.
 	set ruleSet

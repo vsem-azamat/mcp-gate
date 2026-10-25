@@ -166,8 +166,9 @@ func (e *Engine) redactString(text string, r Replacer, depth int) string {
 	return e.RedactText(text, r)
 }
 
-// Find returns the findings in text, ordered by position and never overlapping. When two
-// candidates overlap, the one from the rule with the lower priority number wins.
+// Find returns the findings in text, ordered by position and never overlapping. Candidates
+// that overlap become one finding covering all of them, with the kind from the rule with the
+// lowest priority number.
 func (e *Engine) Find(text string) []Span {
 	if text == "" {
 		return nil
@@ -242,15 +243,17 @@ func (e *Engine) ruleSpans(r *rule, text string) []span {
 		if e.disabled[kind] {
 			continue
 		}
-		spans = append(spans, span{start: newStart, end: newEnd, kind: kind, jsonEscaped: r.jsonEscaped})
+		spans = append(spans, span{start: newStart, end: newEnd, kind: kind, priority: r.priority, jsonEscaped: r.jsonEscaped})
 	}
 	return spans
 }
 
 // span is a finding while the rules run.
 type span struct {
-	start, end  int
-	kind        string
+	start, end int
+	kind       string
+	// priority is that of the rule that decided the kind.
+	priority    int
 	jsonEscaped bool
 }
 
@@ -266,8 +269,10 @@ func (s span) value(text string) string {
 	return raw
 }
 
-// mergeSpans adds the spans of a lower-priority rule to kept, dropping those that overlap a
-// span already kept. Both inputs are sorted by position and free of overlaps, so one linear
+// mergeSpans adds the spans of a lower-priority rule to kept. Spans that overlap are merged
+// into one span covering all of them, with the kind of the one from the rule with the lowest
+// priority number, so that no part of an overlapping candidate stays visible. Spans that only
+// touch stay separate. Both inputs are sorted by position and free of overlaps, so one linear
 // pass suffices.
 func mergeSpans(kept, added []span) []span {
 	if len(added) == 0 {
@@ -277,21 +282,34 @@ func mergeSpans(kept, added []span) []span {
 		return added
 	}
 	merged := make([]span, 0, len(kept)+len(added))
-	i := 0
-	for _, s := range added {
-		for i < len(kept) && kept[i].end <= s.start {
-			merged = append(merged, kept[i])
-			i++
+	push := func(s span) {
+		n := len(merged)
+		if n == 0 || merged[n-1].end <= s.start {
+			merged = append(merged, s)
+			return
 		}
-		if i < len(kept) && kept[i].start < s.end {
-			continue // overlaps a higher-priority span
+		last := &merged[n-1]
+		end := max(last.end, s.end)
+		winner := *last
+		if s.priority < last.priority {
+			winner = s
 		}
-		if n := len(merged); n > 0 && merged[n-1].end > s.start {
-			continue
-		}
-		merged = append(merged, s)
+		// A value is decoded as a JSON string only when an escaped finding covers the whole
+		// merged span; otherwise the span holds text outside the literal and is given raw.
+		escaped := (last.jsonEscaped && last.end == end) || (s.jsonEscaped && s.start == last.start && s.end == end)
+		last.end, last.kind, last.priority, last.jsonEscaped = end, winner.kind, winner.priority, escaped
 	}
-	return append(merged, kept[i:]...)
+	i, j := 0, 0
+	for i < len(kept) || j < len(added) {
+		if j == len(added) || (i < len(kept) && kept[i].start <= added[j].start) {
+			push(kept[i])
+			i++
+		} else {
+			push(added[j])
+			j++
+		}
+	}
+	return merged
 }
 
 // maskEscapedBreaks returns text with each escaped line break or tab (\n, \r, \t written as a

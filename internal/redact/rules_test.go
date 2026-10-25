@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -81,8 +82,8 @@ func TestRussianLabels(t *testing.T) {
 	}
 }
 
-// The rule order is part of the behaviour: the earlier rule wins an overlap. It is the same
-// whatever the options.
+// The rule order is part of the behaviour: the earlier rule gives its kind to an overlap. It
+// is the same whatever the options.
 func TestRuleOrder(t *testing.T) {
 	t.Parallel()
 
@@ -163,16 +164,124 @@ func TestPriorityDecidesOverlaps(t *testing.T) {
 		t.Fatalf("Russian off: spans = %+v", spans)
 	}
 
-	// The high-entropy rule runs before the Russian label rule and wins its value.
+	// The high-entropy rule runs before the Russian label rule and gives its kind to the value.
 	e := newEngine(t, Options{Russian: true, HighEntropy: true})
 	spans = e.Find("токен: " + fake("", 32))
 	if len(spans) != 1 || spans[0].Finding.Kind != "high_entropy" {
 		t.Fatalf("spans = %+v", spans)
 	}
 
-	// A vendor format wins over the generic key-value rule.
+	// A vendor format gives its kind to the generic key-value match around it.
 	spans = newEngine(t, Options{}).Find("token: " + fake("ghp_", 36))
 	if len(spans) != 1 || spans[0].Finding.Kind != "github_token" {
+		t.Fatalf("spans = %+v", spans)
+	}
+}
+
+func TestOverlappingFindingsAreMerged(t *testing.T) {
+	t.Parallel()
+
+	token := fake("ghp_", 36)
+	tests := []struct {
+		name, text, want string
+		value            string
+	}{
+		{
+			// The unquoted password value runs into the token; the token's rule runs first.
+			name:  "password running into a token",
+			text:  "password: hunter22," + token,
+			want:  "password: [REDACTED:github_token]",
+			value: "hunter22," + token,
+		},
+		{
+			name:  "password and token across an escaped newline",
+			text:  `password: hunter22\n` + token + " tail",
+			want:  "password: [REDACTED:github_token] tail",
+			value: `hunter22\n` + token,
+		},
+		{
+			name: "one value over two higher-priority findings",
+			// The AWS key is split so that secret scanners do not flag the literal.
+			text:  "password: " + token + "," + "AKIA" + "ABCDEFGHIJKLMNOP!",
+			want:  "password: [REDACTED:aws_access_key]", // the AWS rule has the lowest number
+			value: token + "," + "AKIA" + "ABCDEFGHIJKLMNOP!",
+		},
+		{
+			name:  "adjacent findings stay apart",
+			text:  token + " password: hunter22",
+			want:  "[REDACTED:github_token] password: [REDACTED:password]",
+			value: token,
+		},
+	}
+	e := newEngine(t, Options{})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := e.RedactString(tt.text, Marker{}); got != tt.want {
+				t.Errorf("RedactString = %q, want %q", got, tt.want)
+			}
+			spans := e.Find(tt.text)
+			if len(spans) == 0 || spans[0].Finding.Value != tt.value || tt.text[spans[0].Start:spans[0].End] != tt.value {
+				t.Errorf("first span = %+v, want value %q", spans, tt.value)
+			}
+		})
+	}
+}
+
+func TestMergeSpans(t *testing.T) {
+	t.Parallel()
+
+	sp := func(start, end, priority int, escaped bool) span {
+		return span{start: start, end: end, kind: fmt.Sprint("k", priority), priority: priority, jsonEscaped: escaped}
+	}
+	tests := []struct {
+		name        string
+		kept, added []span
+		want        []span
+	}{
+		{"touching spans stay apart", []span{sp(0, 5, 1, false)}, []span{sp(5, 9, 2, false)}, []span{sp(0, 5, 1, false), sp(5, 9, 2, false)}},
+		{"added inside kept", []span{sp(0, 9, 1, true)}, []span{sp(2, 4, 2, false)}, []span{sp(0, 9, 1, true)}},
+		{"added starts first", []span{sp(4, 9, 1, false)}, []span{sp(0, 6, 2, false)}, []span{sp(0, 9, 1, false)}},
+		{"added bridges two kept", []span{sp(0, 3, 2, false), sp(6, 9, 1, false)}, []span{sp(2, 7, 3, false)}, []span{sp(0, 9, 1, false)}},
+		{"kept bridges two added", []span{sp(2, 7, 1, false)}, []span{sp(0, 3, 2, false), sp(6, 9, 2, false)}, []span{sp(0, 9, 1, false)}},
+		{"equal starts", []span{sp(0, 4, 1, false)}, []span{sp(0, 8, 2, false)}, []span{sp(0, 8, 1, false)}},
+		{"escaped winner over a wider union is raw", []span{sp(2, 4, 1, true)}, []span{sp(0, 8, 2, false)}, []span{sp(0, 8, 1, false)}},
+		{"escaped winner covering the union stays decoded", []span{sp(0, 8, 1, true)}, []span{sp(2, 4, 2, false)}, []span{sp(0, 8, 1, true)}},
+		{"escaped loser covering the union is decoded", []span{sp(2, 4, 1, false)}, []span{sp(0, 8, 2, true)}, []span{sp(0, 8, 1, true)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mergeSpans(tt.kept, tt.added); !slices.Equal(got, tt.want) {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+	// A chain over three rounds collapses into one span with the first round's kind.
+	got := mergeSpans(mergeSpans([]span{sp(0, 3, 1, false)}, []span{sp(2, 6, 2, false)}), []span{sp(5, 9, 3, false)})
+	if want := []span{sp(0, 9, 1, false)}; !slices.Equal(got, want) {
+		t.Errorf("chain: got %+v, want %+v", got, want)
+	}
+}
+
+func TestMergedValueIsRawOutsideALiteral(t *testing.T) {
+	t.Parallel()
+
+	// The JSON-fragment finding is escaped, the wider Russian label finding is not; the merged
+	// value is the text as written.
+	text := `пароль «\"pwd\":\"abc\" x\t y»`
+	spans := newEngine(t, Options{Russian: true}).Find(text)
+	if len(spans) != 1 || spans[0].Finding.Value != text[spans[0].Start:spans[0].End] {
+		t.Fatalf("spans = %+v", spans)
+	}
+}
+
+func TestMergedValueInsideALiteralIsDecoded(t *testing.T) {
+	t.Parallel()
+
+	token := fake("ghp_", 36)
+	spans := newEngine(t, Options{}).Find(`log "password":"a\u0041b,` + token + `" end`)
+	if len(spans) != 1 || spans[0].Finding.Kind != "github_token" || spans[0].Finding.Value != "aAb,"+token {
 		t.Fatalf("spans = %+v", spans)
 	}
 }
