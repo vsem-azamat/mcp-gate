@@ -143,7 +143,8 @@ func (p *Policy) ReadAllowed(uri string) bool {
 // NormalizeURI returns the key a URI is compared by, so that a deny list is not sidestepped by
 // another spelling of a denied URI that a server would read the same: every percent-encoding is
 // decoded until none is left, the query and fragment are dropped, the scheme and authority are
-// lower-cased and a "localhost" authority is dropped, and the authority and path are taken as
+// lower-cased, user information, a port and a trailing dot are dropped from the authority and so
+// is a "localhost" authority, and the authority and path are taken as
 // one path in which ";" parameters, surrounding spaces and NULs, and empty and "." segments are
 // dropped and ".." segments resolved. The key is "<scheme>:<path>", so "fake://hidden",
 // "fake:///hidden" and "fake:hidden" share it. It keeps the case of the path and errs towards
@@ -171,12 +172,24 @@ func NormalizeURI(raw string) string {
 		}
 		// The authority is cleaned as the first segment of the path, since for many schemes
 		// (such as "fake://hidden") it names the resource itself.
-		if authority = strings.ToLower(authority); authority == "localhost" {
+		if authority = hostOf(authority); authority == "localhost" {
 			authority = ""
 		}
 		rest = authority + path
 	}
 	return strings.ToLower(scheme) + ":" + cleanPath(rest)
+}
+
+// hostOf returns the host of an authority, lower-cased, without user information, port or a
+// trailing dot.
+func hostOf(authority string) string {
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		authority = authority[i+1:]
+	}
+	if i := strings.LastIndexByte(authority, ':'); i >= 0 && !strings.Contains(authority[i:], "]") {
+		authority = authority[:i]
+	}
+	return strings.TrimSuffix(strings.ToLower(authority), ".")
 }
 
 // cleanPath joins the segments of path with "/" after dropping ";" parameters, surrounding

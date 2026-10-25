@@ -95,7 +95,7 @@ func TestFilters(t *testing.T) {
 	}
 	// fake://hidden is not listed, and a read of it through the fake://{+path} template, in any
 	// spelling, is refused too.
-	for _, uri := range []string{"fake://hidden", "FAKE://hidden", "fake://%68idden", "fake://hidden#x", "fake://hidden/", "fake://hidden?", "fake:///hidden", "fake://hidden%20", "fake://x/../hidden"} {
+	for _, uri := range []string{"fake://hidden", "FAKE://hidden", "fake://%68idden", "fake://hidden#x", "fake://hidden/", "fake://hidden?", "fake:///hidden", "fake://hidden%20", "fake://x/../hidden", "fake://user@hidden", "fake://hidden:80", "fake://hidden."} {
 		if _, err := cs.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: uri}); err == nil {
 			t.Errorf("deny: read %s", uri)
 		}

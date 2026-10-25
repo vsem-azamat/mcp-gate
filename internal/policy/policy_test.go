@@ -73,6 +73,10 @@ func TestNormalizeURI(t *testing.T) {
 		"urn:Example:Thing":          "urn:Example:Thing",
 		"no-scheme/path":             "no-scheme/path",
 		"test://host":                "test:host",
+		"test://user@Host:80/x":      "test:host/x",
+		"test://host./x":             "test:host/x",
+		"test://[::1]:80/x":          "test:[::1]/x",
+		"test://[::1]/x":             "test:[::1]/x",
 		"":                           "",
 		"%":                          "%",
 	} {
