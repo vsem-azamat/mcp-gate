@@ -58,6 +58,8 @@ This repository is public. Before every commit and PR, check that nothing privat
 | --- | --- |
 | `cmd/mcp-gate/` | The `mcp-gate` binary: subcommands, flags, environment |
 | `internal/compare/` | Catalog reading, normalisation, diff and snapshots for `mcp-gate compare` |
+| `internal/redact/` | Redaction engine: rules with priorities, findings, replacers (no MCP or HTTP imports) |
+| `internal/redact/mcpredact/` | Redaction of MCP SDK results and errors, failing closed |
 | `internal/testkit/` | Fake MCP servers for tests |
 | `internal/version/` | Build version and commit |
 | `openspec/specs/` | Behavior specifications, one directory per capability |
