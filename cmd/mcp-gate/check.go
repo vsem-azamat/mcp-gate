@@ -17,6 +17,7 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/gate"
 	"github.com/vsem-azamat/mcp-gate/internal/procutil"
 	"github.com/vsem-azamat/mcp-gate/internal/version"
 )
@@ -124,7 +125,7 @@ func connectAll(ctx context.Context, cfg *config.Config, names []string, timeout
 }
 
 func connectOne(ctx context.Context, cfg *config.Config, name string, s *config.Server, timeout time.Duration, logger *slog.Logger) (string, bool) {
-	sup, err := downstream.New(downstreamOptions(cfg, name, s, parentEnviron(), logger))
+	sup, err := downstream.New(gate.DownstreamOptions(cfg, name, s, parentEnviron(), version.Get().Version, logger))
 	if err != nil {
 		return fmt.Sprintf("%s: failed: %v", name, err), false
 	}
@@ -168,29 +169,4 @@ func connectOne(ctx context.Context, cfg *config.Config, name string, s *config.
 		pin = " (pinned automatically: the server did not answer the 2026-07-28 handshake)"
 	}
 	return fmt.Sprintf("%s: ready, protocol %s%s, %d tools", name, st.ProtocolVersion, pin, tools), true
-}
-
-// downstreamOptions turns a server's config into supervisor options.
-func downstreamOptions(cfg *config.Config, name string, s *config.Server, environ []string, logger *slog.Logger) downstream.Options {
-	o := downstream.Options{
-		Name:            name,
-		Disabled:        s.Disabled,
-		ClientName:      cfg.Name,
-		ClientVersion:   version.Get().Version,
-		CallTimeout:     s.CallTimeout.D(),
-		MaxMessageBytes: int(*s.MaxMessageBytes),
-		ProtocolVersion: s.ProtocolVersion,
-		ProbeInterval:   s.ProbeInterval.D(),
-		MaxBackoff:      s.Restart.MaxBackoff.D(),
-		Logger:          logger,
-	}
-	if st := s.Stdio; st != nil {
-		o.Stdio = &downstream.Stdio{
-			Command: st.Command, Args: st.Args, Dir: st.Cwd, Env: st.Env,
-			InheritEnv: st.InheritEnv, ParentEnv: environ,
-		}
-	} else {
-		o.HTTP = &downstream.HTTP{URL: s.HTTP.URL, Headers: s.HTTP.Headers}
-	}
-	return o
 }

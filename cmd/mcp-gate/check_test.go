@@ -135,3 +135,16 @@ func TestImport(t *testing.T) {
 		}
 	}
 }
+
+func TestServeUsage(t *testing.T) {
+	if r := runCmd(t, noEnv, "serve"); r.code != exitUsage || !strings.Contains(r.stderr, "name one config file") {
+		t.Errorf("no file: %+v", r)
+	}
+	if r := runCmd(t, noEnv, "serve", "-h"); r.code != exitOK || !strings.Contains(r.stderr, "-state-dir") {
+		t.Errorf("help: %+v", r)
+	}
+	path := writeFile(t, "gate.yaml", "version: 1\nservers:\n  a:\n    http: {url: 'https://a.example.com/mcp'}\n")
+	if r := runCmd(t, noEnv, "serve", path); r.code != exitUsage || !strings.Contains(r.stderr, "servers.a.auth") {
+		t.Errorf("a server without tokens: %+v", r)
+	}
+}
