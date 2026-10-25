@@ -22,7 +22,7 @@ StateDirectoryMode=0700
 # /etc/mcp-gate, owned by root: gate.yaml, and gate.env with the secrets the config names as
 # ${VAR} and MCP_HUB_ESCROW_KEY_SHA256. systemd reads gate.env as root, so it can be root:root 0600.
 ConfigurationDirectory=mcp-gate
-EnvironmentFile=-/etc/mcp-gate/gate.env
+EnvironmentFile=/etc/mcp-gate/gate.env
 WorkingDirectory=/var/lib/mcp-gate
 ExecStart=/usr/local/bin/mcp-gate serve /etc/mcp-gate/gate.yaml
 UMask=0077

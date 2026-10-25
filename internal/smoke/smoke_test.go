@@ -56,9 +56,11 @@ var markerRE = regexp.MustCompile(`\[REDACTED:password #(k[a-z2-7]{10})\]`)
 func gateBinary(t *testing.T) string {
 	t.Helper()
 	if *binaryFlag != "" {
-		p, err := filepath.Abs(*binaryFlag)
-		if err != nil {
-			t.Fatal(err)
+		// go test runs in the package directory; a relative path is read from the module root,
+		// where dist/ is.
+		p := *binaryFlag
+		if !filepath.IsAbs(p) {
+			p = filepath.Join("..", "..", p)
 		}
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("-binary: %v", err)
@@ -300,6 +302,8 @@ servers:
 	if err := json.Unmarshal([]byte(callText(t, local, "pids", nil)), &pids); err != nil || pids.PID == 0 || pids.Grandchild == 0 {
 		t.Fatalf("pids = %+v (%v)", pids, err)
 	}
+	// If the test fails before the shutdown, the child's group would outlive it.
+	t.Cleanup(func() { _ = syscall.Kill(-pids.PGID, syscall.SIGKILL) })
 	code, body := get("/_status", adminToken)
 	var st struct {
 		Servers map[string]struct {
@@ -330,6 +334,9 @@ servers:
 		}
 	case <-time.After(stopWithin):
 		t.Fatalf("the gate did not stop within %s\n%s", stopWithin, logs)
+	}
+	if len(logs.messages("no state directory: learned protocol pins are not kept across restarts, and OAuth servers cannot log in")) != 0 {
+		t.Error("the gate did not take its state directory from $STATE_DIRECTORY")
 	}
 	if len(logs.messages("stopped")) != 1 {
 		t.Errorf("no stopped line\n%s", logs)

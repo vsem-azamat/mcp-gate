@@ -31,7 +31,7 @@ Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `han
 
 [`internal/smoke`](../../internal/smoke/smoke_test.go) runs a built `mcp-gate` binary as a separate process, the way systemd does: the state directory from `$STATE_DIRECTORY`, the tokens and `MCP_HUB_ESCROW_KEY_SHA256` in the environment, a config listening on a free loopback port. Behind it are a stdio fake with a grandchild and an HTTP fake. It checks `/_healthz` and `/_readyz`, lists the tools and calls one on both routes, checks that a secret in a result is redacted and released by the escrow (the escrow contract below), that the child inherits neither the key hash nor the secrets, `/_status`, and that SIGTERM ends the gate with status 0 within 20 seconds, with the child's whole process group gone and no secret, token or argument in the log.
 
-Without flags it builds the binary from the checkout, so `make test` runs it. `-binary` names a built one instead:
+Without flags it builds the binary from the checkout, so `make test` runs it. `-binary` names a built one instead; a relative path is read from the repository root:
 
 ```sh
 go test -count=1 ./internal/smoke -args -binary=dist/mcp-gate_linux_amd64_v1/mcp-gate

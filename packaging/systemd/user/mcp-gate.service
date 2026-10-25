@@ -5,8 +5,6 @@
 [Unit]
 Description=mcp-gate: MCP gateway
 Documentation=https://github.com/vsem-azamat/mcp-gate/blob/main/docs/operations/README.md
-After=network-online.target
-Wants=network-online.target
 # A config that does not load exits with status 2 at once; stop retrying after a few tries.
 StartLimitIntervalSec=300
 StartLimitBurst=5
@@ -21,7 +19,7 @@ StateDirectoryMode=0700
 # ${VAR} and MCP_HUB_ESCROW_KEY_SHA256.
 ConfigurationDirectory=mcp-gate
 ConfigurationDirectoryMode=0700
-EnvironmentFile=-%E/mcp-gate/gate.env
+EnvironmentFile=%E/mcp-gate/gate.env
 WorkingDirectory=%S/mcp-gate
 ExecStart=%h/.local/bin/mcp-gate serve %E/mcp-gate/gate.yaml
 UMask=0077
@@ -45,7 +43,10 @@ TimeoutStopSec=40s
 #   PrivateDevices, ProtectClock, ProtectKernelLogs, CapabilityBoundingSet  need privileges a
 #                           user manager may not have; a system service sets them
 # A child that talks to another program through /tmp (an X11 or other socket there) needs
-# PrivateTmp=no in a drop-in; see docs/operations/systemd.md.
+# PrivateTmp=no in a drop-in. In a user manager, PrivateTmp, ProtectSystem, ProtectKernel* and
+# ProtectControlGroups run the service in a user namespace (an implicit PrivateUsers=yes): the
+# host needs unprivileged user namespaces, and files of other users show as owned by nobody.
+# See docs/operations/systemd.md for the drop-in without them.
 NoNewPrivileges=yes
 ProtectSystem=full
 PrivateTmp=yes
