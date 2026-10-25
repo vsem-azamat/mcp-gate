@@ -8,7 +8,7 @@
 
 ## Specs and docs
 
-<!-- Which requirements in openspec/specs/ and which docs were added or changed. "None" is fine. -->
+<!-- Which specs and docs were added or changed. "None" is fine. -->
 
 ## Verification
 

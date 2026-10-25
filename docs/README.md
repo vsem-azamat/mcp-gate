@@ -1,7 +1,7 @@
 # mcp-gate Documentation
 
-Engineering documentation for mcp-gate. What mcp-gate does is specified in `openspec/specs/`; if a page here and a spec disagree, the spec wins. Pages describe the current state only.
+Engineering documentation for mcp-gate. Pages describe the current state only. Behavior specifications go in `openspec/specs/`, not here; where a page and a spec disagree, the spec wins.
 
-| Page | Contents |
+| Section | Contents |
 | --- | --- |
-| [Development](development/README.md) | Checks, tool pinning, CI, dependency updates and releasing |
+| [Development](development/README.md) | Setup, checks, tool pinning, CI, dependency updates and releasing |
