@@ -3,9 +3,13 @@
 # rules on the staged files, and the repository policy (forbidden files, action pins, hook modes).
 # The full checks run in pre-push and in CI. Install with `make hooks`.
 set -euo pipefail
+# Written for bash 3.2 (the macOS default): no mapfile, and no expansion of an empty array.
 cd "$(git rev-parse --show-toplevel)"
 
-mapfile -d '' staged < <(git diff --cached --name-only --diff-filter=ACMR -z)
+staged=()
+while IFS= read -r -d '' f; do
+  staged+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
 [ "${#staged[@]}" -gt 0 ] || exit 0
 fail=0
 
@@ -13,6 +17,12 @@ fail=0
 unformatted=()
 for f in "${staged[@]}"; do
   [[ "$f" == *.go ]] || continue
+  # golangci-lint fmt --stdin passes a file that does not parse, so gofmt -e checks syntax first
+  if ! git show ":$f" | gofmt -e >/dev/null; then
+    echo "pre-commit: $f: syntax error" >&2
+    fail=1
+    continue
+  fi
   want=$(git show ":$f" | go tool -modfile=tools/lint/go.mod golangci-lint fmt --stdin) || {
     echo "pre-commit: $f: could not be formatted (syntax error?)" >&2
     fail=1

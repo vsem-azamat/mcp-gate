@@ -6,6 +6,7 @@
 # - every docs/ page but docs/README.md starts with a breadcrumb line "[Docs](<path>)" whose
 #   target is docs/README.md.
 set -euo pipefail
+# Written for bash 3.2 (the macOS default) and BSD userland as well as GNU.
 cd "$(dirname "$0")/.."
 fail=0
 err() { echo "docs-check: $*" >&2; fail=1; }
@@ -15,12 +16,19 @@ prose() {
   awk '/^[[:space:]]*(```|~~~)/ { code = !code; next } !code' "$1" | sed -E 's/`[^`]*`//g'
 }
 
+# resolve <path>: the physical absolute path of an existing file, or nothing
+resolve() {
+  [ -e "$1" ] || return 0
+  (cd "$(dirname "$1")" && echo "$(pwd -P)/$(basename "$1")")
+}
+
 # links <file>: the link targets in a Markdown file, one per line, outside code
 links() {
   local text
   text=$(prose "$1")
   { grep -oE '\]\([^)[:space:]]+' <<<"$text" | cut -c3- || true; } | tr -d '<>'
-  { grep -E '^ {0,3}\[[^]]+\]:[[:space:]]*[^[:space:]]+' <<<"$text" |
+  # reference definitions; [^label]: is a footnote, not a link
+  { grep -E '^ {0,3}\[[^]^][^]]*\]:[[:space:]]*[^[:space:]]+' <<<"$text" |
     sed -E 's/^ {0,3}\[[^]]+\]:[[:space:]]*([^[:space:]]+).*/\1/' || true; } | tr -d '<>'
 }
 
@@ -38,7 +46,7 @@ done < <(git ls-files -z '*.md')
 
 if [ -d docs ]; then
   [ -f docs/README.md ] || err "missing docs/README.md index"
-  index=$(realpath docs/README.md 2>/dev/null || true)
+  index=$(resolve docs/README.md)
   while IFS= read -r dir; do
     if [ ! -f "$dir/README.md" ]; then
       err "missing $dir/README.md index"
@@ -65,7 +73,7 @@ if [ -d docs ]; then
     fi
     target=${crumb#'[Docs]('}
     target=${target%)}
-    [ "$(realpath "$(dirname "$page")/$target" 2>/dev/null || true)" = "$index" ] ||
+    [ -n "$index" ] && [ "$(resolve "$(dirname "$page")/$target")" = "$index" ] ||
       err "$page: breadcrumb [Docs]($target) does not point to docs/README.md"
   done < <(find docs -type f -name '*.md')
 fi

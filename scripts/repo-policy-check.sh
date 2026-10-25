@@ -4,13 +4,14 @@
 # pinned to a commit SHA, GoReleaser versions that differ between the workflows and the Makefile,
 # and git hooks that are not executable.
 set -euo pipefail
+# Written for bash 3.2 (the macOS default) and BSD userland as well as GNU.
 cd "$(dirname "$0")/.."
 fail=0
 err() { echo "repo-policy: $*" >&2; fail=1; }
 
 while IFS= read -r path; do
   # names are compared in lower case, so CLAUDE.md, Claude.md and claude.md are all caught
-  lower=${path,,}
+  lower=$(tr "[:upper:]" "[:lower:]" <<<"$path")
   case "/$lower" in
     */claude.md | */claude.local.md | */gemini.md | */agent.md | */.cursorrules | */.windsurfrules | \
       */.clinerules | */.clinerules/* | */.clinerules[-._]* | */.cursor/* | */.github/copilot-instructions.md)
@@ -46,8 +47,8 @@ while IFS= read -r line; do
     *) [[ "$ref" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$ ]] ||
       err "$loc: action $ref is not pinned to a commit SHA" ;;
   esac
-done < <(git ls-files -z '.github/workflows/*.yml' '.github/workflows/*.yaml' \
-  '.github/actions/*.yml' '.github/actions/*.yaml' | xargs -0r grep -nH -E "(^|[^[:alnum:]_-])uses[\"']?[[:space:]]*:")
+done < <(git grep -n -E "(^|[^[:alnum:]_-])uses[\"']?[[:space:]]*:" -- '.github/workflows/*.yml' \
+  '.github/workflows/*.yaml' '.github/actions/*.yml' '.github/actions/*.yaml' || true)
 # The workflows use actions, so finding none means this check read nothing.
 [ "$actions" -gt 0 ] || err "no 'uses:' line found in .github/workflows; the action pin check read nothing"
 

@@ -33,7 +33,7 @@ The docs check follows inline and reference-style relative links in every tracke
 `make hooks` sets `core.hooksPath` to the versioned `.githooks/`; it works the same in a worktree. The hooks build their tools through `go tool` on first use.
 
 - **pre-commit** (seconds) checks the staged Go files for gofumpt and goimports formatting, using the staged content and without rewriting anything; `make fmt` fixes them. It also checks the staged files against `.editorconfig` and runs the repository policy.
-- **pre-push** runs `make lint test tidy-check repo`. It skips a push that only deletes remote branches. `vuln` and `release-check` are left to CI, since they need network or take long.
+- **pre-push** runs `make lint test tidy-check repo`. It skips a push that only deletes remote branches. It checks the working tree, not the commits being pushed, so uncommitted changes count and a commit pushed from another branch is not checked; CI checks the pushed commits. `vuln` and `release-check` are left to CI, since they need network or take long.
 
 Do not bypass them with `--no-verify`.
 

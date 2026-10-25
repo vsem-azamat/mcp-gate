@@ -2,6 +2,7 @@
 # The local share of CI before a push: lint, tests, tidy modules and repository checks. vuln and
 # release-check need the network or take long; CI runs them. Install with `make hooks`.
 set -euo pipefail
+# Written for bash 3.2 (the macOS default).
 cd "$(git rev-parse --show-toplevel)"
 
 # stdin: one "<local ref> <local sha> <remote ref> <remote sha>" line per ref. A push that only
