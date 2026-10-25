@@ -596,3 +596,27 @@ func TestServerRefusing(t *testing.T) {
 		t.Errorf("login required %v (%q) after %d refreshes", src.LoginRequired(), src.Reason(), srv.Refreshes())
 	}
 }
+
+// A server that rejects every token is noticed even when the attempts are spaced like the
+// longest backoff.
+func TestSpacedRefusals(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}, AccessTTL: 10 * time.Hour})
+	store := oauth.NewStore(t.TempDir())
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	src := newSource(t, store, srv.URL(), nil, clock)
+	srv.Refuse(http.StatusUnauthorized)
+	for i := 0; i < 10 && !src.LoginRequired(); i++ {
+		_, _ = listTools(t.Context(), t, srv.URL(), src)
+		mu.Lock()
+		now = now.Add(31 * time.Second)
+		mu.Unlock()
+	}
+	if !src.LoginRequired() || srv.Refreshes() > 3 {
+		t.Errorf("login required %v after %d refreshes", src.LoginRequired(), srv.Refreshes())
+	}
+}

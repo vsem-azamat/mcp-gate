@@ -52,15 +52,17 @@ type Source struct {
 	dead     bool      // the authorization server or the server rejected grant
 	reason   string    // why there is no usable grant, for status
 	forced   string    // the access token a refresh after a 401 obtained
-	forcedAt time.Time // when
+	forcedAt time.Time // when the last 401 to it came
 	forcedN  int       // refreshes after a 401 in a row, each soon after the one before
 }
 
-// A 401 to a token that a refresh after a 401 obtained, within retryWindow of that refresh, is
-// counted; the maxForced-th in a row means the server rejects the grant's tokens. A single one
-// is no proof: the token may have been dropped in its turn, as a server restart does.
+// A 401 to a token that a refresh after a 401 obtained, within retryWindow of the previous 401,
+// is counted; the maxForced-th in a row means the server rejects the grant's tokens. A single
+// one is no proof: the token may have been dropped in its turn, as a server restart does. The
+// window outlasts the longest backoff between connect attempts, so a server that rejects every
+// token is noticed however its attempts are spaced.
 const (
-	retryWindow = 30 * time.Second
+	retryWindow = 10 * time.Minute
 	maxForced   = 3
 )
 
@@ -135,7 +137,7 @@ func (s *Source) validLocked(g *Grant) bool {
 
 // Authorize implements auth.OAuthHandler; the SDK calls it when the server answers 401 or 403,
 // and retries the request once when it returns nil. A 401 to the current token refreshes it;
-// a 401 to a token that such a refresh obtained means the server rejects the grant.
+// the third 401 in a row to tokens such refreshes obtained means the server rejects the grant.
 func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Response) error {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
@@ -152,7 +154,8 @@ func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Re
 	case used != s.grant.AccessToken:
 		return nil // the token changed since the request was sent: retry with the new one
 	}
-	if used == s.forced && s.opts.Now().Sub(s.forcedAt) < retryWindow {
+	now := s.opts.Now()
+	if used == s.forced && now.Sub(s.forcedAt) < retryWindow {
 		s.forcedN++
 	} else {
 		s.forcedN = 1
@@ -165,7 +168,7 @@ func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Re
 	if err := s.refreshLocked(context.WithoutCancel(ctx)); err != nil {
 		return err
 	}
-	s.forced, s.forcedAt = s.grant.AccessToken, s.opts.Now()
+	s.forced, s.forcedAt = s.grant.AccessToken, now
 	return nil
 }
 

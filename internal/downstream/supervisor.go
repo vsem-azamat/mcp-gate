@@ -542,10 +542,11 @@ func (s *Supervisor) run(base context.Context) {
 	for attempt := 0; ; attempt++ {
 		// While a login is awaited, attempts only look for a grant: they count as no restart,
 		// and the state stays until there is a usable grant.
-		awaiting := s.Status().State == NeedsLogin && s.loginLost()
+		waited := s.Status().State == NeedsLogin
+		awaiting := waited && s.loginLost()
 		s.mu.Lock()
 		if !awaiting {
-			if attempt > 0 {
+			if attempt > 0 && !waited { // the first attempt with a grant is no restart
 				s.restarts++
 			}
 			s.setStateLocked(Starting)
