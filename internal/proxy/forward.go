@@ -296,6 +296,18 @@ func reservedMetaKey(k string) bool {
 	return false
 }
 
+// mirrored reports whether the tool or prompt name is in the mirrored catalog.
+func (m *Mirror) mirrored(key, name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if key == "tool" {
+		_, ok := m.tools[name]
+		return ok
+	}
+	_, ok := m.prompts[name]
+	return ok
+}
+
 // reachedKey marks, in a request's context, whether the request reached a mirror handler.
 type reachedKey struct{}
 
@@ -330,7 +342,10 @@ func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
 		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
 		if err != nil && !*reached {
 			c := m.begin(ctx, method, req.GetExtra(), key, m.logText(name))
-			c.outcome = outcomeDenied
+			c.outcome = outcomeError
+			if !m.mirrored(key, name) {
+				c.outcome = outcomeDenied
+			}
 			c.end()
 		}
 		return res, err

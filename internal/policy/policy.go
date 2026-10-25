@@ -143,9 +143,11 @@ func (p *Policy) ReadAllowed(uri string) bool {
 // NormalizeURI returns the key a URI is compared by, so that a deny list is not sidestepped by
 // another spelling of a denied URI that a server would read the same: every percent-encoding is
 // decoded until none is left, the query and fragment are dropped, the scheme and authority are
-// lower-cased, and in the authority and path parameters after ";" are dropped, empty and "."
-// segments removed and ".." segments resolved. The path keeps its case. The key errs towards treating different
-// URIs as one, which under a deny list refuses more, never less.
+// lower-cased and a "localhost" authority is dropped, and the authority and path are taken as
+// one path in which ";" parameters, surrounding spaces and NULs, and empty and "." segments are
+// dropped and ".." segments resolved. The key is "<scheme>:<path>", so "fake://hidden",
+// "fake:///hidden" and "fake:hidden" share it. It keeps the case of the path and errs towards
+// treating different URIs as one, which under a deny list refuses more, never less.
 func NormalizeURI(raw string) string {
 	// Decoding can form a new escape ("%7%30" becomes "%70"), so repeat until nothing changes.
 	// Each pass shortens the string or leaves it unchanged.
@@ -162,26 +164,28 @@ func NormalizeURI(raw string) string {
 	if !ok || scheme == "" || strings.ContainsAny(scheme, "/") {
 		return cleanPath(raw)
 	}
-	scheme = strings.ToLower(scheme)
-	authority, hier := strings.CutPrefix(rest, "//")
-	if !hier {
-		return scheme + ":" + cleanPath(rest)
+	if hier, ok := strings.CutPrefix(rest, "//"); ok {
+		authority, path := hier, ""
+		if i := strings.IndexByte(hier, '/'); i >= 0 {
+			authority, path = hier[:i], hier[i:]
+		}
+		// The authority is cleaned as the first segment of the path, since for many schemes
+		// (such as "fake://hidden") it names the resource itself.
+		if authority = strings.ToLower(authority); authority == "localhost" {
+			authority = ""
+		}
+		rest = authority + path
 	}
-	path := ""
-	if i := strings.IndexByte(authority, '/'); i >= 0 {
-		authority, path = authority[:i], authority[i:]
-	}
-	// The authority is cleaned as the first segment of the path, since for many schemes (such
-	// as "fake://hidden") it names the resource itself.
-	return scheme + "://" + cleanPath(strings.ToLower(authority)+path)
+	return strings.ToLower(scheme) + ":" + cleanPath(rest)
 }
 
-// cleanPath drops ";" parameters and empty and "." segments, and resolves ".." segments. A path
-// that started with "/" keeps it.
+// cleanPath joins the segments of path with "/" after dropping ";" parameters, surrounding
+// spaces and NULs, and empty and "." segments, and resolving ".." segments.
 func cleanPath(path string) string {
 	var out []string
 	for seg := range strings.SplitSeq(path, "/") {
 		seg, _, _ = strings.Cut(seg, ";")
+		seg = strings.Trim(seg, " \t\r\n\x00")
 		switch seg {
 		case "", ".":
 		case "..":
@@ -192,11 +196,7 @@ func cleanPath(path string) string {
 			out = append(out, seg)
 		}
 	}
-	joined := strings.Join(out, "/")
-	if strings.HasPrefix(path, "/") {
-		return "/" + joined
-	}
-	return joined
+	return strings.Join(out, "/")
 }
 
 func decodeOnce(raw string) string {
