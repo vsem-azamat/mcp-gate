@@ -1,0 +1,45 @@
+name: Release
+
+# A v* tag on main, which only the maintainer creates, publishes a GitHub release with archives
+# for Linux and macOS on amd64 and arm64 and their checksums; see docs/development/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # to publish the release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the changelog compares with the previous tag, and main is checked below
+          persist-credentials: false # the build and tests run third-party code; the write token stays out of .git
+      - name: The tag is on main
+        run: |
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "the tag ${GITHUB_REF_NAME} is not on main; releases are tags on main" >&2
+            exit 1
+          }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: Test
+        run: make test
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.19.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # the pushed tag, also when an rc tag points at the same commit
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

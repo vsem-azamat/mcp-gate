@@ -4,4 +4,4 @@ Engineering documentation for mcp-gate. What mcp-gate does is specified in `open
 
 | Page | Contents |
 | --- | --- |
-| [Development](development.md) | Running the checks, tool pinning, CI and dependency updates |
+| [Development](development/README.md) | Checks, tool pinning, CI, dependency updates and releasing |

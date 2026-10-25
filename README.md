@@ -4,4 +4,4 @@ mcp-gate is a gateway for [Model Context Protocol](https://modelcontextprotocol.
 
 Status: early development. Nothing is usable yet.
 
-Development: see [docs/development.md](docs/development.md). License: [Apache-2.0](LICENSE).
+Development: see [docs/development/README.md](docs/development/README.md). License: [Apache-2.0](LICENSE).

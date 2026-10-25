@@ -1,0 +1,40 @@
+# Release builds of mcp-gate for a v* tag; .github/workflows/release.yml runs it.
+version: 2
+
+project_name: mcp-gate
+
+builds:
+  - id: mcp-gate
+    main: ./cmd/mcp-gate
+    binary: mcp-gate
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      # the tag itself; mcp-gate version shows it. A snapshot gets none, so it is not taken for a
+      # release: mcp-gate version then says dev
+      - -s -w -X github.com/vsem-azamat/mcp-gate/internal/version.Version={{ if not .IsSnapshot }}{{ .Tag }}{{ end }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: mcp-gate
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+
+release:
+  draft: false
+  prerelease: auto

@@ -27,7 +27,7 @@ This repository is public. Before every commit and PR, check that nothing privat
 3. Write a failing test for the scenario and watch it fail for the expected reason.
 4. Implement the smallest change that makes it pass, then clean up.
 5. Update docs when the engineering picture changes.
-6. Run `make check` before claiming success or pushing; `make fmt` applies the formatters. See [Development](docs/development.md).
+6. Run `make check` before claiming success or pushing; `make fmt` applies the formatters. See [Development](docs/development/README.md).
 
 ## Quality Bar
 
@@ -41,6 +41,7 @@ This repository is public. Before every commit and PR, check that nothing privat
 - Branch from `main`, one topic per branch, conventional commit messages (`feat:`, `fix:`, `docs:`, `chore:`, `test:`, `refactor:`).
 - Every change goes branch → pull request → green CI → independent review → squash merge.
 - The review comes from someone with no stake in the change (a fresh session or subagent) reading the diff with the touched specs and docs. At most three rounds. Each finding is fixed, deferred to an issue, or dropped as taste; the PR description lists deferred and dropped findings with a one-line reason.
+- Releases are `v*` tags on `main`, created by the maintainer only; see [Releasing](docs/development/releasing.md).
 - Do not add AI attribution lines or trailers to commits or PRs.
 
 ## Instruction Files
@@ -52,8 +53,10 @@ This repository is public. Before every commit and PR, check that nothing privat
 | Path | Contents |
 | --- | --- |
 | `cmd/mcp-gate/` | The `mcp-gate` binary |
+| `internal/version/` | Build version and commit |
 | `openspec/specs/` | Behavior specifications |
 | [`docs/`](docs/README.md) | Engineering documentation |
 | `scripts/` | Repository checks run by `make repo` |
 | `tools/`, `tools/lint/` | Pinned development tools, run with `go tool` |
-| `.github/workflows/ci.yml` | CI: the same checks as `make check` |
+| `.github/workflows/` | CI (the same checks as `make check`) and the tag-driven release |
+| `.goreleaser.yaml` | Release builds |

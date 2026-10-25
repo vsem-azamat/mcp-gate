@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks the Markdown in the repository: every relative link in a tracked .md file resolves,
-# and every page in docs/ is linked from docs/README.md. Links inside code spans and fenced
+# and docs/ is an indexed tree (see below). Links inside code spans and fenced
 # code blocks are ignored.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -26,14 +26,26 @@ while IFS= read -r -d '' file; do
   done < <(links "$file")
 done < <(git ls-files -z '*.md')
 
+# Every docs directory has a README.md index that links each page and subdirectory in it, and
+# every page but docs/README.md has a breadcrumb line that starts with "[Docs](".
 if [ -d docs ]; then
-  [ -f docs/README.md ] || err "missing docs/README.md index"
-  indexed=$(links docs/README.md)
-  while IFS= read -r -d '' page; do
-    name=${page#docs/}
-    [ "$name" = README.md ] && continue
-    grep -qxF "$name" <<<"$indexed" || err "docs/README.md does not link $name"
-  done < <(git ls-files -z 'docs/*.md')
+  while IFS= read -r dir; do
+    if [ ! -f "$dir/README.md" ]; then
+      err "missing $dir/README.md index"
+      continue
+    fi
+    indexed=$(links "$dir/README.md")
+    for entry in "$dir"/*; do
+      name=$(basename "$entry")
+      [ "$name" = README.md ] && continue
+      if [ -d "$entry" ]; then
+        grep -qxF "$name/README.md" <<<"$indexed" || err "$dir/README.md does not link $name/README.md"
+      elif [[ "$name" == *.md ]]; then
+        grep -qxF "$name" <<<"$indexed" || err "$dir/README.md does not link $name"
+        head -n 6 "$entry" | grep -q '^\[Docs\](' || err "$entry: missing breadcrumb line under the title"
+      fi
+    done
+  done < <(find docs -type d)
 fi
 
 [ "$fail" = 0 ] && echo "docs-check: ok"
