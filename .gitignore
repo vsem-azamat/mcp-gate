@@ -18,6 +18,9 @@
 # OpenSpec change folders are not used; specs are edited in place
 /openspec/changes/
 
+# Git worktrees of this repository (see AGENTS.md)
+/.worktrees/
+
 # Editors and OS
 .idea/
 .vscode/

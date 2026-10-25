@@ -1,0 +1,46 @@
+# Written by mcp-gate import from an mcp-proxy config. Review the comments, then run mcp-gate check.
+# mcpProxy.version is dropped: mcp-gate reports its own version.
+# mcpProxy.type is dropped: mcp-gate serves streamable HTTP.
+# mcpProxy.options.panicIfInvalid is dropped: it has no equivalent.
+# mcpProxy.options.autoReconnect is dropped: mcp-gate always restarts a failed server, with backoff up to restart.maxBackoff.
+# stdio servers no longer inherit the whole environment: only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
+# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.addr
+# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.baseURL
+# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.options.authTokens
+# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.options.logEnabled
+# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.options.redact
+# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.startupGracePeriod
+# NOT IMPLEMENTED IN THIS BUILD: mcpServers.legacy (sse transport)
+version: 1
+name: hub-example
+servers:
+  # env -u HUB_TOKEN_LAPTOP, HUB_TOKEN_PHONE is dropped: a stdio child inherits only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.browser.options.toolFilter
+  browser:
+    stdio:
+      command: browser-server
+      args:
+        - --headless
+    callTimeout: 0s # mcp-proxy had no timeout for this server
+    restart:
+      maxBackoff: 30s # mcp-proxy reconnectInterval
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.files.options.redact
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.files.options.toolFilter
+  files:
+    http:
+      url: https://files.example.com/mcp
+    callTimeout: 2m
+    restart:
+      maxBackoff: 30s # mcp-proxy reconnectInterval
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.oauth
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.authTokens
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.logEnabled
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.promptFilter
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.resourceFilter
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.toolFilter
+  mail:
+    http:
+      url: https://mail.example.com/mcp
+    callTimeout: 2m
+    restart:
+      maxBackoff: 30s # mcp-proxy reconnectInterval

@@ -6,6 +6,8 @@ This file is the working contract for AI agents and contributors in this reposit
 
 Run `make hooks` once after cloning, so the versioned git hooks in `.githooks/` run on commit and push. Never bypass them with `--no-verify`; fix what they report.
 
+Git worktrees live in `.worktrees/<name>` inside the repository (git ignores it), never next to it.
+
 ## Sources Of Truth
 
 - Behavior specifications go in `openspec/specs/`. Once a capability is specified there, read it before changing that behavior.
@@ -58,6 +60,8 @@ This repository is public. Before every commit and PR, check that nothing privat
 | --- | --- |
 | `cmd/mcp-gate/` | The `mcp-gate` binary: subcommands, flags, environment |
 | `internal/compare/` | Catalog reading, normalisation, diff and snapshots for `mcp-gate compare` |
+| `internal/config/` | Config file: strict YAML, `${VAR}` expansion, defaults, validation |
+| `internal/config/importer/` | Conversion of an mcp-proxy `config.json` for `mcp-gate import` |
 | `internal/redact/` | Redaction engine: rules with priorities, findings, replacers (no MCP or HTTP imports) |
 | `internal/redact/mcpredact/` | Redaction of MCP SDK results and errors, failing closed |
 | `internal/testkit/` | Fake MCP servers for tests |

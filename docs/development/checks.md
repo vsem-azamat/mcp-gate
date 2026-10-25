@@ -24,7 +24,7 @@ Besides the standard and enabled linters, `.golangci.yml` enforces these project
 
 - `depguard`: `github.com/mark3labs/mcp-go` is not imported; the official `github.com/modelcontextprotocol/go-sdk` is the only MCP library;
 - `depguard`: `internal/redact` imports neither `net/http` nor the MCP SDK (its subpackage `mcpredact` is the MCP adapter);
-- `forbidigo`: `fmt.Print*` and reading the environment (`os.Getenv`, `os.LookupEnv`, `os.Environ`) only in `cmd/`; the standard `log` package nowhere (use `log/slog`).
+- `forbidigo`: `fmt.Print*` and reading the environment (`os.Getenv`, `os.LookupEnv`, `os.Environ`) only in `cmd/`, which passes values in (the config loader takes a lookup function); the standard `log` package nowhere (use `log/slog`).
 
 The repository policy rejects:
 
