@@ -27,6 +27,18 @@ Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `han
 
 `internal/downstream` runs the downstream half of the version matrix with them: every protocol version the SDK supports, over stdio, HTTP with event streams and HTTP with JSON. `internal/gate` runs the whole matrix through a running gate: clients of each version against servers of each version, over stdio and HTTP. Its tests start a gate on a loopback port with stdio and HTTP fakes behind it, and `TestCompareWithHub` checks with `compare` that the gate serves the catalog of a fake hub unchanged. `internal/procutil` re-executes its test binary the same way, with its own helper modes.
 
+## Binary smoke test
+
+[`internal/smoke`](../../internal/smoke/smoke_test.go) runs a built `mcp-gate` binary as a separate process, the way systemd does: the state directory from `$STATE_DIRECTORY`, the tokens and `MCP_HUB_ESCROW_KEY_SHA256` in the environment, a config listening on a free loopback port. Behind it are a stdio fake with a grandchild and an HTTP fake. It checks `/_healthz` and `/_readyz`, lists the tools and calls one on both routes, checks that a secret in a result is redacted and released by the escrow (the escrow contract below), that the child inherits neither the key hash nor the secrets, `/_status`, and that SIGTERM ends the gate with status 0 within 20 seconds, with the child's whole process group gone and no secret, token or argument in the log.
+
+Without flags it builds the binary from the checkout, so `make test` runs it. `-binary` names a built one instead:
+
+```sh
+go test -count=1 ./internal/smoke -args -binary=dist/mcp-gate_linux_amd64_v1/mcp-gate
+```
+
+GoReleaser runs it that way as a post-build hook on every binary the build machine can run, in CI's Release config job and in the release before anything is packed or published (see [Releasing](releasing.md)).
+
 ## Escrow contract
 
 [`testkit.CheckEscrowContract`](../../internal/testkit/escrow.go) checks the escrow HTTP contract against a base URL holding one live entry: the auth scheme, the paths, methods, status codes, bodies and headers, and the meta document's members in order. `internal/escrow` runs it against the bare handler and `internal/gate` against a running gate, with the entry planted by a tool call.

@@ -18,6 +18,13 @@ builds:
       # release: mcp-gate version then says dev
       - -s -w -X github.com/vsem-azamat/mcp-gate/internal/version.Version={{ if not .IsSnapshot }}{{ .Tag }}{{ end }}
     mod_timestamp: "{{ .CommitTimestamp }}"
+    hooks:
+      post:
+        # The binary smoke test (internal/smoke) against each built binary this machine can run,
+        # before anything is packed or published.
+        - cmd: >-
+            {{ if and (eq .Os .Runtime.Goos) (eq .Arch .Runtime.Goarch) }}go test -count=1 -run ^TestBinary$ ./internal/smoke -args -binary={{ .Path }}{{ else }}true{{ end }}
+          output: true
 
 archives:
   - id: mcp-gate
@@ -37,6 +44,10 @@ archives:
           group: root
           mode: 0644
       - src: README.md
+        info: *file-info
+      - src: packaging/systemd/mcp-gate.service
+        info: *file-info
+      - src: packaging/systemd/user/mcp-gate.service
         info: *file-info
 
 checksum:

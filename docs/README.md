@@ -7,4 +7,5 @@ Engineering documentation for mcp-gate. Pages describe the current state only. B
 | [Architecture](architecture/README.md) | How the parts of mcp-gate are put together |
 | [Configuration](configuration/README.md) | The config file: keys, defaults, variables |
 | [Commands](commands/README.md) | How to use the `mcp-gate` subcommands |
+| [Operations](operations/README.md) | Running the gate under systemd, and switching an mcp-proxy deployment to it |
 | [Development](development/README.md) | Setup, checks, testing, tool pinning, CI, dependency updates and releasing |
