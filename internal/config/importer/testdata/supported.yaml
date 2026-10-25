@@ -1,11 +1,20 @@
 # Written by mcp-gate import from an mcp-proxy config. Review the comments, then run mcp-gate check.
 # mcpProxy.version is dropped: mcp-gate reports its own version.
+# mcpProxy.baseURL is dropped: mcp-gate serves each server at /<name>/mcp.
 # mcpProxy.type is dropped: mcp-gate serves streamable HTTP.
 # mcpProxy.options.panicIfInvalid is dropped: it has no equivalent.
 # mcpProxy.options.autoReconnect is dropped: mcp-gate always restarts a failed server, with backoff up to restart.maxBackoff.
+# logEnabled also turned on the MCP logging capability; mcp-gate does not offer it, and logs requests only.
 # stdio servers no longer inherit the whole environment: only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
 version: 1
 name: hub-example
+listen:
+  addr: 127.0.0.1:9090 # mcp-proxy mcpProxy.addr
+startupGracePeriod: 1m30s
+auth:
+  tokens:
+    laptop: ${HUB_TOKEN_LAPTOP}
+    phone: ${HUB_TOKEN_PHONE}
 servers:
   clean-room:
     stdio:
@@ -20,6 +29,14 @@ servers:
     restart:
       maxBackoff: 30s # mcp-proxy reconnectInterval
     disabled: true
+    tools: {deny: [eval]} # mcp-proxy mode block
+    log:
+      requests: true # mcp-proxy logEnabled
+    redact:
+      ru: true # mcp-proxy always ran the Russian rules
+      highEntropy: true
+      disableRules:
+        - jwt
   # env -u SECRET_ONE, SECRET_TWO is dropped: a stdio child inherits only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
   # mcpServers.notes.options.toolFilter is dropped: an empty allow list means no tool filter in mcp-proxy.
   notes:
@@ -44,6 +61,15 @@ servers:
     probeInterval: 20s # mcp-proxy pingInterval
     restart:
       maxBackoff: 30s # mcp-proxy reconnectInterval
+    prompts: {allow: []} # an empty allow list exposes no prompts, as in mcp-proxy
+    resources: {deny: ['notes://private']} # mcp-proxy mode block
+    log:
+      requests: true # mcp-proxy logEnabled
+    redact:
+      ru: true # mcp-proxy always ran the Russian rules
+      highEntropy: true
+      disableRules:
+        - jwt
   plain:
     stdio:
       command: plain-server
@@ -56,6 +82,15 @@ servers:
     probeInterval: 10s # mcp-proxy pingInterval
     restart:
       maxBackoff: 1s # mcp-proxy reconnectInterval
+    auth:
+      public: true # mcp-proxy served it without a token: its authTokens list is empty
+    log:
+      requests: true # mcp-proxy logEnabled
+    redact:
+      ru: true # mcp-proxy always ran the Russian rules
+      highEntropy: true
+      disableRules:
+        - jwt
   shop:
     http:
       url: https://shop.example.com/mcp
@@ -65,6 +100,13 @@ servers:
     probeInterval: 20s # mcp-proxy pingInterval
     restart:
       maxBackoff: 30s # mcp-proxy reconnectInterval
+    resources: {allow: []} # an empty allow list exposes no resources, as in mcp-proxy
+    auth:
+      inherit: false # mcp-proxy: per-server authTokens replace the global ones
+      tokens:
+        shop: ${HUB_TOKEN_SHOP}
+    redact:
+      enabled: false
   wrapped-oddly:
     stdio:
       command: /usr/bin/env
@@ -75,3 +117,11 @@ servers:
     probeInterval: 20s # mcp-proxy pingInterval
     restart:
       maxBackoff: 30s # mcp-proxy reconnectInterval
+    tools: {allow: [read, search]}
+    log:
+      requests: true # mcp-proxy logEnabled
+    redact:
+      ru: true # mcp-proxy always ran the Russian rules
+      highEntropy: true
+      disableRules:
+        - jwt

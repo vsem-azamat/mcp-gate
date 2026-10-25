@@ -41,8 +41,8 @@ func importFile(t *testing.T, name string, opts Options) (*Result, error) {
 	return Import(data, opts)
 }
 
-// anyValue sets every variable, so that imported configs can be loaded.
-func anyValue(string) (string, bool) { return "value", true }
+// anyValue sets every variable, to a value of its own, so that imported configs can be loaded.
+func anyValue(name string) (string, bool) { return "value-" + name, true }
 
 func TestImportSupported(t *testing.T) {
 	t.Parallel()
@@ -71,7 +71,7 @@ func TestImportSupported(t *testing.T) {
 	}
 	notes := c.Servers["notes"]
 	if notes.Stdio.Command != "notes-server" || notes.Stdio.Env["HOME"] != "/srv/notes-home" ||
-		notes.Stdio.Env["NOTES_DB"] != "value" || notes.Stdio.Env["SECRET_ONE"] != "" ||
+		notes.Stdio.Env["NOTES_DB"] != "value-NOTES_DB_PATH" || notes.Stdio.Env["SECRET_ONE"] != "" ||
 		slices.Contains(notes.Stdio.InheritEnv, "HOME") || notes.CallTimeout.D().String() != "3m0s" {
 		t.Errorf("notes = %+v %+v", notes, notes.Stdio)
 	}
@@ -83,6 +83,56 @@ func TestImportSupported(t *testing.T) {
 	if got := c.Servers["plain"].Stdio.Args[1]; got != "$5" {
 		t.Errorf("literal $ = %q", got)
 	}
+	if c.Listen.Addr != "127.0.0.1:9090" || c.StartupGracePeriod.D().String() != "1m30s" ||
+		c.Auth.Tokens["laptop"] != "value-HUB_TOKEN_LAPTOP" || c.Auth.Tokens["phone"] != "value-HUB_TOKEN_PHONE" {
+		t.Errorf("top level = %+v", c)
+	}
+	if notes.Tools != nil || notes.Prompts == nil || len(notes.Prompts.Allow) != 0 || notes.Prompts.Allow == nil ||
+		!slices.Equal(notes.Resources.Deny, []string{"notes://private"}) || !notes.Log.Requests ||
+		!*notes.Redact.Enabled || !notes.Redact.RU || !notes.Redact.HighEntropy || !slices.Equal(notes.Redact.DisableRules, []string{"jwt"}) {
+		t.Errorf("notes serving = %+v %+v", notes, notes.Redact)
+	}
+	if got := c.EffectiveTokens("notes"); len(got) != 2 {
+		t.Errorf("notes tokens = %v", got)
+	}
+	shop := c.Servers["shop"]
+	if got := c.EffectiveTokens("shop"); len(got) != 1 || got["shop"] == "" || shop.Log.Requests || *shop.Redact.Enabled ||
+		shop.Resources == nil || shop.Resources.Allow == nil || shop.Prompts != nil {
+		t.Errorf("shop = %+v, tokens %v", shop, got)
+	}
+	if !c.Servers["plain"].Auth.Public || c.EffectiveTokens("wrapped-oddly")["laptop"] == "" || *c.Servers["wrapped-oddly"].Auth.Inherit != true {
+		t.Errorf("plain or wrapped-oddly auth: %+v %+v", c.Servers["plain"].Auth, c.Servers["wrapped-oddly"].Auth)
+	}
+	if !slices.Equal(c.Servers["clean-room"].Tools.Deny, []string{"eval"}) || !*c.Servers["clean-room"].Redact.Enabled {
+		t.Errorf("clean-room = %+v", c.Servers["clean-room"])
+	}
+}
+
+func TestNameTokens(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		tokens []string
+		want   []string
+	}{
+		{[]string{"${HUB_TOKEN_LAPTOP}", "${HUB_TOKEN_PHONE}"}, []string{"laptop", "phone"}},
+		{[]string{"${HUB_TOKEN_LAPTOP}", "${HUB_TOKEN_PHONE}", "${HUB_TOKEN_MAIL}"}, []string{"laptop", "phone", "mail"}},
+		{[]string{"${MCP_LAPTOP}", "${MCP_LAPTOP_2}"}, []string{"laptop", "laptop_2"}},
+		{[]string{"${TOKEN}"}, []string{"token"}},
+		{[]string{"${A_X}", "${B_X}"}, []string{"a_x", "b_x"}},
+		{[]string{"${T_A}", "${T_}"}, []string{"token1", "token2"}},
+		{[]string{"${T_A}", "plain-secret"}, []string{"token1", "token2"}},
+	} {
+		im := &importer{}
+		doc := &document{tokens: c.tokens}
+		im.nameTokens(doc)
+		var got []string
+		for _, v := range c.tokens {
+			got = append(got, doc.names[v])
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("names of %v = %v, want %v", c.tokens, got, c.want)
+		}
+	}
 }
 
 func TestImportUnimplemented(t *testing.T) {
@@ -93,22 +143,13 @@ func TestImportUnimplemented(t *testing.T) {
 		t.Fatalf("err = %v, want an UnimplementedError", err)
 	}
 	want := []string{
-		"mcpProxy.addr",
-		"mcpProxy.baseURL",
-		"mcpProxy.options.authTokens",
-		"mcpProxy.options.logEnabled",
-		"mcpProxy.options.redact",
-		"mcpProxy.startupGracePeriod",
-		"mcpServers.browser.options.toolFilter",
-		"mcpServers.files.options.redact",
-		"mcpServers.files.options.toolFilter",
+		"mcpProxy.options.redact.escrowMaxEntries",
+		"mcpProxy.options.redact.escrowTTL",
+		"mcpServers.files.options.redact.escrowTTL",
+		"mcpServers.files.options.redact.fileRoots",
+		"mcpServers.files.options.redact.fileTools",
 		"mcpServers.legacy (sse transport)",
 		"mcpServers.mail.oauth",
-		"mcpServers.mail.options.authTokens",
-		"mcpServers.mail.options.logEnabled",
-		"mcpServers.mail.options.promptFilter",
-		"mcpServers.mail.options.resourceFilter",
-		"mcpServers.mail.options.toolFilter",
 	}
 	if !slices.Equal(unimpl.Keys, want) {
 		t.Errorf("unimplemented =\n  %s\nwant\n  %s", strings.Join(unimpl.Keys, "\n  "), strings.Join(want, "\n  "))

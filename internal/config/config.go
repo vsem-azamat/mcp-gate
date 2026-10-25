@@ -28,11 +28,21 @@ const Version = 1
 
 // Defaults applied to keys that are left out.
 const (
-	DefaultName            = "mcp-gate"
-	DefaultMaxMessageBytes = 16 << 20
-	DefaultProbeInterval   = 30 * time.Second
-	DefaultMaxBackoff      = 30 * time.Second
+	DefaultName               = "mcp-gate"
+	DefaultListenAddr         = "127.0.0.1:9090"
+	DefaultStartupGracePeriod = 30 * time.Second
+	DefaultLogLevel           = "info"
+	DefaultMaxMessageBytes    = 16 << 20
+	DefaultProbeInterval      = 30 * time.Second
+	DefaultMaxBackoff         = 30 * time.Second
 )
+
+// DefaultTrustedProxies are the peers whose X-Forwarded-For is read when behindProxy is set
+// and trustedProxies is left out: a reverse proxy on the same host.
+var DefaultTrustedProxies = []string{"127.0.0.1/32", "::1/128"}
+
+// LogLevels are the values logLevel takes.
+var LogLevels = []string{"debug", "info", "warn", "error"}
 
 // DefaultInheritEnv is what a stdio child inherits from the gate's environment when its
 // inheritEnv is left out. A trailing * matches a prefix.
@@ -45,9 +55,37 @@ const PartialMarker = "NOT IMPLEMENTED IN THIS BUILD"
 // Config is a loaded configuration with defaults applied.
 type Config struct {
 	Version int `yaml:"version"`
-	// Name is sent as the client name to downstream servers.
-	Name    string             `yaml:"name,omitempty"`
+	// Name is sent as the client name to downstream servers and named by /_healthz and /_readyz.
+	Name   string `yaml:"name,omitempty"`
+	Listen Listen `yaml:"listen,omitempty"`
+	// StartupGracePeriod bounds how long /_readyz reports "initializing" while servers connect.
+	StartupGracePeriod *Duration `yaml:"startupGracePeriod,omitempty"`
+	// LogLevel is the lowest level logged: debug, info, warn or error.
+	LogLevel string `yaml:"logLevel,omitempty"`
+	// Auth holds the client tokens every server accepts unless it opts out.
+	Auth Tokens `yaml:"auth,omitempty"`
+	// Admin holds the tokens that may read /_status.
+	Admin   Tokens             `yaml:"admin,omitempty"`
 	Servers map[string]*Server `yaml:"servers"`
+}
+
+// Listen configures the upstream listener.
+type Listen struct {
+	// Addr is the host:port to listen on.
+	Addr string `yaml:"addr,omitempty"`
+	// BehindProxy turns off the SDK's check that a request to a loopback address names a
+	// loopback Host, and reads X-Forwarded-For from TrustedProxies.
+	BehindProxy bool `yaml:"behindProxy,omitempty"`
+	// TrustedProxies are the CIDRs of peers whose X-Forwarded-For is believed; nil means
+	// DefaultTrustedProxies.
+	TrustedProxies []string `yaml:"trustedProxies"`
+	// AllowedHosts, if not empty, are the only Host values the MCP routes accept.
+	AllowedHosts []string `yaml:"allowedHosts,omitempty"`
+}
+
+// Tokens maps token names to secrets. The name identifies the caller in logs.
+type Tokens struct {
+	Tokens map[string]string `yaml:"tokens,omitempty"`
 }
 
 // Server is one downstream MCP server. Exactly one of Stdio and HTTP is set.
@@ -64,6 +102,66 @@ type Server struct {
 	ProbeInterval *Duration `yaml:"probeInterval,omitempty"`
 	Restart       Restart   `yaml:"restart,omitempty"`
 	Disabled      bool      `yaml:"disabled,omitempty"`
+
+	// Tools, Prompts and Resources select what the server exposes; nil exposes everything.
+	Tools     *Filter    `yaml:"tools,omitempty"`
+	Prompts   *Filter    `yaml:"prompts,omitempty"`
+	Resources *Filter    `yaml:"resources,omitempty"`
+	Auth      ServerAuth `yaml:"auth,omitempty"`
+	Log       Log        `yaml:"log,omitempty"`
+	Redact    Redact     `yaml:"redact,omitempty"`
+}
+
+// Filter is an allow list or a deny list; exactly one is set.
+type Filter struct {
+	Allow []string `yaml:"allow"`
+	Deny  []string `yaml:"deny"`
+}
+
+// ServerAuth selects the tokens a server accepts.
+type ServerAuth struct {
+	// Inherit adds the global auth.tokens to the server's own; nil means true.
+	Inherit *bool `yaml:"inherit,omitempty"`
+	// Tokens are accepted by this server only.
+	Tokens map[string]string `yaml:"tokens,omitempty"`
+	// Public serves the server without a token. It excludes tokens.
+	Public bool `yaml:"public,omitempty"`
+}
+
+// Log configures per-server logging.
+type Log struct {
+	// Requests logs every HTTP request to the server's route.
+	Requests bool `yaml:"requests,omitempty"`
+}
+
+// Redact configures the redaction of the server's results.
+type Redact struct {
+	// Enabled redacts results; nil means true.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// RU adds the Russian credential-label rules.
+	RU bool `yaml:"ru,omitempty"`
+	// HighEntropy adds the high-entropy heuristic.
+	HighEntropy bool `yaml:"highEntropy,omitempty"`
+	// DisableRules lists rule kinds that are never reported.
+	DisableRules []string `yaml:"disableRules,omitempty"`
+}
+
+// EffectiveTokens returns the tokens server name accepts, by name; nil for a public server.
+func (c *Config) EffectiveTokens(name string) map[string]string {
+	s := c.Servers[name]
+	if s == nil || s.Auth.Public {
+		return nil
+	}
+	out := make(map[string]string, len(c.Auth.Tokens)+len(s.Auth.Tokens))
+	if s.Auth.Inherit == nil || *s.Auth.Inherit {
+		for k, v := range c.Auth.Tokens {
+			out[k] = v
+		}
+	}
+	for k, v := range s.Auth.Tokens {
+		out[k] = v
+	}
+	return out
 }
 
 // Stdio starts the server as a child process that speaks MCP on stdin and stdout.
@@ -171,7 +269,26 @@ func (c *Config) applyDefaults() {
 	if c.Name == "" {
 		c.Name = DefaultName
 	}
+	if c.Listen.Addr == "" {
+		c.Listen.Addr = DefaultListenAddr
+	}
+	if c.Listen.TrustedProxies == nil {
+		c.Listen.TrustedProxies = append([]string(nil), DefaultTrustedProxies...)
+	}
+	if c.StartupGracePeriod == nil {
+		v := Duration(DefaultStartupGracePeriod)
+		c.StartupGracePeriod = &v
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = DefaultLogLevel
+	}
 	for _, s := range c.Servers {
+		if s.Redact.Enabled == nil {
+			s.Redact.Enabled = new(true)
+		}
+		if s.Auth.Inherit == nil && !s.Auth.Public {
+			s.Auth.Inherit = new(true)
+		}
 		if s.MaxMessageBytes == nil {
 			v := ByteSize(DefaultMaxMessageBytes)
 			s.MaxMessageBytes = &v

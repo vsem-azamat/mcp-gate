@@ -1,21 +1,25 @@
 # Written by mcp-gate import from an mcp-proxy config. Review the comments, then run mcp-gate check.
 # mcpProxy.version is dropped: mcp-gate reports its own version.
+# mcpProxy.baseURL is dropped: mcp-gate serves each server at /<name>/mcp.
 # mcpProxy.type is dropped: mcp-gate serves streamable HTTP.
 # mcpProxy.options.panicIfInvalid is dropped: it has no equivalent.
 # mcpProxy.options.autoReconnect is dropped: mcp-gate always restarts a failed server, with backoff up to restart.maxBackoff.
+# logEnabled also turned on the MCP logging capability; mcp-gate does not offer it, and logs requests only.
 # stdio servers no longer inherit the whole environment: only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
-# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.addr
-# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.baseURL
-# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.options.authTokens
-# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.options.logEnabled
-# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.options.redact
-# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.startupGracePeriod
+# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.options.redact.escrowMaxEntries
+# NOT IMPLEMENTED IN THIS BUILD: mcpProxy.options.redact.escrowTTL
 # NOT IMPLEMENTED IN THIS BUILD: mcpServers.legacy (sse transport)
 version: 1
 name: hub-example
+listen:
+  addr: 127.0.0.1:9090 # mcp-proxy mcpProxy.addr
+startupGracePeriod: 1m30s
+auth:
+  tokens:
+    hub_token_laptop: ${HUB_TOKEN_LAPTOP}
+    hub_token_phone: ${HUB_TOKEN_PHONE}
 servers:
   # env -u HUB_TOKEN_LAPTOP, HUB_TOKEN_PHONE is dropped: a stdio child inherits only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.browser.options.toolFilter
   browser:
     stdio:
       command: browser-server
@@ -24,23 +28,38 @@ servers:
     callTimeout: 0s # mcp-proxy had no timeout for this server
     restart:
       maxBackoff: 30s # mcp-proxy reconnectInterval
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.files.options.redact
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.files.options.toolFilter
+    tools: {deny: [eval]} # mcp-proxy mode block
+    log:
+      requests: true # mcp-proxy logEnabled
+    redact:
+      ru: true # mcp-proxy always ran the Russian rules
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.files.options.redact.escrowTTL
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.files.options.redact.fileRoots
+  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.files.options.redact.fileTools
   files:
     http:
       url: https://files.example.com/mcp
     callTimeout: 2m
     restart:
       maxBackoff: 30s # mcp-proxy reconnectInterval
+    tools: {allow: [read_file, list_files]}
+    prompts: {allow: []} # an empty allow list exposes no prompts, as in mcp-proxy
+    resources: {allow: []} # an empty allow list exposes no resources, as in mcp-proxy
+    redact:
+      ru: true # mcp-proxy always ran the Russian rules
   # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.oauth
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.authTokens
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.logEnabled
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.promptFilter
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.resourceFilter
-  # NOT IMPLEMENTED IN THIS BUILD: mcpServers.mail.options.toolFilter
   mail:
     http:
       url: https://mail.example.com/mcp
     callTimeout: 2m
     restart:
       maxBackoff: 30s # mcp-proxy reconnectInterval
+    tools: {allow: [search]}
+    prompts: {allow: []} # an empty allow list exposes no prompts, as in mcp-proxy
+    resources: {allow: []} # an empty allow list exposes no resources, as in mcp-proxy
+    auth:
+      inherit: false # mcp-proxy: per-server authTokens replace the global ones
+      tokens:
+        mail_token: ${MAIL_TOKEN}
+    redact:
+      ru: true # mcp-proxy always ran the Russian rules

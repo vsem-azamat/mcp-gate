@@ -96,6 +96,10 @@ func (im *importer) ignored(o *object) {
 type document struct {
 	notes   []string // comments at the top
 	name    string
+	addr    string
+	grace   *time.Duration
+	tokens  []string          // the global client tokens, converted
+	names   map[string]string // token value to token name
 	servers []*server
 }
 
@@ -110,6 +114,13 @@ type server struct {
 	probe    *time.Duration
 	backoff  *time.Duration
 	disabled bool
+
+	filters  [3]*config.Filter // tools, prompts, resources
+	fNotes   [3]string         // comments on the filters
+	tokens   []string          // own tokens replacing the global ones; nil inherits
+	public   string            // set to a comment when the server needs no token
+	requests bool              // log.requests
+	redact   redactBlock
 }
 
 // options are the mcp-proxy options of the proxy or of one server.
@@ -117,6 +128,17 @@ type options struct {
 	pingInterval, reconnectInterval *time.Duration
 	disabled                        bool
 	notes                           []string
+	tokens                          []string // authTokens, converted; nil when absent
+	logEnabled                      *bool
+	redact                          *redactBlock
+	filters                         [3]*config.Filter
+	fNotes                          [3]string
+}
+
+// redactBlock is an mcp-proxy redact block.
+type redactBlock struct {
+	present, enabled, highEntropy bool
+	disableRules                  []string
 }
 
 func (im *importer) root(v any) (*document, error) {
@@ -170,6 +192,11 @@ func (im *importer) root(v any) (*document, error) {
 	if len(doc.servers) == 0 {
 		return nil, errors.New("no server could be imported")
 	}
+	doc.tokens = global.tokens
+	im.nameTokens(doc)
+	if slices.ContainsFunc(doc.servers, func(s *server) bool { return s.requests }) {
+		doc.notes = append(doc.notes, "logEnabled also turned on the MCP logging capability; mcp-gate does not offer it, and logs requests only.")
+	}
 	if slices.ContainsFunc(doc.servers, func(s *server) bool { return s.stdio != nil }) {
 		doc.notes = append(doc.notes, "stdio servers no longer inherit the whole environment: only inheritEnv (default "+
 			strings.Join(config.DefaultInheritEnv, " ")+") and env.")
@@ -193,12 +220,8 @@ func (im *importer) proxy(p *object, doc *document) (*options, error) {
 	if _, ok, _ := p.get("version"); ok {
 		doc.notes = append(doc.notes, "mcpProxy.version is dropped: mcp-gate reports its own version.")
 	}
-	for _, k := range []string{"baseURL", "addr", "startupGracePeriod"} {
-		if _, ok, err := p.get(k); err != nil {
-			return nil, err
-		} else if ok {
-			im.notImplemented(p.sub(k))
-		}
+	if err := im.listen(p, doc); err != nil {
+		return nil, err
 	}
 	typ, ok, err := p.str("type")
 	if err != nil {
@@ -232,26 +255,8 @@ func (im *importer) options(o *object, global bool) (*options, error) {
 	if _, ok, _ := o.get("panicIfInvalid"); ok {
 		out.notes = append(out.notes, o.path+".panicIfInvalid is dropped: it has no equivalent.")
 	}
-	for _, k := range []string{"logEnabled", "authTokens", "promptFilter", "resourceFilter", "redact"} {
-		if _, ok, err := o.get(k); err != nil {
-			return nil, err
-		} else if ok {
-			im.notImplemented(o.sub(k))
-		}
-	}
-	tf, err := o.object("toolFilter")
-	if err != nil {
+	if err := im.serving(o, global, out); err != nil {
 		return nil, err
-	}
-	if tf != nil {
-		switch {
-		case global:
-			im.warn("%s.toolFilter is dropped: mcp-proxy does not apply a global filter to servers", o.path)
-		case isEmptyAllow(tf):
-			out.notes = append(out.notes, o.path+".toolFilter is dropped: an empty allow list means no tool filter in mcp-proxy.")
-		default:
-			im.notImplemented(o.sub("toolFilter"))
-		}
 	}
 	disabled, ok, err := o.boolean("disabled")
 	if err != nil {
@@ -278,12 +283,6 @@ func (im *importer) options(o *object, global bool) (*options, error) {
 	}
 	im.ignored(o)
 	return out, nil
-}
-
-func isEmptyAllow(f *object) bool {
-	mode, _, _ := f.str("mode")
-	list, _ := f.strings("list")
-	return strings.EqualFold(mode, "allow") && len(list) == 0
 }
 
 func (im *importer) server(servers *object, name string, global *options) (*server, error) {
@@ -374,6 +373,7 @@ func (im *importer) server(servers *object, name string, global *options) (*serv
 	}
 	s.notes = append(s.notes, local.notes...)
 	s.disabled = local.disabled
+	im.applyServing(o.path, s, local, global)
 	s.probe = cmpOr(local.pingInterval, global.pingInterval)
 	s.backoff = cmpOr(local.reconnectInterval, global.reconnectInterval)
 	s.probe = im.atLeast(s.probe, config.MinProbeInterval, o.path+": the ping interval")
