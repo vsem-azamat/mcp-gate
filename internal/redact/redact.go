@@ -271,7 +271,8 @@ func (s span) value(text string) string {
 
 // mergeSpans adds the spans of a lower-priority rule to kept. Spans that overlap are merged
 // into one span covering all of them, with the kind of the one from the rule with the lowest
-// priority number, so that no part of an overlapping candidate stays visible. Both inputs are
+// priority number, so that no part of an overlapping candidate stays visible. Spans that only
+// touch stay separate. Both inputs are
 // sorted by position and free of overlaps, so one linear pass suffices.
 func mergeSpans(kept, added []span) []span {
 	if len(added) == 0 {
@@ -288,10 +289,16 @@ func mergeSpans(kept, added []span) []span {
 			return
 		}
 		last := &merged[n-1]
-		last.end = max(last.end, s.end)
+		end := max(last.end, s.end)
+		winner := *last
 		if s.priority < last.priority {
-			last.kind, last.priority, last.jsonEscaped = s.kind, s.priority, s.jsonEscaped
+			winner = s
 		}
+		// A value is decoded as a JSON string only when the escaped finding covers the whole
+		// merged span; otherwise the span holds text outside the literal and is given raw.
+		covers := winner.start == last.start && winner.end == end
+		last.end, last.kind, last.priority = end, winner.kind, winner.priority
+		last.jsonEscaped = winner.jsonEscaped && covers
 	}
 	i, j := 0, 0
 	for i < len(kept) || j < len(added) {

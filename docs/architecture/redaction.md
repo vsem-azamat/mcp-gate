@@ -21,7 +21,7 @@ A text is scanned as follows:
 
 1. Escaped line breaks (`\n`, `\r`, `\t` written as two characters) are masked with NUL bytes of the same length, so rules see a boundary there and offsets stay valid.
 2. Each enabled rule runs in priority order. A rule may be skipped by a cheap prefilter (substrings that must occur) or precheck. Its regular expression yields candidates, and an accept function may narrow a candidate, change its kind or reject it (placeholders, `PWD=/path`, plain words after a Russian label).
-3. A rule's findings are merged into those of earlier rules in one linear pass. Overlapping findings become one finding over their union, with the kind of the earliest rule, so that no part of either stays visible.
+3. A rule's findings are merged into those of earlier rules in one linear pass. Overlapping findings become one finding over their union, with the kind of the earliest rule, so that no part of either stays visible. A replacer that keeps values, such as an escrow, then keeps the merged text as one value.
 
 `RedactString` first checks whether the text is a JSON object or array. If so, `RedactJSON` walks it byte by byte with a stack of member names, rewrites only the string values (and numbers under secret members), and copies every other byte. String values that are themselves JSON are followed up to five levels.
 
