@@ -14,6 +14,17 @@
 - the advertised capabilities, overriding what the SDK infers from the catalog;
 - JSON responses instead of event streams.
 
+## Scriptable fakes
+
+[`internal/testkit/fake.go`](../../internal/testkit/fake.go) describes a fake server with `testkit.Fake` and serves it two ways:
+
+- `testkit.StdioCommand` returns a command that re-executes the test binary as a stdio MCP server. A package that uses it calls `testkit.RunFake()` first in `TestMain`, which runs the fake and exits when the binary was started that way.
+- `testkit.NewFakeHTTP` serves it over stateless streamable HTTP, optionally with JSON responses or gzip, and `SetDown` makes it answer 503.
+
+Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `hang`, `crash` (the stdio fake exits), `env` and `pids`. Options narrow the protocol versions, leave `server/discover` unanswered (a legacy server), handle one request at a time, stop answering after a while, refuse probes with an error reply, and for stdio exit at start, ignore SIGTERM, start a grandchild in the process group, or write to stderr and stdout.
+
+`internal/downstream` runs the downstream half of the version matrix with them: every protocol version the SDK supports, over stdio, HTTP with event streams and HTTP with JSON. `internal/procutil` re-executes its test binary the same way, with its own helper modes.
+
 ## Goroutine leaks
 
 Every package with network tests verifies in `TestMain` with [goleak](https://github.com/uber-go/goleak) that no goroutine outlives the tests. Code that makes HTTP requests closes its idle connections when it is done, or the leak check fails.

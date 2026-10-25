@@ -6,6 +6,6 @@ How to use the `mcp-gate` subcommands. The exact behaviour of each is specified 
 
 | Page | Contents |
 | --- | --- |
-| [check](check.md) | Validate a config |
+| [check](check.md) | Validate a config, and connect to its servers |
 | [compare](compare.md) | Diff the catalogs two MCP endpoints or snapshots serve |
 | [import](import.md) | Convert an mcp-proxy config into an mcp-gate config |

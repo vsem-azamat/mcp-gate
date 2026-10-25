@@ -7,10 +7,14 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/vsem-azamat/mcp-gate/internal/testkit"
 	"github.com/vsem-azamat/mcp-gate/internal/version"
 )
 
-func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+func TestMain(m *testing.M) {
+	testkit.RunFake()
+	goleak.VerifyTestMain(m)
+}
 
 func noEnv(string) (string, bool) { return "", false }
 

@@ -103,10 +103,18 @@ linters:
       - path: ^internal/redact/mcpredact/
         linters: [staticcheck]
         text: SA1019.*(ToolUseContent|ToolResultContent)
-      # Tests read their own fixtures.
+      # Tests read their own fixtures and start the test binary as a child.
       - path: _test\.go$
         linters: [gosec]
-        text: G304
+        text: G(204|304|702)
+      # The procutil test helpers report the environment they were given.
+      - path: ^internal/procutil/.*_test\.go$
+        linters: [forbidigo]
+        text: os\.Environ
+      # The fakes report their own environment, so tests can check what a child inherits.
+      - path: ^internal/testkit/
+        linters: [forbidigo]
+        text: os\.Environ
       # The command is where output is printed and the environment is read.
       - path: ^cmd/
         linters: [forbidigo]

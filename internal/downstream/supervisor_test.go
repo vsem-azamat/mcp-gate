@@ -1,0 +1,546 @@
+package downstream
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.uber.org/goleak"
+
+	"github.com/vsem-azamat/mcp-gate/internal/testkit"
+)
+
+func TestMain(m *testing.M) {
+	testkit.RunFake()
+	goleak.VerifyTestMain(m)
+}
+
+// fast shortens the supervisor's timings for tests.
+func fast(o Options) Options {
+	o.InitialBackoff = 20 * time.Millisecond
+	o.MaxBackoff = 100 * time.Millisecond
+	o.StopGrace = time.Second
+	if o.ProbeInterval == 0 {
+		o.ProbeInterval = time.Hour
+	}
+	return o
+}
+
+func stdioOptions(t *testing.T, f testkit.Fake) Options {
+	t.Helper()
+	cmd, args := testkit.StdioCommand(t, f)
+	return fast(Options{
+		Name: "fake",
+		Stdio: &Stdio{
+			Command: cmd, Args: args,
+			InheritEnv: []string{"PATH", "LC_*"},
+			ParentEnv:  []string{"PATH=/usr/bin:/bin", "LC_ALL=C", "GATE_SECRET=gate-secret-value"},
+			Env:        map[string]string{"FAKE_MODE": "test"},
+		},
+	})
+}
+
+func httpOptions(t *testing.T, f testkit.Fake, ho testkit.FakeHTTPOptions) (Options, *testkit.FakeHTTP) {
+	t.Helper()
+	h := testkit.NewFakeHTTP(t, f, ho)
+	return fast(Options{Name: "fake", HTTP: &HTTP{URL: h.URL()}}), h
+}
+
+func start(t *testing.T, o Options) *Supervisor {
+	t.Helper()
+	s, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Start(t.Context())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.Stop(ctx); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	})
+	return s
+}
+
+func waitFor(t *testing.T, s *Supervisor, what string, cond func(Status) bool) Status {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	if err := s.Wait(ctx, cond); err != nil {
+		t.Fatalf("waiting for %s: %v (status %+v)", what, err, s.Status())
+	}
+	return s.Status()
+}
+
+func waitReady(t *testing.T, s *Supervisor) Status {
+	t.Helper()
+	return waitFor(t, s, "ready", func(st Status) bool { return st.State == Ready })
+}
+
+func callTool(t *testing.T, s *Supervisor, name string, args map[string]any) (string, error) {
+	t.Helper()
+	var out string
+	err := s.Call(t.Context(), func(ctx context.Context, cs *mcp.ClientSession) error {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			return err
+		}
+		if len(res.Content) > 0 {
+			if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+				out = tc.Text
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+func mustEcho(t *testing.T, s *Supervisor) {
+	t.Helper()
+	if got, err := callTool(t, s, "echo", map[string]any{"text": "hello"}); err != nil || got != "hello" {
+		t.Fatalf("echo = %q, %v", got, err)
+	}
+}
+
+type transportCase struct {
+	name string
+	opts func(t *testing.T, f testkit.Fake) Options
+}
+
+var transports = []transportCase{
+	{"stdio", stdioOptions},
+	{"http-sse", func(t *testing.T, f testkit.Fake) Options {
+		o, _ := httpOptions(t, f, testkit.FakeHTTPOptions{})
+		return o
+	}},
+	{"http-json", func(t *testing.T, f testkit.Fake) Options {
+		o, _ := httpOptions(t, f, testkit.FakeHTTPOptions{JSONResponse: true})
+		return o
+	}},
+}
+
+// TestVersionMatrix connects to servers of every protocol version over every transport.
+func TestVersionMatrix(t *testing.T) {
+	t.Parallel()
+	for _, tr := range transports {
+		for _, v := range mcp.SupportedProtocolVersions() {
+			t.Run(tr.name+"/"+v, func(t *testing.T) {
+				t.Parallel()
+				s := start(t, tr.opts(t, testkit.Fake{ProtocolVersions: []string{v}}))
+				st := waitReady(t, s)
+				if st.ProtocolVersion != v || st.AutoPinned {
+					t.Errorf("negotiated %s (auto-pinned %v), want %s", st.ProtocolVersion, st.AutoPinned, v)
+				}
+				mustEcho(t, s)
+			})
+		}
+	}
+}
+
+func TestManualPin(t *testing.T) {
+	t.Parallel()
+	for _, tr := range transports {
+		t.Run(tr.name, func(t *testing.T) {
+			t.Parallel()
+			o := tr.opts(t, testkit.Fake{})
+			o.ProtocolVersion = "2025-06-18"
+			s := start(t, o)
+			if st := waitReady(t, s); st.ProtocolVersion != "2025-06-18" || st.AutoPinned {
+				t.Errorf("status = %+v, want the pinned 2025-06-18", st)
+			}
+			mustEcho(t, s)
+		})
+	}
+}
+
+func TestAutoPinAfterSilentDiscover(t *testing.T) {
+	t.Parallel()
+	for _, tr := range transports {
+		t.Run(tr.name, func(t *testing.T) {
+			t.Parallel()
+			o := tr.opts(t, testkit.Fake{SilentDiscover: true})
+			// The pinned retry must finish within this to be kept, also on a loaded runner.
+			o.DiscoverTimeout = 2 * time.Second
+			var mu sync.Mutex
+			var learned []string
+			o.OnPinLearned = func(v string) {
+				mu.Lock()
+				learned = append(learned, v)
+				mu.Unlock()
+			}
+			s := start(t, o)
+			st := waitReady(t, s)
+			if st.ProtocolVersion != AutoPinVersion || !st.AutoPinned {
+				t.Errorf("status = %+v, want the automatic pin", st)
+			}
+			mu.Lock()
+			if len(learned) != 1 || learned[0] != AutoPinVersion {
+				t.Errorf("OnPinLearned calls = %v", learned)
+			}
+			mu.Unlock()
+			mustEcho(t, s)
+		})
+	}
+}
+
+func TestSlowStartIsNotLearned(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{StartDelay: 700 * time.Millisecond})
+	o.DiscoverTimeout = 300 * time.Millisecond
+	o.OnPinLearned = func(string) { t.Error("a slow start was learned as a pin") }
+	s := start(t, o)
+	if st := waitReady(t, s); st.ProtocolVersion != AutoPinVersion || !st.AutoPinned {
+		t.Errorf("status = %+v, want this session on the automatic pin", st)
+	}
+	mustEcho(t, s)
+}
+
+func TestErrorsHideTheURL(t *testing.T) {
+	t.Parallel()
+	o := fast(Options{Name: "remote", HTTP: &HTTP{URL: "http://127.0.0.1:1/s/path-secret-123/mcp?key=query-secret-456"}})
+	s := start(t, o)
+	st := waitFor(t, s, "backoff", func(st Status) bool { return st.State == Backoff })
+	if strings.Contains(st.LastError, "secret-") || !strings.Contains(st.LastError, "<servers.remote.http.url>") {
+		t.Errorf("last error = %q", st.LastError)
+	}
+}
+
+func TestLearnedPinSkipsDiscover(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{SilentDiscover: true})
+	o.LearnedPin = AutoPinVersion
+	o.DiscoverTimeout = time.Hour // a discover attempt would never finish
+	s := start(t, o)
+	if st := waitReady(t, s); st.ProtocolVersion != AutoPinVersion || !st.AutoPinned {
+		t.Errorf("status = %+v", st)
+	}
+}
+
+func TestStdioCleanEnvironment(t *testing.T) {
+	t.Parallel()
+	s := start(t, stdioOptions(t, testkit.Fake{}))
+	waitReady(t, s)
+	env, err := callTool(t, s, "env", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env != "FAKE_MODE=test\nLC_ALL=C\nPATH=/usr/bin:/bin" {
+		t.Errorf("child environment = %q", env)
+	}
+}
+
+func TestStdioOversizedFrameFailsOnlyItsCall(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{})
+	o.MaxMessageBytes = 64 << 10
+	s := start(t, o)
+	pid := waitReady(t, s).PID
+	// A slow call runs while the oversized response arrives; it must not fail.
+	slow := make(chan error, 1)
+	go func() {
+		_, err := callTool(t, s, "sleep", map[string]any{"ms": 300})
+		slow <- err
+	}()
+	_, err := callTool(t, s, "big", map[string]any{"bytes": 1 << 20})
+	if err == nil || !strings.Contains(err.Error(), "maxMessageBytes") {
+		t.Errorf("big call: err = %v, want the size error", err)
+	}
+	if err := <-slow; err != nil {
+		t.Errorf("concurrent call failed: %v", err)
+	}
+	mustEcho(t, s)
+	if got, err := callTool(t, s, "big", map[string]any{"bytes": 32 << 10}); err != nil || len(got) != 32<<10 {
+		t.Errorf("a response under the limit: %d bytes, %v", len(got), err)
+	}
+	if st := s.Status(); st.PID != pid || st.Restarts != 0 || st.State != Ready {
+		t.Errorf("the session did not survive: %+v", st)
+	}
+}
+
+func TestHTTPOversizedResponseFailsOnlyItsCall(t *testing.T) {
+	t.Parallel()
+	for _, ho := range []testkit.FakeHTTPOptions{{}, {JSONResponse: true}, {JSONResponse: true, Gzip: true}, {Gzip: true}} {
+		t.Run(strconv.FormatBool(ho.JSONResponse)+"-gzip-"+strconv.FormatBool(ho.Gzip), func(t *testing.T) {
+			t.Parallel()
+			o, _ := httpOptions(t, testkit.Fake{}, ho)
+			o.MaxMessageBytes = 64 << 10
+			s := start(t, o)
+			waitReady(t, s)
+			_, err := callTool(t, s, "big", map[string]any{"bytes": 1 << 20})
+			if err == nil || !strings.Contains(err.Error(), "maxMessageBytes") {
+				t.Errorf("big call: err = %v, want the size error", err)
+			}
+			mustEcho(t, s)
+			if got, err := callTool(t, s, "big", map[string]any{"bytes": 32 << 10}); err != nil || len(got) != 32<<10 {
+				t.Errorf("a response under the limit: %d bytes, %v", len(got), err)
+			}
+			if st := s.Status(); st.Restarts != 0 || st.State != Ready {
+				t.Errorf("the session did not survive: %+v", st)
+			}
+		})
+	}
+}
+
+func TestStdioNoiseOnStdout(t *testing.T) {
+	t.Parallel()
+	s := start(t, stdioOptions(t, testkit.Fake{StdoutNoise: "starting up, not JSON"}))
+	waitReady(t, s)
+	mustEcho(t, s)
+}
+
+func TestCrashRestarts(t *testing.T) {
+	t.Parallel()
+	s := start(t, stdioOptions(t, testkit.Fake{}))
+	pid := waitReady(t, s).PID
+	if _, err := callTool(t, s, "crash", nil); err == nil {
+		t.Error("the crashing call succeeded")
+	}
+	st := waitFor(t, s, "restart", func(st Status) bool { return st.State == Ready && st.Restarts == 1 })
+	if st.PID == pid || !strings.Contains(st.LastError, "exit status 3") && !strings.Contains(st.LastError, "closed") {
+		t.Errorf("status after restart = %+v", st)
+	}
+	mustEcho(t, s)
+}
+
+func TestBackoff(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{ExitAtStart: 7})
+	s := start(t, o)
+	st := waitFor(t, s, "several restarts", func(st Status) bool { return st.Restarts >= 4 && st.State == Backoff })
+	if st.LastError == "" {
+		t.Error("no error recorded")
+	}
+	var delays []time.Duration
+	d := o.InitialBackoff
+	for range 5 {
+		delays = append(delays, d)
+		d = min(d*2, o.MaxBackoff)
+	}
+	if want := []int64{20, 40, 80, 100, 100}; !equalMs(delays, want) {
+		t.Errorf("delays = %v", delays)
+	}
+	if _, err := callTool(t, s, "echo", nil); !errors.As(err, new(*NotReadyError)) {
+		t.Errorf("call during backoff: err = %v, want NotReadyError", err)
+	}
+}
+
+func equalMs(got []time.Duration, want []int64) bool {
+	for i := range got {
+		if got[i].Milliseconds() != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestNoProbesWhileCallsRun(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{ProtocolVersions: []string{"2025-11-25"}}) // probes are pings
+	o.ProbeInterval = 20 * time.Millisecond
+	s := start(t, o)
+	pid := waitReady(t, s).PID
+	if _, err := callTool(t, s, "sleep", map[string]any{"ms": 500}); err != nil {
+		t.Fatalf("the long call failed: %v", err)
+	}
+	out, err := callTool(t, s, "stats", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats struct{ PingsDuringCalls int }
+	if err := json.Unmarshal([]byte(out), &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.PingsDuringCalls != 0 {
+		t.Errorf("%d probes were sent during the call", stats.PingsDuringCalls)
+	}
+	if st := s.Status(); st.PID != pid || st.Restarts != 0 {
+		t.Errorf("the server was restarted during a call: %+v", st)
+	}
+}
+
+func TestProbeErrorReplyMeansAlive(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{RefuseProbes: true})
+	o.ProbeInterval = 100 * time.Millisecond // also the probe timeout, roomy enough under -race
+	o.ProbeFailures = 1
+	s := start(t, o)
+	pid := waitReady(t, s).PID
+	time.Sleep(700 * time.Millisecond)
+	if st := s.Status(); st.PID != pid || st.Restarts != 0 || st.State != Ready {
+		t.Errorf("an error reply counted as a failure: %+v", st)
+	}
+}
+
+func TestFrozenServerIsRestarted(t *testing.T) {
+	t.Parallel()
+	for _, tr := range transports[:2] {
+		t.Run(tr.name, func(t *testing.T) {
+			t.Parallel()
+			o := tr.opts(t, testkit.Fake{FreezeAfter: 300 * time.Millisecond})
+			o.ProbeInterval = 50 * time.Millisecond
+			o.ProbeTimeout = 40 * time.Millisecond
+			s := start(t, o)
+			waitReady(t, s)
+			waitFor(t, s, "degraded", func(st Status) bool { return st.State == Degraded })
+			st := waitFor(t, s, "a restart", func(st Status) bool { return st.Restarts >= 1 })
+			if !strings.Contains(st.LastError, "probe") && !strings.Contains(st.LastError, "probes") {
+				t.Errorf("last error = %q", st.LastError)
+			}
+		})
+	}
+}
+
+func TestHTTPDownAndUp(t *testing.T) {
+	t.Parallel()
+	o, h := httpOptions(t, testkit.Fake{}, testkit.FakeHTTPOptions{})
+	o.ProbeInterval = 30 * time.Millisecond
+	s := start(t, o)
+	waitReady(t, s)
+	h.SetDown(true)
+	waitFor(t, s, "backoff", func(st Status) bool { return st.State == Backoff })
+	h.SetDown(false)
+	waitFor(t, s, "ready again", func(st Status) bool { return st.State == Ready && st.Restarts >= 1 })
+	mustEcho(t, s)
+}
+
+func TestStopKillsTheProcessGroup(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{Grandchild: true, IgnoreSIGTERM: true})
+	o.StopGrace = 200 * time.Millisecond
+	s, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Start(t.Context())
+	waitReady(t, s)
+	out, err := callTool(t, s, "pids", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pids struct{ PID, PGID, Grandchild int }
+	if err := json.Unmarshal([]byte(out), &pids); err != nil {
+		t.Fatal(err)
+	}
+	if pids.PGID != pids.PID || pids.Grandchild == 0 {
+		t.Fatalf("pids = %+v: the fake is not a group leader with a grandchild", pids)
+	}
+	if err := s.Stop(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range []int{pids.PID, pids.Grandchild} {
+		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("process %d is still there after Stop (%v)", pid, err)
+		}
+	}
+	if s.Status().State != Stopped {
+		t.Errorf("state = %s", s.Status().State)
+	}
+}
+
+func TestStderrIsLoggedRedacted(t *testing.T) {
+	t.Parallel()
+	const token = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
+	var logs syncBuffer
+	o := stdioOptions(t, testkit.Fake{Stderr: []string{"booting", "using token " + token}})
+	o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	s := start(t, o)
+	waitReady(t, s)
+	st := waitFor(t, s, "stderr", func(st Status) bool { return len(st.Stderr) == 2 })
+	if st.Stderr[0] != "booting" || strings.Contains(st.Stderr[1], token) || !strings.Contains(st.Stderr[1], "[REDACTED:github_token]") {
+		t.Errorf("stderr tail = %q", st.Stderr)
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Error("the token reached the log")
+	}
+}
+
+func TestOOMScoreAdjOfChild(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux only")
+	}
+	s := start(t, stdioOptions(t, testkit.Fake{}))
+	pid := waitReady(t, s).PID
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/oom_score_adj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != "500" {
+		t.Errorf("oom_score_adj = %s", data)
+	}
+}
+
+func TestCallTimeout(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{})
+	o.CallTimeout = 100 * time.Millisecond
+	s := start(t, o)
+	waitReady(t, s)
+	_, err := callTool(t, s, "hang", nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want a deadline", err)
+	}
+	mustEcho(t, s)
+}
+
+func TestDisabled(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{})
+	o.Disabled = true
+	s := start(t, o)
+	if st := s.Status(); st.State != Disabled {
+		t.Errorf("state = %s", st.State)
+	}
+	var nr *NotReadyError
+	if _, err := callTool(t, s, "echo", nil); !errors.As(err, &nr) || nr.State != Disabled {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestStartFailureIsRecorded(t *testing.T) {
+	t.Parallel()
+	s := start(t, fast(Options{Name: "missing", Stdio: &Stdio{Command: "/nonexistent/mcp-server"}}))
+	st := waitFor(t, s, "backoff", func(st Status) bool { return st.State == Backoff })
+	if !strings.Contains(st.LastError, "start") {
+		t.Errorf("last error = %q", st.LastError)
+	}
+}
+
+func TestNewRejectsBadOptions(t *testing.T) {
+	t.Parallel()
+	if _, err := New(Options{Name: "x"}); err == nil {
+		t.Error("New without a transport succeeded")
+	}
+	if _, err := New(Options{Name: "x", Stdio: &Stdio{}, HTTP: &HTTP{}}); err == nil {
+		t.Error("New with two transports succeeded")
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
