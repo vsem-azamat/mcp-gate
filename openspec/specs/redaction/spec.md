@@ -133,7 +133,7 @@ The text that replaces each finding SHALL come from a replacer passed with each 
 The adapter SHALL redact tool call results, prompt results and resource read results as the SDK decodes them, covering:
 
 - the text of text content, rewritten as JSON when it is a JSON document;
-- embedded resources and resource contents: their URI as text, their text, and blobs with a text MIME type (`text/*`, `*+json`, `*+xml`, JSON, XML, YAML, TOML, shell, JavaScript, PEM, form data) that are valid UTF-8; blobs of other types or not valid UTF-8, and image and audio data, SHALL pass unchanged;
+- embedded resources and resource contents: their URI as text, their text, and blobs with a text MIME type (`text/*`, `*+json`, `*+xml`, JSON, XML, YAML, TOML, shell, JavaScript, PEM, form data); blobs of other types, and image and audio data, SHALL pass unchanged;
 - the URI, name, title, description and icon URLs of resource links, as text (icon `data:image/` URIs pass unchanged);
 - tool-use input and tool-result content, its nested content and structured content;
 - `structuredContent` and every `_meta` (of the result, of each content block, of resource contents), rewritten as JSON;
@@ -162,7 +162,7 @@ The adapter SHALL redact the message of a downstream error and, for a JSON-RPC e
 
 ### Requirement: Failing closed
 
-When a result or error cannot be redacted completely, the adapter SHALL return an error and no result, never the original. That covers a value that does not encode or does not decode again, a content kind the adapter does not know, a text, encoded value or error message larger than the configured limit, a blob with a text MIME type larger than 8 MiB, a result that carries non-empty input requests or request state (a multi-round-trip result), and a panic anywhere during redaction, including in the replacer. The error SHALL NOT quote the content that failed or the panic value.
+When a result or error cannot be redacted completely, the adapter SHALL return an error and no result, never the original. That covers a value that does not encode or does not decode again, a content kind the adapter does not know, a text, encoded value or error message larger than the configured limit, a blob with a text MIME type that is larger than 8 MiB or not valid UTF-8, a result that carries non-empty input requests or request state (a multi-round-trip result), and a panic anywhere during redaction, including in the replacer. The error SHALL NOT quote the content that failed or the panic value.
 
 #### Scenario: Value that does not encode
 
@@ -174,9 +174,9 @@ When a result or error cannot be redacted completely, the adapter SHALL return a
 - **WHEN** the replacer panics
 - **THEN** the adapter returns an error that does not contain the value it was given
 
-#### Scenario: Large text blob
+#### Scenario: Unscannable text blob
 
-- **WHEN** a resource holds a `text/plain` blob larger than 8 MiB
+- **WHEN** a resource holds a `text/plain` blob larger than 8 MiB, or one that is not valid UTF-8
 - **THEN** the adapter returns an error and no result
 
 #### Scenario: Input requests

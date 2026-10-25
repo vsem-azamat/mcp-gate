@@ -3,6 +3,7 @@ package mcpredact
 import (
 	"encoding/json"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -36,7 +37,7 @@ func FuzzCallToolResult(f *testing.F) {
 			return // the SDK decodes some results it cannot encode again
 		}
 		got, err := r.CallToolResult(&res, redact.Marker{})
-		if len(res.InputRequests) > 0 || res.RequestState != "" || hasLargeTextBlob(&res) {
+		if len(res.InputRequests) > 0 || res.RequestState != "" || hasUnscannableTextBlob(&res) {
 			if err == nil {
 				t.Fatal("a result that must be withheld was redacted")
 			}
@@ -54,17 +55,17 @@ func FuzzCallToolResult(f *testing.F) {
 	})
 }
 
-func hasLargeTextBlob(res *mcp.CallToolResult) bool { return anyLargeTextBlob(res.Content) }
+func hasUnscannableTextBlob(res *mcp.CallToolResult) bool { return anyUnscannableTextBlob(res.Content) }
 
-func anyLargeTextBlob(blocks []mcp.Content) bool {
+func anyUnscannableTextBlob(blocks []mcp.Content) bool {
 	for _, c := range blocks {
 		switch v := c.(type) {
 		case *mcp.EmbeddedResource:
-			if v.Resource != nil && len(v.Resource.Blob) > MaxBlobBytes && textMIMEType(v.Resource.MIMEType) {
+			if r := v.Resource; r != nil && len(r.Blob) > 0 && textMIMEType(r.MIMEType) && (len(r.Blob) > MaxBlobBytes || !utf8.Valid(r.Blob)) {
 				return true
 			}
 		case *mcp.ToolResultContent:
-			if anyLargeTextBlob(v.Content) {
+			if anyUnscannableTextBlob(v.Content) {
 				return true
 			}
 		}

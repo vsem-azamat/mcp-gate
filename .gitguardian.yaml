@@ -1,0 +1,7 @@
+# GitGuardian secret scanning. Tests are corpora of made-up credentials (the redaction tests
+# exist to recognise secret-shaped values), so they are not scanned.
+version: 2
+secret:
+  ignored_paths:
+    - "**/*_test.go"
+    - "**/testdata/**"

@@ -264,8 +264,8 @@ func (p *pass) plainText(s, where string) string {
 	return p.engine.RedactText(s, p.replacer)
 }
 
-// blob redacts a blob with a text MIME type that is valid UTF-8. A text blob over
-// MaxBlobBytes fails the result; other blobs pass through unchanged.
+// blob redacts a blob with a text MIME type. A text blob over MaxBlobBytes or not valid
+// UTF-8 cannot be scanned and fails the result; blobs of other types pass through unchanged.
 func (p *pass) blob(b []byte, mimeType, where string) []byte {
 	if len(b) == 0 || p.err != nil || !textMIMEType(mimeType) {
 		return b
@@ -274,7 +274,11 @@ func (p *pass) blob(b []byte, mimeType, where string) []byte {
 		p.fail("%s: %d-byte text blob is over the %d-byte scan limit", where, len(b), MaxBlobBytes)
 		return b
 	}
-	if !utf8.Valid(b) || !p.checkSize(len(b), where) {
+	if !utf8.Valid(b) {
+		p.fail("%s: text blob is not valid UTF-8", where)
+		return b
+	}
+	if !p.checkSize(len(b), where) {
 		return b
 	}
 	text := string(b)

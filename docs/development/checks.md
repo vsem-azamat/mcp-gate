@@ -58,7 +58,7 @@ GoReleaser is the exception: CI runs it through `goreleaser/goreleaser-action` a
 
 ## CI
 
-[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs on every pull request and on pushes to `main`, with read-only permissions. A new push to a pull request cancels its running checks; runs on `main` are never cancelled. The jobs are Repository checks (`make repo tidy-check`), Lint, Test, Vulnerabilities and Release config (see [Releasing](releasing.md)). The `CI` job succeeds only when all of them succeed and is the one status check to require. Actions are pinned to full commit SHAs with the version in a comment.
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs on every pull request and on pushes to `main`, with read-only permissions. A new push to a pull request cancels its running checks; runs on `main` are never cancelled. The jobs are Repository checks (`make repo tidy-check`), Lint, Test, Vulnerabilities and Release config (see [Releasing](releasing.md)). The `CI` job succeeds only when all of them succeed and is the one status check to require. Pull requests are also scanned for secrets by the GitGuardian app, outside CI; [`.gitguardian.yaml`](../../.gitguardian.yaml) excludes test files and `testdata/`, which hold made-up credentials. Actions are pinned to full commit SHAs with the version in a comment.
 
 ## Dependency Updates
 
