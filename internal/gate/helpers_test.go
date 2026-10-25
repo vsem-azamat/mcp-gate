@@ -3,6 +3,7 @@ package gate_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/gate"
+	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/testkit"
 )
@@ -77,8 +79,10 @@ type running struct {
 // gateOpts adjusts a test gate.
 type gateOpts struct {
 	stateDir string
-	replacer func(string) redact.Replacer
-	tune     func(*downstream.Options)
+	replacer func(string, proxy.Request) redact.Replacer
+	// escrowKey, if set, turns the escrow on with the SHA-256 of this key.
+	escrowKey string
+	tune      func(*downstream.Options)
 }
 
 // startGate parses doc, a config with its listen address left out, and serves it until the test
@@ -100,9 +104,14 @@ func startGate(t *testing.T, doc string, o gateOpts) *running {
 			o.tune(opts)
 		}
 	}
+	var keyHash *[sha256.Size]byte
+	if o.escrowKey != "" {
+		h := sha256.Sum256([]byte(o.escrowKey))
+		keyHash = &h
+	}
 	g, err := gate.New(gate.Options{
 		Config: cfg, Environ: []string{"PATH=/usr/bin:/bin"}, StateDir: o.stateDir, Version: "test", Logger: logger,
-		Replacer: o.replacer, Tune: tune,
+		Replacer: o.replacer, Tune: tune, EscrowKeyHash: keyHash,
 	})
 	if err != nil {
 		t.Fatal(err)

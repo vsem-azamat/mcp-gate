@@ -164,3 +164,20 @@ func (o *object) duration(name string) (time.Duration, bool, error) {
 		return 0, false, fmt.Errorf("%s: is not a duration", o.sub(name))
 	}
 }
+
+// integer reads a whole number.
+func (o *object) integer(name string) (int64, bool, error) {
+	v, ok, err := o.get(name)
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	n, isNum := v.(json.Number)
+	if !isNum {
+		return 0, false, fmt.Errorf("%s: must be a whole number", o.sub(name))
+	}
+	i, err := n.Int64()
+	if err != nil {
+		return 0, false, fmt.Errorf("%s: must be a whole number", o.sub(name))
+	}
+	return i, true, nil
+}

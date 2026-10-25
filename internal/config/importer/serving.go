@@ -3,6 +3,7 @@ package importer
 import (
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -78,7 +79,7 @@ func (im *importer) serving(o *object, global bool, out *options) error {
 	} else if ok {
 		out.logEnabled = &v
 	}
-	if out.redact, err = im.redactBlock(o); err != nil {
+	if out.redact, err = im.redactBlock(o, global); err != nil {
 		return err
 	}
 	for kind, key := range filterKeys {
@@ -145,15 +146,12 @@ func (im *importer) filter(f *object, kind int) (*config.Filter, string, error) 
 	}
 }
 
-// escrowKeys belong to the escrow and file scanning, which this build does not implement.
-var escrowKeys = []string{"escrowTTL", "escrowMaxEntries", "fileTools", "fileRoots", "fileMaxBytes"}
-
-func (im *importer) redactBlock(o *object) (*redactBlock, error) {
+func (im *importer) redactBlock(o *object, global bool) (*redactBlock, error) {
 	r, err := o.object("redact")
 	if err != nil || r == nil {
 		return nil, err
 	}
-	b := &redactBlock{present: true}
+	b := &redactBlock{present: true, path: r.path}
 	if b.enabled, _, err = r.boolean("enabled"); err != nil {
 		return nil, err
 	}
@@ -168,17 +166,98 @@ func (im *importer) redactBlock(o *object) (*redactBlock, error) {
 			return nil, fmt.Errorf("%s.disableRules[%d]: not a rule mcp-gate knows (known: %s)", r.path, i, strings.Join(redact.Kinds(), ", "))
 		}
 	}
-	for _, k := range escrowKeys {
-		v, ok, err := r.get(k)
-		if err != nil {
-			return nil, err
-		}
-		if list, isList := v.([]any); ok && (!isList || len(list) > 0) {
-			im.notImplemented(r.sub(k))
-		}
+	if d, ok, err := r.duration("escrowTTL"); err != nil {
+		return nil, err
+	} else if ok && d > 0 {
+		b.escrowTTL = &d
+	}
+	if err := im.maxEntries(r, global, b); err != nil {
+		return nil, err
+	}
+	if b.files, err = im.files(r); err != nil {
+		return nil, err
 	}
 	im.ignored(r)
 	return b, nil
+}
+
+// maxEntries reads escrowMaxEntries, which mcp-proxy reads only from the global block.
+func (im *importer) maxEntries(r *object, global bool, b *redactBlock) error {
+	n, ok, err := r.integer("escrowMaxEntries")
+	switch {
+	case err != nil:
+		return err
+	case !ok || n == 0:
+		return nil
+	case n < 0:
+		return fmt.Errorf("%s: cannot be negative", r.sub("escrowMaxEntries"))
+	case !global:
+		im.warn("%s is dropped: mcp-proxy reads it only from mcpProxy.options.redact", r.sub("escrowMaxEntries"))
+		return nil
+	case n > config.MaxEscrowEntries:
+		im.warn("%s is lowered to the maximum of %d", r.sub("escrowMaxEntries"), config.MaxEscrowEntries)
+		n = config.MaxEscrowEntries
+	}
+	b.maxEntries = n
+	return nil
+}
+
+// files reads fileTools, fileRoots and fileMaxBytes. mcp-proxy scanned files only under roots
+// that are absolute paths, so file tools without such a root scanned nothing and are dropped.
+func (im *importer) files(r *object) (*config.Files, error) {
+	tools, err := r.strings("fileTools")
+	if err != nil {
+		return nil, err
+	}
+	roots, err := r.strings("fileRoots")
+	if err != nil {
+		return nil, err
+	}
+	maxBytes, hasMax, err := r.integer("fileMaxBytes")
+	if err != nil {
+		return nil, err
+	}
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("%s: cannot be negative", r.sub("fileMaxBytes"))
+	}
+	var kept []string
+	for i, root := range roots {
+		if !filepath.IsAbs(root) || filepath.Clean(root) == "/" {
+			im.warn("%s.fileRoots[%d] is dropped: mcp-proxy scanned only under absolute roots, and mcp-gate does not take /", r.path, i)
+			continue
+		}
+		kept = append(kept, filepath.Clean(root))
+	}
+	switch {
+	case len(tools) == 0 && len(kept) == 0:
+		return nil, nil
+	case len(tools) == 0:
+		im.warn("%s.fileRoots is dropped: no fileTools, so no file is scanned", r.path)
+		return nil, nil
+	case len(kept) == 0:
+		im.warn("%s.fileTools is dropped: without a usable fileRoots entry, mcp-proxy scanned no file", r.path)
+		return nil, nil
+	}
+	for i, t := range tools {
+		if strings.TrimSpace(t) == "" {
+			return nil, fmt.Errorf("%s.fileTools[%d]: cannot be empty", r.path, i)
+		}
+	}
+	var unique []string
+	for _, t := range tools {
+		if !slices.Contains(unique, t) {
+			unique = append(unique, t)
+		}
+	}
+	f := &config.Files{Tools: unique, Roots: slices.Compact(kept)}
+	if hasMax && maxBytes > 0 {
+		v := config.ByteSize(min(max(maxBytes, config.MinFileMaxBytes), config.MaxFileMaxBytes))
+		if int64(v) != maxBytes {
+			im.warn("%s.fileMaxBytes is moved into the range mcp-gate takes, %s to %s", r.path, config.ByteSize(config.MinFileMaxBytes), config.ByteSize(config.MaxFileMaxBytes))
+		}
+		f.MaxBytes = &v
+	}
+	return f, nil
 }
 
 // applyServing sets the serving keys of s from its options and the proxy's, which it inherits
@@ -205,11 +284,15 @@ func (im *importer) applyServing(path string, s *server, local, global *options)
 	switch {
 	case r == nil:
 		s.redact = redactBlock{present: false}
-	case !r.enabled && (r.highEntropy || len(r.disableRules) > 0):
+	case !r.enabled && (r.highEntropy || len(r.disableRules) > 0 || r.files != nil || (r == local.redact && r.escrowTTL != nil)):
 		im.warn("%s: redact has settings but enabled is false, so they are dropped", path)
 		s.redact = redactBlock{present: true}
 	default:
 		s.redact = *r
+		if r != local.redact {
+			// The global escrowTTL is escrow.ttl; a server inheriting the block needs no copy.
+			s.redact.escrowTTL = nil
+		}
 	}
 }
 

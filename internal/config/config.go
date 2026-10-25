@@ -35,6 +35,9 @@ const (
 	DefaultMaxMessageBytes    = 16 << 20
 	DefaultProbeInterval      = 30 * time.Second
 	DefaultMaxBackoff         = 30 * time.Second
+	DefaultEscrowTTL          = 24 * time.Hour
+	DefaultEscrowMaxEntries   = 1000
+	DefaultFileMaxBytes       = 20 << 20
 )
 
 // DefaultTrustedProxies are the peers whose X-Forwarded-For is read when behindProxy is set
@@ -65,8 +68,18 @@ type Config struct {
 	// Auth holds the client tokens every server accepts unless it opts out.
 	Auth Tokens `yaml:"auth,omitempty"`
 	// Admin holds the tokens that may read /_status.
-	Admin   Tokens             `yaml:"admin,omitempty"`
+	Admin Tokens `yaml:"admin,omitempty"`
+	// Escrow configures the secret escrow, which is on when its key hash is in the environment.
+	Escrow  Escrow             `yaml:"escrow,omitempty"`
 	Servers map[string]*Server `yaml:"servers"`
+}
+
+// Escrow configures the secret escrow.
+type Escrow struct {
+	// TTL is how long a kept secret stays retrievable, unless its server sets redact.escrowTTL.
+	TTL *Duration `yaml:"ttl,omitempty"`
+	// MaxEntries caps the entries held; the oldest is evicted. 0 means the default.
+	MaxEntries int `yaml:"maxEntries,omitempty"`
 }
 
 // Listen configures the upstream listener.
@@ -147,6 +160,21 @@ type Redact struct {
 	HighEntropy bool `yaml:"highEntropy,omitempty"`
 	// DisableRules lists rule kinds that are never reported.
 	DisableRules []string `yaml:"disableRules,omitempty"`
+	// EscrowTTL is how long the escrow keeps this server's secrets; nil means escrow.ttl.
+	EscrowTTL *Duration `yaml:"escrowTTL,omitempty"`
+	// Files configures the scanning of files the server's download tools write.
+	Files *Files `yaml:"files,omitempty"`
+}
+
+// Files configures file scanning.
+type Files struct {
+	// Tools are the tools that write a file and report its path.
+	Tools []string `yaml:"tools"`
+	// Roots are the absolute directories the files are written under; only files there are
+	// scanned.
+	Roots []string `yaml:"roots"`
+	// MaxBytes is the largest file scanned; a larger text file withholds its result.
+	MaxBytes *ByteSize `yaml:"maxBytes,omitempty"`
 }
 
 // EffectiveTokens returns the tokens server name accepts, by name; nil for a public server.
@@ -285,7 +313,22 @@ func (c *Config) applyDefaults() {
 	if c.LogLevel == "" {
 		c.LogLevel = DefaultLogLevel
 	}
+	if c.Escrow.TTL == nil {
+		v := Duration(DefaultEscrowTTL)
+		c.Escrow.TTL = &v
+	}
+	if c.Escrow.MaxEntries == 0 {
+		c.Escrow.MaxEntries = DefaultEscrowMaxEntries
+	}
 	for _, s := range c.Servers {
+		if s.Redact.EscrowTTL == nil {
+			v := *c.Escrow.TTL
+			s.Redact.EscrowTTL = &v
+		}
+		if f := s.Redact.Files; f != nil && f.MaxBytes == nil {
+			v := ByteSize(DefaultFileMaxBytes)
+			f.MaxBytes = &v
+		}
 		if s.Redact.Enabled == nil {
 			s.Redact.Enabled = new(true)
 		}

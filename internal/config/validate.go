@@ -26,6 +26,9 @@ const (
 	MaxMaxMessageBytes = 1 << 30
 	MinProbeInterval   = time.Second
 	MinMaxBackoff      = time.Second
+	MaxEscrowEntries   = 100000
+	MinFileMaxBytes    = 1 << 10
+	MaxFileMaxBytes    = 1 << 30
 	maxNameLen         = 64
 )
 
@@ -82,6 +85,12 @@ func (c *Config) validate(errs *[]error, skip map[string]bool) {
 	}
 	validateTokens("auth.tokens", c.Auth.Tokens, add)
 	validateTokens("admin.tokens", c.Admin.Tokens, add)
+	if c.Escrow.TTL != nil && c.Escrow.TTL.D() == 0 {
+		add("escrow.ttl", "must be positive")
+	}
+	if c.Escrow.MaxEntries < 0 || c.Escrow.MaxEntries > MaxEscrowEntries {
+		add("escrow.maxEntries", "must be between 0 (the default, %d) and %d", DefaultEscrowMaxEntries, MaxEscrowEntries)
+	}
 	if len(c.Servers) == 0 {
 		add("servers", "at least one server is required")
 	}
@@ -225,6 +234,43 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	}
 	if _, err := redact.New(redact.Options{DisableRules: s.Redact.DisableRules}); err != nil {
 		add(path+".redact.disableRules", "names an unknown rule; known: %s", strings.Join(redact.Kinds(), ", "))
+	}
+	if s.Redact.EscrowTTL != nil && s.Redact.EscrowTTL.D() == 0 {
+		add(path+".redact.escrowTTL", "must be positive")
+	}
+	if f := s.Redact.Files; f != nil {
+		if s.Redact.Enabled != nil && !*s.Redact.Enabled {
+			add(path+".redact.files", "needs redact.enabled: files are scanned only on a server whose results are redacted")
+		}
+		f.validate(path+".redact.files", add)
+	}
+}
+
+func (f *Files) validate(path string, add func(path, format string, args ...any)) {
+	if len(f.Tools) == 0 {
+		add(path+".tools", "must name at least one tool")
+	}
+	seen := map[string]bool{}
+	for i, t := range f.Tools {
+		p := fmt.Sprintf("%s.tools[%d]", path, i)
+		switch {
+		case strings.TrimSpace(t) == "":
+			add(p, "cannot be empty")
+		case seen[t]:
+			add(p, "is listed twice")
+		}
+		seen[t] = true
+	}
+	if len(f.Roots) == 0 {
+		add(path+".roots", "must name at least one directory: only files under the roots are scanned")
+	}
+	for i, r := range f.Roots {
+		if !filepath.IsAbs(r) || filepath.Clean(r) == string(filepath.Separator) {
+			add(fmt.Sprintf("%s.roots[%d]", path, i), "must be an absolute path other than /")
+		}
+	}
+	if f.MaxBytes != nil && (*f.MaxBytes < MinFileMaxBytes || *f.MaxBytes > MaxFileMaxBytes) {
+		add(path+".maxBytes", "must be between %s and %s", ByteSize(MinFileMaxBytes), ByteSize(MaxFileMaxBytes))
 	}
 }
 

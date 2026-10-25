@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/testkit"
 )
@@ -129,7 +130,7 @@ func TestRedaction(t *testing.T) {
 		"on":   stdioServer(t, testkit.Fake{}, ""),
 		"kept": stdioServer(t, testkit.Fake{}, ""),
 		"off":  stdioServer(t, testkit.Fake{}, "redact: {enabled: false}\n"),
-	}), gateOpts{replacer: func(server string) redact.Replacer {
+	}), gateOpts{replacer: func(server string, _ proxy.Request) redact.Replacer {
 		if server == "kept" {
 			return rec
 		}

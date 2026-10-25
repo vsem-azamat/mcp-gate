@@ -58,3 +58,12 @@ func TestRun(t *testing.T) {
 		})
 	}
 }
+
+func TestWithoutEscrowKey(t *testing.T) {
+	t.Parallel()
+	in := []string{"PATH=/bin", "MCP_HUB_ESCROW_KEY_SHA256=abc", "MCP_OTHER=1"}
+	got := withoutEscrowKey(in)
+	if len(got) != 2 || got[0] != "PATH=/bin" || got[1] != "MCP_OTHER=1" || in[1] != "MCP_HUB_ESCROW_KEY_SHA256=abc" {
+		t.Errorf("withoutEscrowKey = %v (input %v)", got, in)
+	}
+}

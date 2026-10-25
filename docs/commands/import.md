@@ -26,6 +26,9 @@ mcp-gate check gate.yaml
 | `options.logEnabled` | `log.requests` |
 | `toolFilter`, `promptFilter`, `resourceFilter` | `tools`, `prompts`, `resources`; mode `allow` becomes `allow`, `block` becomes `deny` |
 | `options.redact` | `redact`, with `ru: true` (mcp-proxy always ran the Russian rules), `highEntropy`, `disableRules` |
+| `mcpProxy.options.redact.escrowTTL`, `escrowMaxEntries` | `escrow.ttl`, `escrow.maxEntries` |
+| a server's own `redact.escrowTTL` | `redact.escrowTTL` |
+| `redact.fileTools`, `fileRoots`, `fileMaxBytes` | `redact.files.tools`, `roots`, `maxBytes` |
 | `$VAR`, `${VAR}` | `${VAR}`; any other `$` becomes `$$` |
 
 Options set in `mcpProxy.options` are applied to each server, as mcp-proxy did, except filters there, which mcp-proxy ignored. Keys mcp-proxy ignores, `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid`, `autoReconnect`, a `toolFilter` that allows an empty list (no filter in mcp-proxy) and an empty block list are dropped with a comment.
@@ -42,10 +45,12 @@ A server whose `authTokens` are the global ones inherits them. One with its own 
 
 A server whose effective options have a `redact` block keeps it, with `ru: true`. A server without one gets `redact.enabled: false` and a comment, since mcp-proxy did not redact it; mcp-gate redacts by default, so consider removing that line.
 
+The escrow keys map one to one; the key hash stays in `MCP_HUB_ESCROW_KEY_SHA256`. A server's own `escrowMaxEntries`, which mcp-proxy ignored, is dropped with a warning. File scanning is written only where mcp-proxy did scan: roots that are not absolute paths are dropped, and file tools left without a root, or roots without tools, are dropped with a warning.
+
 mcp-proxy children inherited the whole environment; mcp-gate children get only `inheritEnv` and `env`. A command such as `/usr/bin/env -u SECRET -u HOME MODE=fast server --stdio` is unwrapped: the command becomes `server --stdio`, `MODE=fast` goes to `env`, `HOME` is removed from `inheritEnv`, and `SECRET` is dropped with a comment, since it is not inherited anyway. `-i` gives `inheritEnv: []` and `-C dir` gives `cwd`. A form the importer does not understand is kept as it is, with a note.
 
 ## Keys this build does not implement
 
-Every other key that changes behaviour (the escrow and file-scanning keys of `redact`: `escrowTTL`, `escrowMaxEntries`, non-empty `fileTools` and `fileRoots`, `fileMaxBytes`; a `baseURL` with a path; OAuth; the SSE transport) makes the import fail, listing the keys and writing nothing. `-partial` writes the config anyway and lists each dropped key in a comment marked `NOT IMPLEMENTED IN THIS BUILD`; `mcp-gate check` rejects that file until those comments are removed, which means accepting that the keys are dropped.
+Every other key that changes behaviour (a `baseURL` with a path, OAuth, the SSE transport) makes the import fail, listing the keys and writing nothing. `-partial` writes the config anyway and lists each dropped key in a comment marked `NOT IMPLEMENTED IN THIS BUILD`; `mcp-gate check` rejects that file until those comments are removed, which means accepting that the keys are dropped.
 
 Notes go to stderr. Neither they nor errors quote values from the input. Exit status: 0 written, 2 otherwise.

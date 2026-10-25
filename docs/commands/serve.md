@@ -45,6 +45,28 @@ $ curl -s http://127.0.0.1:9090/_readyz
 $ curl -s -H "Authorization: Bearer $GATE_ADMIN_TOKEN" http://127.0.0.1:9090/_status
 ```
 
+## Escrow
+
+With `MCP_HUB_ESCROW_KEY_SHA256` set to the hex SHA-256 of an API key, the gate keeps every secret it redacts from results in memory, for `escrow.ttl` (or the server's `redact.escrowTTL`), and writes `[REDACTED:<kind> #<handle>]` in its place. The owner releases a secret with the key; clients' tokens do not open it. Nothing is written to disk, so a restart forgets every secret. A value that is not a hex SHA-256 stops the gate at start.
+
+```console
+$ key=$(openssl rand -hex 32)
+$ export MCP_HUB_ESCROW_KEY_SHA256=$(printf %s "$key" | sha256sum | cut -d' ' -f1)
+$ mcp-gate serve gate.yaml &
+$ curl -s -H "Authorization: Bearer $key" http://127.0.0.1:9090/_escrow/k3j5rz2q7wd/meta
+{"handle":"k3j5rz2q7wd","type":"password","kind":"text","server":"notes","tool":"read_note","source":{},"created_at":"…","expires_at":"…","preview":"Summ…77!"}
+$ curl -s -H "Authorization: Bearer $key" http://127.0.0.1:9090/_escrow/k3j5rz2q7wd
+$ curl -s -X DELETE -H "Authorization: Bearer $key" http://127.0.0.1:9090/_escrow/k3j5rz2q7wd
+```
+
+| Request | Answer |
+| --- | --- |
+| `GET`/`HEAD /_escrow/<handle>/meta` | JSON: handle, type, kind (`text` or `file`), server, tool, source (identifying arguments such as `chat_id`), times, a short preview; `file_name` and `size` for a file |
+| `GET /_escrow/<handle>` | The value (or the file, while unchanged) as `application/octet-stream` |
+| `DELETE /_escrow/<handle>` | 204; the entry is gone |
+
+A wrong or missing key is 401 on every path; 20 wrong keys from one client address give 429 until it has waited (one more attempt every 3 seconds). Requests without a key do not count. Behind a reverse proxy on the same host, set `listen.behindProxy` so that the limit is kept per client (`X-Forwarded-For`), not for the proxy as a whole. Files that a server's `redact.files.tools` write are kept the same way, as `[REDACTED:file #<handle>]`.
+
 ## Logs
 
 Every forwarded call writes one `call` line with the server, the token name (`principal`), the method, the tool or prompt or resource URI, the duration, the outcome and the number of redactions; arguments and results are never logged:

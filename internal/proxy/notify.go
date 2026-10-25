@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -163,20 +164,42 @@ func (s *progressSink) run(logger *slog.Logger) {
 	}
 }
 
+// Request describes the call whose result is redacted, for a replacer that keeps values.
+type Request struct {
+	// Method is tools/call, prompts/get or resources/read.
+	Method string
+	// Name is the tool or prompt name, or the resource URI.
+	Name string
+	// Arguments returns the call's arguments, decoded once; nil when there are none.
+	Arguments func() map[string]any
+}
+
+// ReplacerFunc returns the replacer for the findings in one call's result.
+type ReplacerFunc func(Request) redact.Replacer
+
 // Redaction is the result pipeline of one server.
 type Redaction struct {
 	engine   *redact.Engine
 	results  *mcpredact.Redactor
-	replacer redact.Replacer
+	replacer ReplacerFunc
 }
 
-// NewRedaction returns the pipeline for engine. Findings are replaced by what replacer returns;
-// a text over maxTextBytes fails its result.
-func NewRedaction(engine *redact.Engine, replacer redact.Replacer, maxTextBytes int) *Redaction {
+// NewRedaction returns the pipeline for engine. Findings in results are replaced by what the
+// replacer for their call returns, [REDACTED:<kind>] when replacer is nil; findings in texts
+// outside results, such as progress messages, by [REDACTED:<kind>]. A text over maxTextBytes
+// fails its result.
+func NewRedaction(engine *redact.Engine, replacer ReplacerFunc, maxTextBytes int) *Redaction {
 	if replacer == nil {
-		replacer = redact.Marker{}
+		replacer = func(Request) redact.Replacer { return redact.Marker{} }
 	}
 	return &Redaction{engine: engine, results: mcpredact.New(engine, maxTextBytes), replacer: replacer}
+}
+
+// FileScanner checks the files a tool call wrote; see package filescan.
+type FileScanner interface {
+	// Scan returns res with the files that hold secrets withheld, and how many were. An error
+	// means a file could not be scanned, and the result is withheld.
+	Scan(ctx context.Context, tool string, args func() map[string]any, res *mcp.CallToolResult, start time.Time) (*mcp.CallToolResult, int, error)
 }
 
 // counter counts the findings of one call.

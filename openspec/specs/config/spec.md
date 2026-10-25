@@ -62,7 +62,7 @@ The config SHALL have at least one server under `servers`. A server name SHALL m
 
 ### Requirement: Serving keys
 
-The config MAY set `listen.addr` (`host:port`, default `127.0.0.1:9090`), `listen.behindProxy` (default `false`), `listen.trustedProxies` (CIDRs, default `127.0.0.1/32` and `::1/128`), `listen.allowedHosts` (host names, optionally with a port), `startupGracePeriod` (positive, default `30s`), `logLevel` (`debug`, `info`, `warn` or `error`, default `info`), `auth.tokens` and `admin.tokens`. A server MAY set `tools`, `prompts` and `resources`, each with exactly one of `allow` and `deny`, lists of non-empty entries; `auth.inherit` (default `true`), `auth.tokens` and `auth.public`; `log.requests`; `redact.enabled` (default `true`), `redact.ru`, `redact.highEntropy` and `redact.disableRules`, whose entries SHALL be redaction kinds; and `forwardMeta`, a list of `_meta` keys (default empty) whose entries SHALL be non-empty and distinct and SHALL NOT be `progressToken` or a key whose prefix before `/` has a label `mcp` or `modelcontextprotocol`, which the gate sets itself.
+The config MAY set `escrow.ttl` (positive, default `24h`) and `escrow.maxEntries` (default 1000, at most 100000), `listen.addr` (`host:port`, default `127.0.0.1:9090`), `listen.behindProxy` (default `false`), `listen.trustedProxies` (CIDRs, default `127.0.0.1/32` and `::1/128`), `listen.allowedHosts` (host names, optionally with a port), `startupGracePeriod` (positive, default `30s`), `logLevel` (`debug`, `info`, `warn` or `error`, default `info`), `auth.tokens` and `admin.tokens`. A server MAY set `tools`, `prompts` and `resources`, each with exactly one of `allow` and `deny`, lists of non-empty entries; `auth.inherit` (default `true`), `auth.tokens` and `auth.public`; `log.requests`; `redact.enabled` (default `true`), `redact.ru`, `redact.highEntropy` and `redact.disableRules`, whose entries SHALL be redaction kinds; `redact.escrowTTL` (positive, default `escrow.ttl`); `redact.files` with `tools` (at least one, non-empty and distinct), `roots` (at least one absolute path other than `/`) and `maxBytes` (default `20MiB`, between `1KiB` and `1GiB`), which SHALL need `redact.enabled`; and `forwardMeta`, a list of `_meta` keys (default empty) whose entries SHALL be non-empty and distinct and SHALL NOT be `progressToken` or a key whose prefix before `/` has a label `mcp` or `modelcontextprotocol`, which the gate sets itself.
 
 Tokens SHALL be maps from a name matching `[a-z0-9][a-z0-9._-]{0,62}` to a non-empty value without spaces or control characters. Every server that is not `public` SHALL accept at least one token, from `auth.tokens` (unless `inherit` is `false`) or its own; `public` SHALL exclude `tokens` and `inherit`. With `inherit`, a server's own token names SHALL differ from the global ones, and no two tokens a server accepts SHALL have the same value.
 
@@ -123,21 +123,28 @@ A YAML syntax or type error SHALL be reported with its line. Every expansion and
 - `options.logEnabled` to `log.requests`;
 - `toolFilter`, `promptFilter` and `resourceFilter` with mode `allow` to `allow` lists and mode `block` to `deny` lists of `tools`, `prompts` and `resources`; an empty block list and an empty `toolFilter` allow list SHALL be dropped with a comment, since they filter nothing, and filters in `mcpProxy.options` SHALL be dropped with a warning, since mcp-proxy did not apply them;
 - `options.redact` to `redact` with `ru: true`, since mcp-proxy always ran the Russian rules, and `highEntropy` and `disableRules`; a server whose effective options have no `redact` block SHALL get `redact.enabled: false` with a comment;
+- `mcpProxy.options.redact.escrowTTL` and `escrowMaxEntries` to `escrow.ttl` and `escrow.maxEntries` (lowered to the maximum with a warning); a server's own `escrowTTL` to `redact.escrowTTL`, and a server's own `escrowMaxEntries`, which mcp-proxy did not read, SHALL be dropped with a warning;
+- `fileTools`, `fileRoots` and `fileMaxBytes` of a server's effective `redact` block to `redact.files` `tools`, `roots` and `maxBytes`, a size outside the bounds moved inside them with a warning; roots that are not absolute paths, which mcp-proxy ignored, or are `/`, SHALL be dropped with a warning, and file tools left without a root, or roots without tools, SHALL be dropped with a warning, since mcp-proxy scanned nothing then;
 - `$VAR` and `${VAR}` in string values to `${VAR}`, and any other `$` to `$$`.
 
 A command that runs `env` with `-i`, `-u NAME`, `-C DIR` and `NAME=VALUE` before the command SHALL be unwrapped into `command`, `args`, `cwd` and `env`, the assignments winning over `env`. Names unset with `-u` SHALL be removed from `inheritEnv` when they are in its default, and otherwise dropped with a comment, since a stdio child inherits only `inheritEnv` and `env`; `-i` SHALL give `inheritEnv: []`. An `env` command line the importer does not understand SHALL be kept as it is, with a note.
 
-mcp-proxy passed each request's `_meta` on as it was; the import SHALL write no `forwardMeta` and SHALL say so in a comment. `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid` and `autoReconnect` SHALL be dropped with a comment, since they have no effect in mcp-gate. Every other key that changes behaviour (the escrow and file-scanning keys of `redact`, a `baseURL` with a path, OAuth, the SSE transport) SHALL make the import fail with exit status 2, listing the keys by path and writing nothing to stdout. With `-partial` the config SHALL be written anyway, each dropped key listed in a comment carrying `NOT IMPLEMENTED IN THIS BUILD`, and loading SHALL reject a file with such a comment until the comments are removed. Notes and errors SHALL name keys but never values.
+mcp-proxy passed each request's `_meta` on as it was; the import SHALL write no `forwardMeta` and SHALL say so in a comment. `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid` and `autoReconnect` SHALL be dropped with a comment, since they have no effect in mcp-gate. Every other key that changes behaviour (a `baseURL` with a path, OAuth, the SSE transport) SHALL make the import fail with exit status 2, listing the keys by path and writing nothing to stdout. With `-partial` the config SHALL be written anyway, each dropped key listed in a comment carrying `NOT IMPLEMENTED IN THIS BUILD`, and loading SHALL reject a file with such a comment until the comments are removed. Notes and errors SHALL name keys but never values.
 
 #### Scenario: Unimplemented keys
 
-- **WHEN** a server has `oauth` and `options.redact.escrowTTL`
-- **THEN** the import fails, listing both keys, and writes nothing
+- **WHEN** one server has `oauth` and another uses the SSE transport
+- **THEN** the import fails, listing both, and writes nothing
 
 #### Scenario: Partial import
 
 - **WHEN** the same config is imported with `-partial` and the output is checked
 - **THEN** the output marks both keys as not implemented and `check` rejects it
+
+#### Scenario: Escrow and file keys
+
+- **WHEN** `mcpProxy.options.redact` has `escrowTTL: "2h"` and a server's own `redact` has `escrowTTL`, `fileTools` and `fileRoots` with one absolute and one relative root
+- **THEN** the config gets `escrow.ttl: 2h`, the server its `redact.escrowTTL` and `redact.files` with the absolute root, and a warning names the dropped root
 
 #### Scenario: env wrapper
 

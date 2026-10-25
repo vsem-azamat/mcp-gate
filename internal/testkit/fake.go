@@ -41,7 +41,10 @@ import (
 //   - meta: returns the request's _meta as JSON;
 //   - addtool {"name": string}: adds a tool of that name, which the server reports as a list
 //     change;
-//   - badblob: returns an embedded text/plain resource whose blob is not valid UTF-8.
+//   - badblob: returns an embedded text/plain resource whose blob is not valid UTF-8;
+//   - writefile {"path": string, "text": string, "repeat": number}: writes text (repeat times)
+//     to the file at path, like a download tool, and returns "Media downloaded to <path>." with
+//     structured content {"path": <path>}.
 //
 // With Catalog set, it also serves the prompt "greet", the resources "fake://info" and
 // "fake://hidden", and the template "fake://items/{id}"; reads return "contents of <uri>".
@@ -300,6 +303,20 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
 			URI: "fake://blob", MIMEType: "text/plain", Blob: []byte{0xff, 0xfe, 'x'},
 		}}}}, nil
+	})
+	tool("writefile", func(_ context.Context, args map[string]any) (*mcp.CallToolResult, error) {
+		path, _ := args["path"].(string)
+		data, _ := args["text"].(string)
+		if n := number(args, "repeat"); n > 1 {
+			data = strings.Repeat(data, n)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			return nil, err
+		}
+		return &mcp.CallToolResult{
+			Content:           []mcp.Content{&mcp.TextContent{Text: "Media downloaded to " + path + "."}},
+			StructuredContent: map[string]any{"path": path},
+		}, nil
 	})
 	if f.Catalog {
 		s.AddPrompt(&mcp.Prompt{Name: "greet", Arguments: []*mcp.PromptArgument{{Name: "who"}}},
