@@ -41,6 +41,16 @@ linters:
           deny:
             - pkg: github.com/mark3labs/mcp-go
               desc: github.com/modelcontextprotocol/go-sdk is the only MCP library
+        redact-engine:
+          # The engine knows text and JSON only; internal/redact/mcpredact adapts it to MCP.
+          files:
+            - "**/internal/redact/*.go"
+          list-mode: lax
+          deny:
+            - pkg: net/http
+              desc: internal/redact is a text engine without network code
+            - pkg: github.com/modelcontextprotocol/go-sdk
+              desc: internal/redact knows no MCP types; use internal/redact/mcpredact
     forbidigo:
       analyze-types: true
       forbid:
@@ -84,6 +94,15 @@ linters:
       # Test helpers keep explicit arguments so call sites read like the scenario.
       - path: _test\.go
         linters: [unparam]
+      # The redaction tests are corpora of made-up credentials.
+      - path: ^internal/redact/.*_test\.go$
+        linters: [gosec]
+        text: G101
+      # Tool-use and tool-result content are deprecated with sampling but still decoded in
+      # results, so redaction must cover them.
+      - path: ^internal/redact/mcpredact/
+        linters: [staticcheck]
+        text: SA1019.*(ToolUseContent|ToolResultContent)
       # The command is where output is printed and the environment is read.
       - path: ^cmd/
         linters: [forbidigo]

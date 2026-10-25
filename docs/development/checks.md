@@ -14,6 +14,8 @@
 | `make lint` | golangci-lint v2 with the config in [`.golangci.yml`](../../.golangci.yml), including the gofumpt and goimports formatting check |
 | `make fmt` | Applies gofumpt and goimports |
 | `make test` | `go test -race -shuffle=on ./...` |
+| `make fuzz` | Runs every fuzz target for `FUZZTIME` (default `60s`); not part of `make check` (see [Testing](testing.md)) |
+| `make bench` | Runs the benchmarks with allocation counts; not part of `make check` |
 | `make vuln` | govulncheck over the code and its dependencies; needs network |
 | `make release-check` | `goreleaser check` and a snapshot build into `dist/`, as CI's Release config job does. Not part of `make check`: the first run builds GoReleaser and takes minutes |
 | `make hooks` | Enables the git hooks below |
@@ -21,6 +23,7 @@
 Besides the standard and enabled linters, `.golangci.yml` enforces these project rules:
 
 - `depguard`: `github.com/mark3labs/mcp-go` is not imported; the official `github.com/modelcontextprotocol/go-sdk` is the only MCP library;
+- `depguard`: `internal/redact` imports neither `net/http` nor the MCP SDK (its subpackage `mcpredact` is the MCP adapter);
 - `forbidigo`: `fmt.Print*` and reading the environment (`os.Getenv`, `os.LookupEnv`, `os.Environ`) only in `cmd/`; the standard `log` package nowhere (use `log/slog`).
 
 The repository policy rejects:
@@ -55,7 +58,7 @@ GoReleaser is the exception: CI runs it through `goreleaser/goreleaser-action` a
 
 ## CI
 
-[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs on every pull request and on pushes to `main`, with read-only permissions. A new push to a pull request cancels its running checks; runs on `main` are never cancelled. The jobs are Repository checks (`make repo tidy-check`), Lint, Test, Vulnerabilities and Release config (see [Releasing](releasing.md)). The `CI` job succeeds only when all of them succeed and is the one status check to require. Actions are pinned to full commit SHAs with the version in a comment.
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs on every pull request and on pushes to `main`, with read-only permissions. A new push to a pull request cancels its running checks; runs on `main` are never cancelled. The jobs are Repository checks (`make repo tidy-check`), Lint, Test, Vulnerabilities and Release config (see [Releasing](releasing.md)). The `CI` job succeeds only when all of them succeed and is the one status check to require. Pull requests are also scanned for secrets by the GitGuardian app, outside CI; [`.gitguardian.yaml`](../../.gitguardian.yaml) excludes test files and `testdata/`, which hold made-up credentials. Actions are pinned to full commit SHAs with the version in a comment.
 
 ## Dependency Updates
 

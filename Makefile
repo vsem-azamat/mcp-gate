@@ -15,7 +15,10 @@ GORELEASER := go run github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
 # Every Go module in the repository: the product and the pinned tools.
 MODULES := . tools tools/lint
 
-.PHONY: check fmt lint test vuln tidy tidy-check repo release-check hooks help
+# How long `make fuzz` runs each fuzz target.
+FUZZTIME ?= 60s
+
+.PHONY: check fmt lint test fuzz bench vuln tidy tidy-check repo release-check hooks help
 
 ## check: every CI job but Release config (see release-check)
 check: repo tidy-check lint test vuln
@@ -36,6 +39,19 @@ lint:
 ## test: unit tests with the race detector, in random order
 test:
 	go test -race -shuffle=on ./...
+
+## fuzz: run every fuzz target for FUZZTIME each (default 60s); make test runs only their seeds
+fuzz:
+	@for pkg in $$(go list ./...); do \
+		for target in $$(go test -list '^Fuzz' "$$pkg" | grep '^Fuzz' || true); do \
+			echo "fuzz $$pkg $$target ($(FUZZTIME))"; \
+			go test -run '^$$' -fuzz "^$$target$$" -fuzztime $(FUZZTIME) "$$pkg" || exit 1; \
+		done; \
+	done
+
+## bench: run the benchmarks, with allocation counts
+bench:
+	go test -run '^$$' -bench . -benchmem ./...
 
 ## vuln: known vulnerabilities in the code and its dependencies (govulncheck, needs network)
 vuln:
