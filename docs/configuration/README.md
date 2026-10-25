@@ -4,7 +4,7 @@
 
 mcp-gate reads one YAML file. The behaviour is specified in [`openspec/specs/config/spec.md`](../../openspec/specs/config/spec.md); this page is the reference. `mcp-gate check <file>` validates a file (see [check](../commands/check.md)), and `mcp-gate import` writes one from an mcp-proxy `config.json` (see [import](../commands/import.md)).
 
-The schema holds only what this build implements, so an unknown key is an error rather than a setting that is silently ignored. So far only `mcp-gate check` reads the file; no command connects to the servers yet.
+The schema holds only what this build implements, so an unknown key is an error rather than a setting that is silently ignored. So far only `mcp-gate check` reads the file; with `-connect` it connects to the servers.
 
 ## Example
 
@@ -44,8 +44,8 @@ servers:
 | `stdio.inheritEnv` | `PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR` | The gate's variables the child inherits; `*` at the end matches a prefix; `[]` inherits nothing |
 | `http.url` | required | Streamable HTTP endpoint, `http` or `https`, without user information or fragment |
 | `http.headers` | none | Headers sent with every request, such as an API key. Headers mcp-gate sets (`Accept`, `Accept-Encoding`, `Content-Type`, every `Mcp-` header and the like) cannot be set |
-| `callTimeout` | `0s` | Bound on each request; `0s` is none |
-| `maxMessageBytes` | `16MiB` | Largest stdio frame, HTTP response body or event, `4KiB` to `1GiB` |
+| `callTimeout` | `0s` | Bound on each request; `0s` is none. While a call runs no probe is sent, so with `0s` a server that stops answering mid-call is not noticed until the call ends |
+| `maxMessageBytes` | `16MiB` | Largest stdio frame, HTTP response body or event; a larger response fails only its request. `4KiB` to `1GiB` |
 | `protocolVersion` | none | Pin the protocol version offered to the server |
 | `probeInterval` | `30s` | Time between liveness probes, at least `1s` |
 | `restart.maxBackoff` | `30s` | Longest wait between restarts, at least `1s` |

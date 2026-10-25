@@ -1,5 +1,5 @@
 // Command mcp-gate is an MCP gateway. So far it provides compare, which diffs the catalogs that
-// MCP endpoints serve, check, which validates a config, and
+// MCP endpoints serve, check, which validates a config and can connect to its servers, and
 // import, which converts an mcp-proxy config.
 package main
 
@@ -26,7 +26,7 @@ const (
 const usage = `Usage: mcp-gate <command>
 
 Commands:
-  check      validate a config
+  check      validate a config, and with -connect connect to its servers
   compare    compare the catalogs that MCP endpoints or snapshots serve
   import     convert an mcp-proxy config.json into an mcp-gate config
   help       show this help
@@ -51,7 +51,7 @@ func run(ctx context.Context, args []string, env lookupEnv, stdout, stderr io.Wr
 	}
 	switch args[0] {
 	case "check":
-		return runCheck(args[1:], env, stdout, stderr)
+		return runCheck(ctx, args[1:], env, stdout, stderr)
 	case "compare":
 		return runCompare(ctx, args[1:], env, stdout, stderr)
 	case "import":

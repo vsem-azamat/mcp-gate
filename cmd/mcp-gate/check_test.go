@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
+	"github.com/vsem-azamat/mcp-gate/internal/testkit"
 )
 
 func writeFile(t *testing.T, name, content string) string {
@@ -27,6 +29,24 @@ func runCmd(t *testing.T, e lookupEnv, args ...string) result {
 	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
+func quote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+func stdioServer(t *testing.T, f testkit.Fake) string {
+	t.Helper()
+	cmd, args := testkit.StdioCommand(t, f)
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = quote(a)
+	}
+	return "    stdio: {command: " + quote(cmd) + ", args: [" + strings.Join(quoted, ", ") + "]}\n"
+}
+
 func TestCheckValid(t *testing.T) {
 	t.Parallel()
 	path := writeFile(t, "gate.yaml", "version: 1\nservers:\n  a:\n    http: {url: 'https://a.example.com/mcp', headers: {X-Key: '${KEY}'}}\n  b:\n    stdio: {command: srv}\n    disabled: true\n")
@@ -44,10 +64,45 @@ func TestCheckInvalid(t *testing.T) {
 		!strings.Contains(r.stderr, "servers.b.stdio.cwd") {
 		t.Errorf("check = %+v", r)
 	}
-	for _, args := range [][]string{{"check"}, {"check", "a", "b"}, {"check", "-bogus", path}} {
+	for _, args := range [][]string{{"check"}, {"check", "a", "b"}, {"check", "-timeout", "0s", path}, {"check", "-bogus", path}} {
 		if r := runCmd(t, noEnv, args...); r.code != exitUsage {
 			t.Errorf("%v: code %d", args, r.code)
 		}
+	}
+}
+
+func TestCheckConnect(t *testing.T) {
+	t.Parallel()
+	h := testkit.NewFakeHTTP(t, testkit.Fake{}, testkit.FakeHTTPOptions{})
+	doc := "version: 1\nservers:\n" +
+		"  local:\n" + stdioServer(t, testkit.Fake{ProtocolVersions: []string{"2025-06-18"}}) +
+		"  legacy:\n" + stdioServer(t, testkit.Fake{SilentDiscover: true}) +
+		"  remote:\n    http: {url: " + quote(h.URL()) + "}\n" +
+		"  off:\n    stdio: {command: srv}\n    disabled: true\n"
+	path := writeFile(t, "gate.yaml", doc)
+	r := runCmd(t, noEnv, "check", "-connect", "-timeout", "20s", path)
+	want := []string{
+		"legacy: ready, protocol 2025-11-25 (pinned automatically",
+		"local: ready, protocol 2025-06-18, 8 tools",
+		"off: disabled",
+		"remote: ready, protocol 2026-07-28, 8 tools",
+	}
+	for _, w := range want {
+		if !strings.Contains(r.stdout, w) {
+			t.Errorf("stdout lacks %q:\n%s", w, r.stdout)
+		}
+	}
+	if r.code != exitOK {
+		t.Errorf("code = %d, stderr %s", r.code, r.stderr)
+	}
+}
+
+func TestCheckConnectFailure(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nservers:\n  broken:\n" + stdioServer(t, testkit.Fake{ExitAtStart: 4})
+	r := runCmd(t, noEnv, "check", "-connect", "-timeout", "20s", writeFile(t, "gate.yaml", doc))
+	if r.code != exitTrouble || !strings.Contains(r.stdout, "broken: failed:") {
+		t.Errorf("check = %+v", r)
 	}
 }
 

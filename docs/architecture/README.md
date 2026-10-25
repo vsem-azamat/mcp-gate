@@ -6,4 +6,5 @@ How the parts of mcp-gate are put together. Behaviour is specified in `openspec/
 
 | Page | Contents |
 | --- | --- |
+| [Downstream servers](downstream.md) | Supervisors, stdio children and the HTTP client that connect to downstream servers |
 | [Redaction](redaction.md) | The redaction engine, its rules and priorities, and the MCP adapter |
