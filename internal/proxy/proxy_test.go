@@ -29,12 +29,16 @@ func TestDownstreamMeta(t *testing.T) {
 		"mcpish.example.com/thing":            "kept",
 		"example.com/modelcontextprotocolish": "kept",
 	}
-	got := downstreamMeta(in)
-	want := mcp.Meta{"example.com/trace": "abc", "plain": 1, "mcpish.example.com/thing": "kept", "example.com/modelcontextprotocolish": "kept"}
+	if got := downstreamMeta(in, nil); got != nil {
+		t.Errorf("nothing listed: %v", got)
+	}
+	forward := []string{"example.com/trace", "plain", "absent", "progressToken", "dev.mcp/thing"}
+	got := downstreamMeta(in, forward)
+	want := mcp.Meta{"example.com/trace": "abc", "plain": 1}
 	if !maps.Equal(map[string]any(got), map[string]any(want)) {
 		t.Errorf("downstreamMeta = %v, want %v", got, want)
 	}
-	if downstreamMeta(mcp.Meta{"progressToken": 1}) != nil || downstreamMeta(nil) != nil {
+	if downstreamMeta(nil, forward) != nil {
 		t.Error("an empty _meta is not nil")
 	}
 	if _, ok := in["progressToken"]; !ok {

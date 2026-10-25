@@ -149,6 +149,10 @@ func TestServingErrors(t *testing.T) {
 		{"bad host", "version: 1\nlisten: {allowedHosts: ['a/b']}\nauth: {tokens: {a: s}}\n" + srv, "listen.allowedHosts[0]"},
 		{"bad level", "version: 1\nlogLevel: loud\nauth: {tokens: {a: s}}\n" + srv, "logLevel: must be one of"},
 		{"zero grace", "version: 1\nstartupGracePeriod: 0s\nauth: {tokens: {a: s}}\n" + srv, "startupGracePeriod: must be positive"},
+		{"empty meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: ['']\n", "servers.a.forwardMeta[0]: cannot be empty"},
+		{"duplicate meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [x/a, x/a]\n", "servers.a.forwardMeta[1]: is listed twice"},
+		{"progress token", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [progressToken]\n", "servers.a.forwardMeta[0]: is a key mcp-gate sets itself"},
+		{"reserved meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [io.modelcontextprotocol/clientInfo]\n", "servers.a.forwardMeta[0]: is a key mcp-gate sets itself"},
 		{"escrow keys", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {fileTools: [x]}\n", "field fileTools not found"},
 	}
 	for _, c := range cases {
@@ -356,5 +360,24 @@ func TestLoad(t *testing.T) {
 	}
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml"), noEnv); err == nil {
 		t.Error("Load of a missing file succeeded")
+	}
+}
+
+func TestForwardMeta(t *testing.T) {
+	t.Parallel()
+	c, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n    forwardMeta: [example.com/trace, plain]\n  b:\n    stdio: {command: srv}\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(c.Servers["a"].ForwardMeta, []string{"example.com/trace", "plain"}) || c.Servers["b"].ForwardMeta != nil {
+		t.Errorf("forwardMeta = %v, %v", c.Servers["a"].ForwardMeta, c.Servers["b"].ForwardMeta)
+	}
+	for k, want := range map[string]bool{
+		"io.modelcontextprotocol/clientInfo": true, "dev.mcp/x": true, "mcp/x": true, "modelcontextprotocol.io/x": true,
+		"mcpish.example.com/x": false, "example.com/mcp": false, "plain": false, "progressToken": false,
+	} {
+		if got := ReservedMetaKey(k); got != want {
+			t.Errorf("ReservedMetaKey(%q) = %v", k, got)
+		}
 	}
 }

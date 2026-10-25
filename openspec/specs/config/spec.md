@@ -62,7 +62,7 @@ The config SHALL have at least one server under `servers`. A server name SHALL m
 
 ### Requirement: Serving keys
 
-The config MAY set `listen.addr` (`host:port`, default `127.0.0.1:9090`), `listen.behindProxy` (default `false`), `listen.trustedProxies` (CIDRs, default `127.0.0.1/32` and `::1/128`), `listen.allowedHosts` (host names, optionally with a port), `startupGracePeriod` (positive, default `30s`), `logLevel` (`debug`, `info`, `warn` or `error`, default `info`), `auth.tokens` and `admin.tokens`. A server MAY set `tools`, `prompts` and `resources`, each with exactly one of `allow` and `deny`, lists of non-empty entries; `auth.inherit` (default `true`), `auth.tokens` and `auth.public`; `log.requests`; and `redact.enabled` (default `true`), `redact.ru`, `redact.highEntropy` and `redact.disableRules`, whose entries SHALL be redaction kinds.
+The config MAY set `listen.addr` (`host:port`, default `127.0.0.1:9090`), `listen.behindProxy` (default `false`), `listen.trustedProxies` (CIDRs, default `127.0.0.1/32` and `::1/128`), `listen.allowedHosts` (host names, optionally with a port), `startupGracePeriod` (positive, default `30s`), `logLevel` (`debug`, `info`, `warn` or `error`, default `info`), `auth.tokens` and `admin.tokens`. A server MAY set `tools`, `prompts` and `resources`, each with exactly one of `allow` and `deny`, lists of non-empty entries; `auth.inherit` (default `true`), `auth.tokens` and `auth.public`; `log.requests`; `redact.enabled` (default `true`), `redact.ru`, `redact.highEntropy` and `redact.disableRules`, whose entries SHALL be redaction kinds; and `forwardMeta`, a list of `_meta` keys (default empty) whose entries SHALL be non-empty and distinct and SHALL NOT be `progressToken` or a key whose prefix before `/` has a label `mcp` or `modelcontextprotocol`, which the gate sets itself.
 
 Tokens SHALL be maps from a name matching `[a-z0-9][a-z0-9._-]{0,62}` to a non-empty value without spaces or control characters. Every server that is not `public` SHALL accept at least one token, from `auth.tokens` (unless `inherit` is `false`) or its own; `public` SHALL exclude `tokens` and `inherit`. With `inherit`, a server's own token names SHALL differ from the global ones, and no two tokens a server accepts SHALL have the same value.
 
@@ -75,6 +75,11 @@ Tokens SHALL be maps from a name matching `[a-z0-9][a-z0-9._-]{0,62}` to a non-e
 
 - **WHEN** a server's `tools` sets both `allow` and `deny`
 - **THEN** loading fails naming `servers.<name>.tools`
+
+#### Scenario: Reserved meta key
+
+- **WHEN** a server's `forwardMeta` lists `progressToken` or `io.modelcontextprotocol/clientInfo`
+- **THEN** loading fails naming `servers.<name>.forwardMeta[<i>]`
 
 #### Scenario: Shared token value
 
@@ -122,7 +127,7 @@ A YAML syntax or type error SHALL be reported with its line. Every expansion and
 
 A command that runs `env` with `-i`, `-u NAME`, `-C DIR` and `NAME=VALUE` before the command SHALL be unwrapped into `command`, `args`, `cwd` and `env`, the assignments winning over `env`. Names unset with `-u` SHALL be removed from `inheritEnv` when they are in its default, and otherwise dropped with a comment, since a stdio child inherits only `inheritEnv` and `env`; `-i` SHALL give `inheritEnv: []`. An `env` command line the importer does not understand SHALL be kept as it is, with a note.
 
-`mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid` and `autoReconnect` SHALL be dropped with a comment, since they have no effect in mcp-gate. Every other key that changes behaviour (the escrow and file-scanning keys of `redact`, a `baseURL` with a path, OAuth, the SSE transport) SHALL make the import fail with exit status 2, listing the keys by path and writing nothing to stdout. With `-partial` the config SHALL be written anyway, each dropped key listed in a comment carrying `NOT IMPLEMENTED IN THIS BUILD`, and loading SHALL reject a file with such a comment until the comments are removed. Notes and errors SHALL name keys but never values.
+mcp-proxy passed each request's `_meta` on as it was; the import SHALL write no `forwardMeta` and SHALL say so in a comment. `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid` and `autoReconnect` SHALL be dropped with a comment, since they have no effect in mcp-gate. Every other key that changes behaviour (the escrow and file-scanning keys of `redact`, a `baseURL` with a path, OAuth, the SSE transport) SHALL make the import fail with exit status 2, listing the keys by path and writing nothing to stdout. With `-partial` the config SHALL be written anyway, each dropped key listed in a comment carrying `NOT IMPLEMENTED IN THIS BUILD`, and loading SHALL reject a file with such a comment until the comments are removed. Notes and errors SHALL name keys but never values.
 
 #### Scenario: Unimplemented keys
 

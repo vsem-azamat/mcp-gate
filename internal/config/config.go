@@ -110,6 +110,9 @@ type Server struct {
 	Auth      ServerAuth `yaml:"auth,omitempty"`
 	Log       Log        `yaml:"log,omitempty"`
 	Redact    Redact     `yaml:"redact,omitempty"`
+	// ForwardMeta lists the _meta keys of a client request that are passed to the server, by
+	// exact name. Others are dropped.
+	ForwardMeta []string `yaml:"forwardMeta,omitempty"`
 }
 
 // Filter is an allow list or a deny list; exactly one is set.

@@ -30,6 +30,8 @@ mcp-gate check gate.yaml
 
 Options set in `mcpProxy.options` are applied to each server, as mcp-proxy did, except filters there, which mcp-proxy ignored. Keys mcp-proxy ignores, `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid`, `autoReconnect`, a `toolFilter` that allows an empty list (no filter in mcp-proxy) and an empty block list are dropped with a comment.
 
+mcp-proxy passed each request's `_meta` to the server as it was. The import writes no `forwardMeta`, so mcp-gate passes none, and says so in a comment; list keys a server needs by hand.
+
 ## Tokens
 
 mcp-proxy tokens are a list; mcp-gate names each token, and the name shows up in the audit log. A token written as `${VAR}` is named after its variable, lower-cased, without the prefix up to the last `_` that every token variable shares: `${HUB_TOKEN_LAPTOP}`, `${HUB_TOKEN_PHONE}` and `${HUB_TOKEN_MAIL}` become `laptop`, `phone` and `mail`. When that does not give distinct valid names, or a token is written in the file (which gives a warning), the tokens are named `token1`, `token2` and so on. Rename them freely; only the values matter to clients.

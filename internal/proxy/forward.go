@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -239,7 +239,7 @@ func (m *Mirror) logText(s string) string {
 func (m *Mirror) forward(ctx context.Context, ss *mcp.ServerSession, meta mcp.Meta, setMeta func(mcp.Meta),
 	fn func(context.Context, *mcp.ClientSession) error,
 ) error {
-	down := downstreamMeta(meta)
+	down := downstreamMeta(meta, m.opts.ForwardMeta)
 	if token := progressToken(meta); token != nil && ss != nil {
 		sink := m.progress.open(ctx, ss, token, m.logger)
 		defer m.progress.close(sink)
@@ -262,15 +262,15 @@ func progressToken(meta mcp.Meta) any {
 	}
 }
 
-// downstreamMeta builds the _meta sent downstream from the upstream one: every key outside the
-// namespaces the MCP specification reserves, and nothing else. Reserved keys describe the
-// upstream client (its protocol version, capabilities, client info); passed on, the SDK would
-// keep them instead of its own and send them as headers. The progress token is replaced by the
-// gate's.
-func downstreamMeta(meta mcp.Meta) mcp.Meta {
+// downstreamMeta builds the _meta sent downstream from the upstream one: the keys in forward,
+// and nothing else. The upstream _meta describes the client (its session, its traces, its
+// protocol version and capabilities), and the servers are third parties, so only keys the
+// config names are passed on. The progress token is replaced by the gate's.
+func downstreamMeta(meta mcp.Meta, forward []string) mcp.Meta {
 	var out mcp.Meta
-	for k, v := range meta {
-		if k == "progressToken" || reservedMetaKey(k) {
+	for _, k := range forward {
+		v, ok := meta[k]
+		if !ok || k == "progressToken" || config.ReservedMetaKey(k) {
 			continue
 		}
 		if out == nil {
@@ -279,21 +279,6 @@ func downstreamMeta(meta mcp.Meta) mcp.Meta {
 		out[k] = v
 	}
 	return out
-}
-
-// reservedMetaKey reports whether a _meta key has a prefix the MCP specification reserves: one
-// whose labels include "modelcontextprotocol" or "mcp", such as "io.modelcontextprotocol/".
-func reservedMetaKey(k string) bool {
-	prefix, _, ok := strings.Cut(k, "/")
-	if !ok {
-		return false
-	}
-	for _, label := range strings.Split(prefix, ".") {
-		if label == "modelcontextprotocol" || label == "mcp" {
-			return true
-		}
-	}
-	return false
 }
 
 // mirrored reports whether the tool or prompt name is in the mirrored catalog.

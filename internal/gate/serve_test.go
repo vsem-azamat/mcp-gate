@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -104,32 +105,38 @@ func TestProgressGoesToItsCall(t *testing.T) {
 	wg.Wait()
 }
 
-func TestMetaAllowList(t *testing.T) {
+func TestForwardMeta(t *testing.T) {
 	f := testkit.Fake{ProtocolVersions: []string{"2025-11-25"}}
+	url := testkit.NewFakeHTTP(t, f, testkit.FakeHTTPOptions{}).URL()
 	r := startGate(t, configDoc("", map[string]string{
-		"legacy": httpServer(testkit.NewFakeHTTP(t, f, testkit.FakeHTTPOptions{}).URL(), ""),
+		"listed":   httpServer(url, "forwardMeta: [example.com/trace]\n"),
+		"unlisted": httpServer(url, ""),
 	}), gateOpts{})
-	r.waitReady(t, "legacy")
-	cs := r.connect(t, "legacy", clientOpts{version: "2026-07-28"})
-	params := &mcp.CallToolParams{Name: "meta", Meta: mcp.Meta{"example.com/trace": "abc", "dev.mcp/x": 1}}
-	params.SetProgressToken("p1")
-	res, err := cs.CallTool(t.Context(), params)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var meta map[string]any
-	if err := json.Unmarshal([]byte(textOf(t, res)), &meta); err != nil {
-		t.Fatal(err)
-	}
-	if meta["example.com/trace"] != "abc" {
-		t.Errorf("custom key lost: %v", meta)
-	}
-	if tok, _ := meta["progressToken"].(string); !strings.HasPrefix(tok, "mcp-gate-") {
-		t.Errorf("progress token not remapped: %v", meta)
-	}
-	for k := range meta {
-		if strings.Contains(k, "modelcontextprotocol") || strings.HasPrefix(k, "dev.mcp/") {
-			t.Errorf("reserved key %q reached the server", k)
+	for _, name := range []string{"listed", "unlisted"} {
+		r.waitReady(t, name)
+		cs := r.connect(t, name, clientOpts{version: "2026-07-28"})
+		params := &mcp.CallToolParams{Name: "meta", Meta: mcp.Meta{
+			"example.com/trace": "abc", "example.com/session": "s-1", "dev.mcp/x": 1,
+		}}
+		params.SetProgressToken("p1")
+		res, err := cs.CallTool(t.Context(), params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var meta map[string]any
+		if err := json.Unmarshal([]byte(textOf(t, res)), &meta); err != nil {
+			t.Fatal(err)
+		}
+		if tok, _ := meta["progressToken"].(string); !strings.HasPrefix(tok, "mcp-gate-") {
+			t.Errorf("%s: progress token not remapped: %v", name, meta)
+		}
+		delete(meta, "progressToken")
+		want := map[string]any{}
+		if name == "listed" {
+			want["example.com/trace"] = "abc"
+		}
+		if fmt.Sprint(meta) != fmt.Sprint(want) {
+			t.Errorf("%s: the server got _meta %v, want %v", name, meta, want)
 		}
 	}
 }

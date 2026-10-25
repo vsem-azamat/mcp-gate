@@ -82,7 +82,7 @@ The upstream server SHALL advertise, independent of the catalog: tools, prompts 
 
 A call (`tools/call`, `prompts/get`, `resources/read`) SHALL be forwarded on the server's current downstream session, bounded by `callTimeout`, with the upstream request's context, so that the end of the upstream request cancels the downstream call. A `2026-07-28` request is one POST, so a client that gives up cancels its call; for an older client the stateless handler cannot tie a cancellation to the call, which runs until it ends or `callTimeout` ends it. Stopping the gate SHALL cancel the calls in flight.
 
-The downstream request's `_meta` SHALL hold every key of the upstream `_meta` except `progressToken` and keys whose prefix (the part before `/`) has a label `modelcontextprotocol` or `mcp`, which describe the upstream client. When the upstream request has a string or number progress token, the downstream request SHALL carry a token issued by the gate, and the downstream's progress notifications for it SHALL be sent on the upstream request's stream with the client's token and a redacted message. Only the latest progress notification not yet sent SHALL be kept per call, so that a client that does not read its stream holds up only its own call; progress for a call that has ended SHALL be dropped.
+The upstream `_meta` describes the client and the downstream servers are third parties, so the downstream request's `_meta` SHALL hold only the upstream keys listed, by exact name, in the server's `forwardMeta` (none by default), besides the gate's progress token. When the upstream request has a string or number progress token, the downstream request SHALL carry a token issued by the gate, and the downstream's progress notifications for it SHALL be sent on the upstream request's stream with the client's token and a redacted message. Only the latest progress notification not yet sent SHALL be kept per call, so that a client that does not read its stream holds up only its own call; progress for a call that has ended SHALL be dropped.
 
 Downstream notifications SHALL pass through a queue of 64; when it is full a notification SHALL be dropped and counted. Log messages from the downstream SHALL be logged at debug level, redacted and cut at 4 KiB, and not forwarded.
 
@@ -98,10 +98,10 @@ A call on a server that is not ready SHALL fail at once: a tool call with a tool
 - **WHEN** three clients of different versions call a tool that reports progress, each with its own token, at the same time
 - **THEN** each receives progress only for its own call, under its own token
 
-#### Scenario: Meta allow-list
+#### Scenario: Listed meta key passes, unlisted key is dropped
 
-- **WHEN** a `2026-07-28` client calls a tool with `_meta` holding `example.com/trace`, `dev.mcp/x` and a progress token
-- **THEN** the downstream request carries `example.com/trace` and a gate progress token, and no reserved key
+- **WHEN** a `2026-07-28` client calls a tool with `_meta` holding `example.com/trace`, `example.com/session`, `dev.mcp/x` and a progress token, on a server with `forwardMeta: [example.com/trace]` and on one without `forwardMeta`
+- **THEN** the first server's request carries `example.com/trace` and a gate progress token, the second's only a gate progress token, and the unlisted keys reach neither
 
 #### Scenario: Client gives up
 

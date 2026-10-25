@@ -87,6 +87,7 @@ servers:
 | `redact.ru` | `false` | Add the Russian label rules |
 | `redact.highEntropy` | `false` | Add the high-entropy rule |
 | `redact.disableRules` | none | Redaction kinds never reported, such as `jwt` |
+| `forwardMeta` | none | `_meta` keys of a client request passed to the server, by exact name, such as `example.com/trace`. Others are dropped: they describe the client. `progressToken` and `mcp`/`modelcontextprotocol`-prefixed keys are the gate's and cannot be listed |
 
 Each server has exactly one of `stdio` and `http`. Every server that is not `public` must accept at least one token, and no two tokens a server accepts may have the same value. Token names are lower-case letters, digits, `.`, `_` and `-`; values may not contain spaces or control characters.
 

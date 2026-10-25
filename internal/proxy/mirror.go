@@ -51,6 +51,8 @@ type Options struct {
 	// Version is reported as the server version to clients.
 	Version string
 	Policy  *policy.Policy
+	// ForwardMeta are the _meta keys of a request passed downstream.
+	ForwardMeta []string
 	// Redaction redacts results; nil passes them unchanged.
 	Redaction *Redaction
 	Logger    *slog.Logger

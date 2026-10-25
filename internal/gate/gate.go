@@ -148,7 +148,8 @@ func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
 		redaction = proxy.NewRedaction(engine, replacer, int(*s.MaxMessageBytes))
 	}
 	mirror := proxy.New(proxy.Options{
-		Name: name, Version: g.opts.Version, Policy: policy.New(s), Redaction: redaction, Logger: g.logger,
+		Name: name, Version: g.opts.Version, Policy: policy.New(s), ForwardMeta: s.ForwardMeta,
+		Redaction: redaction, Logger: g.logger,
 	})
 	o := DownstreamOptions(g.cfg, name, s, g.opts.Environ, g.opts.Version, g.logger)
 	o.Redactor = engine

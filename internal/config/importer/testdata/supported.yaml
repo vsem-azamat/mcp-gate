@@ -4,6 +4,7 @@
 # mcpProxy.type is dropped: mcp-gate serves streamable HTTP.
 # mcpProxy.options.panicIfInvalid is dropped: it has no equivalent.
 # mcpProxy.options.autoReconnect is dropped: mcp-gate always restarts a failed server, with backoff up to restart.maxBackoff.
+# mcp-proxy passed each request's _meta to the server as it was; mcp-gate passes only the keys a server lists in forwardMeta, none by default.
 # logEnabled also turned on the MCP logging capability; mcp-gate does not offer it, and logs requests only.
 # stdio servers no longer inherit the whole environment: only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
 version: 1

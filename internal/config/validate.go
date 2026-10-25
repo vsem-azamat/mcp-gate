@@ -210,6 +210,19 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	s.Tools.validate(path+".tools", add)
 	s.Prompts.validate(path+".prompts", add)
 	s.Resources.validate(path+".resources", add)
+	seen := map[string]bool{}
+	for i, k := range s.ForwardMeta {
+		p := fmt.Sprintf("%s.forwardMeta[%d]", path, i)
+		switch {
+		case strings.TrimSpace(k) == "":
+			add(p, "cannot be empty")
+		case seen[k]:
+			add(p, "is listed twice")
+		case k == "progressToken" || ReservedMetaKey(k):
+			add(p, "is a key mcp-gate sets itself: progressToken and keys with an mcp or modelcontextprotocol prefix cannot be forwarded")
+		}
+		seen[k] = true
+	}
 	if _, err := redact.New(redact.Options{DisableRules: s.Redact.DisableRules}); err != nil {
 		add(path+".redact.disableRules", "names an unknown rule; known: %s", strings.Join(redact.Kinds(), ", "))
 	}
@@ -285,4 +298,19 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// ReservedMetaKey reports whether a _meta key has a prefix the MCP specification reserves: one
+// whose labels include "modelcontextprotocol" or "mcp", such as "io.modelcontextprotocol/".
+func ReservedMetaKey(k string) bool {
+	prefix, _, ok := strings.Cut(k, "/")
+	if !ok {
+		return false
+	}
+	for label := range strings.SplitSeq(prefix, ".") {
+		if label == "modelcontextprotocol" || label == "mcp" {
+			return true
+		}
+	}
+	return false
 }

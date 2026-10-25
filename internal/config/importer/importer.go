@@ -194,6 +194,7 @@ func (im *importer) root(v any) (*document, error) {
 	}
 	doc.tokens = global.tokens
 	im.nameTokens(doc)
+	doc.notes = append(doc.notes, "mcp-proxy passed each request's _meta to the server as it was; mcp-gate passes only the keys a server lists in forwardMeta, none by default.")
 	if slices.ContainsFunc(doc.servers, func(s *server) bool { return s.requests }) {
 		doc.notes = append(doc.notes, "logEnabled also turned on the MCP logging capability; mcp-gate does not offer it, and logs requests only.")
 	}
