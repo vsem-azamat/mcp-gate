@@ -247,11 +247,15 @@ func TestMergeSpans(t *testing.T) {
 		{"equal starts", []span{sp(0, 4, 1, false)}, []span{sp(0, 8, 2, false)}, []span{sp(0, 8, 1, false)}},
 		{"escaped winner over a wider union is raw", []span{sp(2, 4, 1, true)}, []span{sp(0, 8, 2, false)}, []span{sp(0, 8, 1, false)}},
 		{"escaped winner covering the union stays decoded", []span{sp(0, 8, 1, true)}, []span{sp(2, 4, 2, false)}, []span{sp(0, 8, 1, true)}},
+		{"escaped loser covering the union is decoded", []span{sp(2, 4, 1, false)}, []span{sp(0, 8, 2, true)}, []span{sp(0, 8, 1, true)}},
 	}
 	for _, tt := range tests {
-		if got := mergeSpans(tt.kept, tt.added); !slices.Equal(got, tt.want) {
-			t.Errorf("%s: got %+v, want %+v", tt.name, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mergeSpans(tt.kept, tt.added); !slices.Equal(got, tt.want) {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 	// A chain over three rounds collapses into one span with the first round's kind.
 	got := mergeSpans(mergeSpans([]span{sp(0, 3, 1, false)}, []span{sp(2, 6, 2, false)}), []span{sp(5, 9, 3, false)})
@@ -268,6 +272,16 @@ func TestMergedValueIsRawOutsideALiteral(t *testing.T) {
 	text := `пароль «\"pwd\":\"abc\" x\t y»`
 	spans := newEngine(t, Options{Russian: true}).Find(text)
 	if len(spans) != 1 || spans[0].Finding.Value != text[spans[0].Start:spans[0].End] {
+		t.Fatalf("spans = %+v", spans)
+	}
+}
+
+func TestMergedValueInsideALiteralIsDecoded(t *testing.T) {
+	t.Parallel()
+
+	token := fake("ghp_", 36)
+	spans := newEngine(t, Options{}).Find(`log "password":"a\u0041b,` + token + `" end`)
+	if len(spans) != 1 || spans[0].Finding.Kind != "github_token" || spans[0].Finding.Value != "aAb,"+token {
 		t.Fatalf("spans = %+v", spans)
 	}
 }
