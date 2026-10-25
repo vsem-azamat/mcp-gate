@@ -72,6 +72,7 @@ type OAuthServer struct {
 	refreshes     int
 	tokenRequests int
 	rejected      int
+	refuse        int // the status the MCP endpoint answers every request with, if not zero
 	lastAuthorize url.Values
 	lastToken     url.Values
 }
@@ -167,6 +168,14 @@ func (s *OAuthServer) Login(t testing.TB, store *oauth.Store, name string) *oaut
 	return g
 }
 
+// Refuse makes the MCP endpoint answer every request with status (401 or 403), whatever its
+// token; 0 serves again.
+func (s *OAuthServer) Refuse(status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refuse = status
+}
+
 // ExpireAccess voids every access token issued so far; refresh tokens stay valid.
 func (s *OAuthServer) ExpireAccess() {
 	s.mu.Lock()
@@ -230,10 +239,16 @@ func (s *OAuthServer) protect(next http.Handler) http.Handler {
 		s.mu.Lock()
 		exp, ok := s.access[tok]
 		ok = ok && time.Now().Before(exp)
-		if !ok {
+		refuse := s.refuse
+		if !ok || refuse == http.StatusUnauthorized {
+			ok = false
 			s.rejected++
 		}
 		s.mu.Unlock()
+		if ok && refuse != 0 {
+			http.Error(w, http.StatusText(refuse), refuse)
+			return
+		}
 		if !ok {
 			if !s.opts.NoChallenge {
 				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource/mcp"`, s.srv.URL))

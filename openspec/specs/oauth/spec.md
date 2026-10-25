@@ -2,13 +2,13 @@
 
 ## Purpose
 
-An HTTP downstream server with an `oauth` block is reached with an OAuth access token. mcp-gate is the OAuth client: `mcp-gate auth login` obtains a grant for one server through the authorization code flow, the user signing in from any browser while the gate host needs none, and keeps it on disk; the supervisor sends the grant's access token and refreshes it. The gate never starts a login on its own: a server without a usable grant waits, reported as needing a login, and serves nothing. `mcp-gate auth status` shows the grants and `mcp-gate auth logout` deletes one.
+An HTTP downstream server with an `oauth` block is reached with an OAuth access token. mcp-gate is the OAuth client: `mcp-gate auth login` obtains a grant for one server through the authorization code flow, the user signing in from any browser while the gate host needs none, and keeps it on disk; the supervisor sends the grant's access token and refreshes it. The gate never starts a login on its own: a server without a usable grant waits, reported as needing a login: nothing is sent to it, its calls fail, and its route answers 503 until it has connected once. `mcp-gate auth status` shows the grants and `mcp-gate auth logout` deletes one.
 
 ## Requirements
 
 ### Requirement: Discovery
 
-`auth login` SHALL find the server's authorization server as the MCP authorization specification (2025-11-25) has it: it SHALL send the server an unauthenticated request and read the `resource_metadata` and `scope` of a `Bearer` challenge in a 401 answer; then read the protected resource metadata (RFC 9728) at the challenge's URL, at `/.well-known/oauth-protected-resource` followed by the endpoint's path, or at the root for the origin, the first that names the resource it was fetched for; then read the metadata of its first authorization server (RFC 8414, or OpenID Connect discovery), whose `issuer` SHALL equal the authorization server. When `authServerMetadataURL` is set, the metadata SHALL be read there instead, the issuer SHALL be derived from its well-known form, and that issuer SHALL be one of the authorization servers the resource metadata lists. Without protected resource metadata, the server's origin SHALL be taken as the authorization server and the server's URL as the resource. The metadata SHALL offer the `code` response type (when it lists response types), PKCE with `S256`, and authorization, token and registration endpoints that are https or on a loopback address; a login SHALL fail otherwise. The server's URL SHALL be https or on a loopback address. Metadata documents SHALL be read through the SDK, which bounds them to 1 MiB, follows redirects only to https and refuses private and reserved addresses.
+`auth login` SHALL find the server's authorization server as the MCP authorization specification (2025-11-25) has it: it SHALL send the server an unauthenticated request and read the `resource_metadata` and `scope` of a `Bearer` challenge in a 401 answer; then read the protected resource metadata (RFC 9728) at the challenge's URL, at `/.well-known/oauth-protected-resource` followed by the endpoint's path, or at the root for the origin, the first that names the resource it was fetched for; then read the metadata of its first authorization server (RFC 8414, or OpenID Connect discovery), whose `issuer` SHALL equal the authorization server. When `authServerMetadataURL` is set, the metadata SHALL be read there instead, the issuer SHALL be derived from its well-known form, and that issuer SHALL be one of the authorization servers the resource metadata lists. Without protected resource metadata, the server's origin SHALL be taken as the authorization server and the server's URL as the resource. The metadata SHALL offer the `code` response type (when it lists response types), PKCE with `S256`, and authorization, token and registration endpoints that are https or on a loopback address; a login SHALL fail otherwise. The server's URL SHALL be https or on a loopback address. Metadata documents SHALL be read through the SDK, which bounds them to 1 MiB, follows redirects only to https and, unless an HTTP proxy is configured, refuses connections to private and reserved addresses; requests to the token and registration endpoints are not guarded that way.
 
 #### Scenario: Full discovery
 
@@ -69,12 +69,22 @@ Grants SHALL be kept in the `oauth` directory of the state directory (`-state-di
 
 ### Requirement: Tokens on requests
 
-A server with an `oauth` block SHALL send every request with `Authorization: Bearer <access token>` from its grant. A grant SHALL be used only for the server URL it was obtained for, and only for the configured client when `clientID` is set, or a registered client when it is not. An access token SHALL be refreshed when it expires within a minute, and when the server answers 401 to it, the request then being retried once. A refresh SHALL send the refresh token and the resource, SHALL keep the old refresh token when the answer has none, and SHALL be saved. Refreshes of one server SHALL run one at a time; under the lock, a grant that another process refreshed SHALL be taken instead of refreshing again. A 403 SHALL fail the request without a refresh.
+A server with an `oauth` block SHALL send every request with `Authorization: Bearer <access token>` from its grant. A grant SHALL be used only for the server URL it was obtained for, and only for the configured client when `clientID` is set, or a registered client when it is not. An access token SHALL be refreshed when it expires within a minute (within half its lifetime, for a token that lives less than two minutes), and when the server answers 401 to it, the request then being retried once. A refresh SHALL send the refresh token and the resource, SHALL keep the old refresh token when the answer has none, and SHALL be saved. Refreshes of one server SHALL run one at a time, under the lock, which is waited for at most 40 seconds. When the grant file changed while the lock was awaited (another process refreshed, logged in or logged out), the file SHALL be taken as it is now, as when it is read anew, and the grant in memory SHALL never be saved over it. A 403 SHALL fail the request without a refresh.
+
+#### Scenario: Server refusing
+
+- **WHEN** the server answers 403 to every request, and then 401 to every token
+- **THEN** the 403 fails the requests without a refresh, and after at most three refreshes the server needs a login
 
 #### Scenario: Expiry
 
 - **WHEN** several requests need the token while it expires within a minute
 - **THEN** it is refreshed once, the rotated refresh token is saved, and another process using the same state directory takes the saved grant without refreshing
+
+#### Scenario: Logout or login during a refresh
+
+- **WHEN** a refresh waits for the lock while `auth logout` deletes the grant, or while `auth login` saves a grant for a new client
+- **THEN** the refresh writes nothing back: the server needs a login, or uses the new grant
 
 #### Scenario: Token rejected before its expiry
 
@@ -83,7 +93,7 @@ A server with an `oauth` block SHALL send every request with `Authorization: Bea
 
 ### Requirement: Fail closed
 
-A server SHALL need a login when it has no grant file, when its grant file cannot be used, when the grant is for another URL or client, when the access token has expired without a refresh token, when the token endpoint answers a refresh with `invalid_grant`, `invalid_client` or `unauthorized_client`, and when the server answers 401 to a token that a refresh after a 401 obtained. Such a server SHALL send no request to its endpoint, and a rejected grant SHALL not be tried again, until its grant file changes: a new login SHALL be used at the next connect attempt without a restart, and a deleted grant SHALL stop being used at the next request. Without a state directory every OAuth server SHALL need a login. Other refresh failures, such as a timeout, SHALL fail only the request.
+A server SHALL need a login when it has no grant file, when its grant file cannot be used, when the grant is for another URL or client, when the access token has expired without a refresh token, when the token endpoint answers a refresh with `invalid_grant`, `invalid_client` or `unauthorized_client`, and when the server answers 401 for the third time in a row, each to the token that the refresh after the previous 401 obtained, within 30 seconds of that refresh. Such a server SHALL send no request to its endpoint, and a rejected grant SHALL not be tried again, until its grant file changes: a new login SHALL be used at the next connect attempt without a restart, and a deleted grant SHALL stop being used at the next request. Without a state directory every OAuth server SHALL need a login. Other refresh failures, such as a timeout, SHALL fail only the request.
 
 #### Scenario: Revoked refresh token
 
@@ -97,7 +107,7 @@ A server SHALL need a login when it has no grant file, when its grant file canno
 
 ### Requirement: Secrets
 
-Access tokens, refresh tokens, client secrets, codes and code verifiers SHALL appear in no log line, error, status or command output. Errors from the authorization server SHALL name its HTTP status and error code; its error description SHALL be shown only by `auth login`, cut at 200 bytes of printable ASCII. Requests to the authorization server SHALL time out after 30 seconds, follow no redirects (metadata documents excepted, as above) and read at most 1 MiB of an answer.
+Access tokens, refresh tokens, client secrets, codes and code verifiers SHALL appear in no log line, error, status or command output. Errors from the authorization server SHALL name its HTTP status and error code (when it is lower-case letters and underscores, `unknown` otherwise); its error description SHALL be shown only by `auth login`, cut at 200 bytes of printable ASCII. Requests to the authorization server SHALL time out after 30 seconds, follow no redirects (metadata documents excepted, as above) and read at most 1 MiB of an answer.
 
 #### Scenario: Description echoing a token
 

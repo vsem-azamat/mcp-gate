@@ -45,14 +45,24 @@ type Source struct {
 	opts   SourceOptions
 	logger *slog.Logger
 
-	mu     sync.Mutex
-	grant  *Grant
-	loaded bool   // the grant file was read at stamp
-	stamp  stamp  // of the file grant was read from
-	dead   bool   // the authorization server or the server rejected grant
-	reason string // why there is no usable grant, for status
-	forced string // the access token a refresh after a 401 obtained
+	mu       sync.Mutex
+	grant    *Grant
+	loaded   bool      // the grant file was read at stamp
+	stamp    stamp     // of the file grant was read from
+	dead     bool      // the authorization server or the server rejected grant
+	reason   string    // why there is no usable grant, for status
+	forced   string    // the access token a refresh after a 401 obtained
+	forcedAt time.Time // when
+	forcedN  int       // refreshes after a 401 in a row, each soon after the one before
 }
+
+// A 401 to a token that a refresh after a 401 obtained, within retryWindow of that refresh, is
+// counted; the maxForced-th in a row means the server rejects the grant's tokens. A single one
+// is no proof: the token may have been dropped in its turn, as a server restart does.
+const (
+	retryWindow = 30 * time.Second
+	maxForced   = 3
+)
 
 // NewSource returns the token source of a server.
 func NewSource(opts SourceOptions) *Source {
@@ -109,8 +119,18 @@ func (s *Source) tokenLocked() *oauth2.Token {
 	return &oauth2.Token{AccessToken: s.grant.AccessToken, TokenType: "Bearer", Expiry: s.grant.Expiry}
 }
 
+// validLocked reports whether g's access token is good for a while yet: until a minute before
+// its expiry, or half its lifetime for a token that lives two minutes or less.
 func (s *Source) validLocked(g *Grant) bool {
-	return g.Expiry.IsZero() || s.opts.Now().Add(expirySkew).Before(g.Expiry)
+	if g.Expiry.IsZero() {
+		return true
+	}
+	issued := g.ObtainedAt
+	if !g.RefreshedAt.IsZero() {
+		issued = g.RefreshedAt
+	}
+	skew := min(expirySkew, g.Expiry.Sub(issued)/2)
+	return s.opts.Now().Add(skew).Before(g.Expiry)
 }
 
 // Authorize implements auth.OAuthHandler; the SDK calls it when the server answers 401 or 403,
@@ -131,7 +151,13 @@ func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Re
 		return ErrLoginRequired
 	case used != s.grant.AccessToken:
 		return nil // the token changed since the request was sent: retry with the new one
-	case used == s.forced:
+	}
+	if used == s.forced && s.opts.Now().Sub(s.forcedAt) < retryWindow {
+		s.forcedN++
+	} else {
+		s.forcedN = 1
+	}
+	if s.forcedN >= maxForced {
 		s.rejectLocked("the server rejects the grant's tokens")
 		return ErrLoginRequired
 	}
@@ -139,7 +165,7 @@ func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Re
 	if err := s.refreshLocked(context.WithoutCancel(ctx)); err != nil {
 		return err
 	}
-	s.forced = s.grant.AccessToken
+	s.forced, s.forcedAt = s.grant.AccessToken, s.opts.Now()
 	return nil
 }
 
@@ -157,7 +183,7 @@ func (s *Source) reloadLocked() {
 	if st.fi == nil {
 		st = cur
 	}
-	s.loaded, s.stamp, s.dead, s.forced = true, st, false, ""
+	s.loaded, s.stamp, s.dead, s.forced, s.forcedN = true, st, false, "", 0
 	switch {
 	case err != nil:
 		s.grant, s.reason = nil, err.Error()
@@ -187,11 +213,17 @@ func (s *Source) refreshLocked(ctx context.Context) error {
 		return err
 	}
 	defer unlock()
-	g, st, err := s.opts.Store.load(s.opts.Name)
-	if err == nil && g != nil && !st.same(s.stamp) && g.ServerURL == s.grant.ServerURL && g.ClientID == s.grant.ClientID &&
-		g.AccessToken != s.grant.AccessToken && s.validLocked(g) {
-		s.grant, s.stamp = g, st
-		return nil
+	// Whatever another process wrote while this one waited for the lock (a refresh, a new
+	// login, a logout) wins over the grant in memory, which is never saved over it.
+	if !statStamp(s.opts.Store.path(s.opts.Name)).same(s.stamp) {
+		s.loaded = false
+		s.reloadLocked()
+		switch {
+		case s.grant == nil:
+			return ErrLoginRequired
+		case s.validLocked(s.grant):
+			return nil
+		}
 	}
 	if s.grant.RefreshToken == "" {
 		s.rejectLocked("the access token expired and the grant has no refresh token")

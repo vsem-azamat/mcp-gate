@@ -552,6 +552,9 @@ func (im *importer) oauth(o *object) (*config.OAuth, error) {
 		}
 		*f.to = convertVars(v, &im.warnings, a.sub(f.key))
 	}
+	if out.ClientSecret != "" && out.ClientID == "" {
+		return nil, fmt.Errorf("%s: clientSecret needs clientId", a.path)
+	}
 	if out.ClientSecret != "" && !strings.Contains(out.ClientSecret, "${") {
 		im.warn("%s.clientSecret is written in the file; move it to the environment and write ${VAR}", a.path)
 	}
@@ -560,6 +563,22 @@ func (im *importer) oauth(o *object) (*config.OAuth, error) {
 	}
 	if len(out.Scopes) == 0 {
 		out.Scopes = nil
+	}
+	for i, sc := range out.Scopes {
+		if sc == "" || strings.ContainsFunc(sc, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }) {
+			return nil, fmt.Errorf("%s[%d]: must be one scope, printable ASCII without spaces, quotes or backslashes", a.sub("scopes"), i)
+		}
+	}
+	for k := range o.m {
+		if strings.EqualFold(k, "headers") {
+			if h, _ := o.m[k].(map[string]any); h != nil {
+				for name := range h {
+					if strings.EqualFold(name, "Authorization") {
+						return nil, fmt.Errorf("%s.headers.%s: cannot be kept with oauth, which sets it", o.path, name)
+					}
+				}
+			}
+		}
 	}
 	if off, _, err := a.boolean("pkceDisabled"); err != nil {
 		return nil, err

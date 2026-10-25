@@ -22,7 +22,7 @@ A supervised server SHALL be in one of the states `starting`, `ready`, `degraded
 
 ### Requirement: OAuth
 
-An HTTP server with an `oauth` block SHALL authorize its requests with its grant as the oauth spec requires. Before each connect attempt the supervisor SHALL check for a usable grant; without one it SHALL enter `needs-login`, record the error `OAuth login required (<reason>): run mcp-gate auth login <config> <name>`, log it once rather than on every attempt, send nothing to the server, and try again after the backoff, which counts as no restart, staying in `needs-login` until a connect succeeds. A connect that fails because the grant was rejected SHALL do the same. When a call fails and the grant is no longer usable, the server SHALL be probed at once, and a failed probe with the grant unusable SHALL close the session without waiting for more failures, so that the server enters `needs-login`.
+An HTTP server with an `oauth` block SHALL authorize its requests with its grant as the oauth spec requires. Before each connect attempt the supervisor SHALL check for a usable grant; without one it SHALL enter `needs-login`, record the error `OAuth login required (<reason>): run mcp-gate auth login <config> <name>`, log it once rather than on every attempt, send nothing to the server, and try again after the backoff, which counts as no restart, staying in `needs-login` while there is no usable grant. A connect that fails because the grant was rejected SHALL do the same. When a call fails and the grant is no longer usable, the server SHALL be probed at once, and a failed probe with the grant unusable SHALL close the session without waiting for more failures, so that the server enters `needs-login`.
 
 #### Scenario: No grant, then a login
 

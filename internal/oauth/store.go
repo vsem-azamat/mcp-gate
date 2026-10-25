@@ -83,6 +83,9 @@ func (g *Grant) check() error {
 	return nil
 }
 
+// lockPoll is how often Lock tries a lock another process holds.
+const lockPoll = 20 * time.Millisecond
+
 // Store keeps grants on disk: <dir>/<server>.json, written atomically, readable by the owner
 // only. Server names are config server names, which are safe file names.
 type Store struct {
@@ -244,15 +247,18 @@ func (s *Store) Lock(name string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the grant lock: %w", bare(err))
 	}
+	// Holders keep the lock for a refresh at most, bounded by RequestTimeout.
+	deadline := time.Now().Add(RequestTimeout + 10*time.Second)
 	for {
-		err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
-		if !errors.Is(err, unix.EINTR) {
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
 			break
 		}
-	}
-	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("cannot take the grant lock: %w", err)
+		if (!errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR)) || time.Now().After(deadline) {
+			_ = f.Close()
+			return nil, fmt.Errorf("cannot take the grant lock: %w", err)
+		}
+		time.Sleep(lockPoll)
 	}
 	return func() {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)

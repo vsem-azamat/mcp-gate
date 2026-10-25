@@ -540,10 +540,11 @@ func (s *Supervisor) run(base context.Context) {
 	defer close(s.done)
 	backoff := s.opts.InitialBackoff
 	for attempt := 0; ; attempt++ {
-		s.mu.Lock()
 		// While a login is awaited, attempts only look for a grant: they count as no restart,
-		// and the state stays until one connects.
-		if s.state != NeedsLogin {
+		// and the state stays until there is a usable grant.
+		awaiting := s.Status().State == NeedsLogin && s.loginLost()
+		s.mu.Lock()
+		if !awaiting {
 			if attempt > 0 {
 				s.restarts++
 			}

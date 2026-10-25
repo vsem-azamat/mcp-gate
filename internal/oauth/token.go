@@ -41,9 +41,10 @@ func NewHTTPClient() *http.Client {
 	}
 }
 
-// discoveryClient returns the client for metadata documents. It has no transport of its own, so
-// the SDK uses its own one, which refuses private and reserved addresses and follows redirects
-// only to https; keep-alives are off, since that transport cannot be closed.
+// discoveryClient returns the client for metadata documents. Its transport sets no DialContext,
+// so the SDK uses a clone of it that refuses private and reserved addresses (unless a proxy is
+// configured) and follows redirects only to https; keep-alives are off, since that clone cannot
+// be closed.
 func discoveryClient(c *http.Client) *http.Client {
 	return &http.Client{Timeout: c.Timeout, Transport: &http.Transport{DisableKeepAlives: true, Proxy: http.ProxyFromEnvironment}}
 }
@@ -132,7 +133,7 @@ func requestToken(ctx context.Context, hc *http.Client, endpoint string, cl clie
 			Description string `json:"error_description"`
 		}
 		if json.Unmarshal(body, &e) == nil {
-			te.Code, te.Description = printable(e.Error, 64), printable(e.Description, 200)
+			te.Code, te.Description = errorCode(e.Error), printable(e.Description, 200)
 		}
 		return nil, te
 	}
@@ -169,6 +170,18 @@ func (tr *tokenResponse) expiry(now time.Time) time.Time {
 		return time.Time{}
 	}
 	return now.Add(time.Duration(min(n, 10*365*24*3600)) * time.Second)
+}
+
+// errorCode returns an OAuth error code when it is one (RFC 6749 codes are lower-case words
+// joined by _), and "unknown" otherwise: it is the server's text, and logged.
+func errorCode(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) > 64 || strings.ContainsFunc(s, func(r rune) bool { return (r < 'a' || r > 'z') && r != '_' }) {
+		return "unknown"
+	}
+	return s
 }
 
 // printable keeps the printable ASCII of s, cut at limit bytes.

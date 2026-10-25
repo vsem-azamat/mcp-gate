@@ -241,10 +241,13 @@ func TestImportOAuth(t *testing.T) {
 	if strings.Contains(warnings, "written-secret") {
 		t.Error("a warning quotes the secret")
 	}
-	for name, bad := range map[string]string{
+	for name, bad := range map[string]string{ //nolint:gosec // made-up config fragments
 		"plain http":    `"url": "http://a.example.com/mcp", "transportType": "streamable-http", "oauth": {}`,
 		"bad redirect":  `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "oauth": {"redirectUri": "http://app.example.com/cb"}`,
 		"not an object": `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "oauth": true`,
+		"authorization": `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "headers": {"authorization": "x"}, "oauth": {}`,
+		"secret alone":  `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "oauth": {"clientSecret": "x"}`,
+		"spaced scope":  `"url": "https://a.example.com/mcp", "transportType": "streamable-http", "oauth": {"scopes": ["a b"]}`,
 	} {
 		_, err := Import([]byte(`{"mcpProxy": {"type": "streamable-http"}, "mcpServers": {"a": {`+bad+`}}}`), Options{})
 		if err == nil {

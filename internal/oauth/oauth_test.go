@@ -473,3 +473,126 @@ func TestStore(t *testing.T) {
 		t.Errorf("Save left the directory %v", fi.Mode())
 	}
 }
+
+// A logout while a refresh waits for the lock wins: the refresh does not write the grant back.
+func TestRefreshAfterLogout(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}})
+	store := oauth.NewStore(t.TempDir())
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	later := func() time.Time { return time.Now().Add(2 * time.Hour) } // token expired
+	src := newSource(t, store, srv.URL(), nil, later)
+	unlock, err := store.Lock("notes") // "auth logout" holds the lock
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = src.Token() }) // stats the file, then waits on the lock
+	time.Sleep(200 * time.Millisecond)
+	if ok, err := store.Delete("notes"); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	unlock()
+	wg.Wait()
+	if g, _ := store.Load("notes"); g != nil {
+		t.Errorf("logout undone: the grant file was written again by a refresh")
+	}
+}
+
+// A new login while a refresh waits for the lock wins over the old grant.
+func TestRefreshAfterNewLogin(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}})
+	store := oauth.NewStore(t.TempDir())
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	fresh := login(t, srv, config.OAuth{}, nil) // registers a second client
+	later := func() time.Time { return time.Now().Add(2 * time.Hour) }
+	src := newSource(t, store, srv.URL(), nil, func() time.Time { return later().Add(-3 * time.Hour) })
+	_ = src.LoginRequired()
+	src2 := newSource(t, store, srv.URL(), nil, later)
+	unlock, err := store.Lock("notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = src2.Token() })
+	time.Sleep(200 * time.Millisecond)
+	fresh.Expiry = time.Now().Add(10 * time.Hour)
+	if err := store.Save("notes", fresh); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	wg.Wait()
+	g, _ := store.Load("notes")
+	if g == nil || g.ClientID != fresh.ClientID {
+		t.Errorf("the fresh login was overwritten by the old client's refresh")
+	}
+}
+
+// A token that lives a minute or less is not refreshed on every request.
+func TestShortLivedTokens(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}, AccessTTL: 50 * time.Second})
+	store := oauth.NewStore(t.TempDir())
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	src := newSource(t, store, srv.URL(), nil, nil)
+	for range 5 {
+		if _, err := src.Token(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if srv.Refreshes() > 1 {
+		t.Errorf("%d refreshes for 5 back-to-back Token calls", srv.Refreshes())
+	}
+}
+
+// A 401 to a token a 401 refresh obtained, once, does not reject the grant.
+func TestUnrelated401s(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}})
+	store := oauth.NewStore(t.TempDir())
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	src := newSource(t, store, srv.URL(), nil, nil)
+	srv.ExpireAccess()
+	if _, err := listTools(t.Context(), t, srv.URL(), src); err != nil {
+		t.Fatal(err)
+	}
+	// the token works for a while...
+	if _, err := listTools(t.Context(), t, srv.URL(), src); err != nil {
+		t.Fatal(err)
+	}
+	srv.ExpireAccess() // e.g. it expired without expires_in, or the server restarted
+	_, err := listTools(t.Context(), t, srv.URL(), src)
+	if err != nil || src.LoginRequired() {
+		t.Errorf("second, unrelated 401 killed the grant: %v, reason %q", err, src.Reason())
+	}
+}
+
+// A server that answers 401 to every token rejects the grant after a few refreshes; a 403
+// refreshes nothing.
+func TestServerRefusing(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}})
+	store := oauth.NewStore(t.TempDir())
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	src := newSource(t, store, srv.URL(), nil, nil)
+	srv.Refuse(http.StatusForbidden)
+	if _, err := listTools(t.Context(), t, srv.URL(), src); err == nil {
+		t.Error("a 403 did not fail")
+	}
+	if srv.Refreshes() != 0 || src.LoginRequired() {
+		t.Errorf("a 403: %d refreshes, login required %v", srv.Refreshes(), src.LoginRequired())
+	}
+	srv.Refuse(http.StatusUnauthorized)
+	for i := 0; i < 5 && !src.LoginRequired(); i++ {
+		_, _ = listTools(t.Context(), t, srv.URL(), src)
+	}
+	if !src.LoginRequired() || !strings.Contains(src.Reason(), "rejects the grant") || srv.Refreshes() > 3 {
+		t.Errorf("login required %v (%q) after %d refreshes", src.LoginRequired(), src.Reason(), srv.Refreshes())
+	}
+}
