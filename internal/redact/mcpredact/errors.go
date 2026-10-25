@@ -10,7 +10,8 @@ import (
 )
 
 // Error returns err with every secret in its message, and in the message and data of a
-// JSON-RPC error in it, replaced. Only the data of an unwrapped JSON-RPC error reaches the wire. An error without findings is returned as it is. A JSON-RPC error keeps its code. A
+// JSON-RPC error in it, replaced. Only the data of an unwrapped JSON-RPC error reaches the
+// wire. An error without findings is returned as it is. A JSON-RPC error keeps its code. A
 // redacted error matches errors.Is targets as err does, and errors.As finds a *jsonrpc.Error
 // with the redacted message and data, but it does not unwrap to err. When the error cannot be
 // redacted, the result is an ErrWithheld error that says nothing of err.

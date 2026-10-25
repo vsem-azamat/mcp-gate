@@ -398,7 +398,8 @@ func TestRedactJSON(t *testing.T) {
 	if err != nil || strings.Contains(string(out), "hunter22") || !json.Valid(out) {
 		t.Errorf("deeply nested secret: %s, %v", out, err)
 	}
-	// Only the JSON rewrite finds a numeric password, so this one shows nesting is followed.
+	// A numeric password four levels down is found only when strings are followed as JSON;
+	// the five-level check above pins the depth.
 	nested = `{"password":12345678}`
 	for range 4 {
 		raw, err := json.Marshal(map[string]string{"x": nested})

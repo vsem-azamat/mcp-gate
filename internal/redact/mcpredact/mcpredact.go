@@ -224,14 +224,14 @@ func (p *pass) resource(c *mcp.ResourceContents, where string) *mcp.ResourceCont
 	return &cp
 }
 
-// icons redacts icon sources that are URLs; data URIs hold image data and pass unchanged.
+// icons redacts icon sources; image data URIs pass unchanged.
 func (p *pass) icons(icons []mcp.Icon, where string) []mcp.Icon {
 	if icons == nil {
 		return nil
 	}
 	out := make([]mcp.Icon, len(icons))
 	for i, icon := range icons {
-		if !strings.HasPrefix(strings.ToLower(icon.Source), "data:") {
+		if !strings.HasPrefix(strings.ToLower(icon.Source), "data:image/") {
 			icon.Source = p.plainText(icon.Source, fmt.Sprintf("%s[%d].src", where, i))
 		}
 		out[i] = icon

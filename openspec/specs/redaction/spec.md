@@ -134,7 +134,7 @@ The adapter SHALL redact tool call results, prompt results and resource read res
 
 - the text of text content, rewritten as JSON when it is a JSON document;
 - embedded resources and resource contents: their URI as text, their text, and blobs with a text MIME type (`text/*`, `*+json`, `*+xml`, JSON, XML, YAML, TOML, shell, JavaScript, PEM, form data) that are valid UTF-8; blobs of other types or not valid UTF-8, and image and audio data, SHALL pass unchanged;
-- the URI, name, title, description and icon URLs of resource links, as text (icon `data:` URIs pass unchanged);
+- the URI, name, title, description and icon URLs of resource links, as text (icon `data:image/` URIs pass unchanged);
 - tool-use input and tool-result content, its nested content and structured content;
 - `structuredContent` and every `_meta` (of the result, of each content block, of resource contents), rewritten as JSON;
 - the description (as text) and the messages of a prompt result.
@@ -162,7 +162,7 @@ The adapter SHALL redact the message of a downstream error and, for a JSON-RPC e
 
 ### Requirement: Failing closed
 
-When a result or error cannot be redacted completely, the adapter SHALL return an error and no result, never the original. That covers a value that does not encode or does not decode again, a content kind the adapter does not know, a text, encoded value or error message larger than the configured limit, a blob with a text MIME type larger than 8 MiB, a result that carries input requests or request state (a multi-round-trip result), and a panic anywhere during redaction, including in the replacer. The error SHALL NOT quote the content that failed or the panic value.
+When a result or error cannot be redacted completely, the adapter SHALL return an error and no result, never the original. That covers a value that does not encode or does not decode again, a content kind the adapter does not know, a text, encoded value or error message larger than the configured limit, a blob with a text MIME type larger than 8 MiB, a result that carries non-empty input requests or request state (a multi-round-trip result), and a panic anywhere during redaction, including in the replacer. The error SHALL NOT quote the content that failed or the panic value.
 
 #### Scenario: Value that does not encode
 

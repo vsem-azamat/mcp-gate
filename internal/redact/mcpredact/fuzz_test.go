@@ -54,10 +54,19 @@ func FuzzCallToolResult(f *testing.F) {
 	})
 }
 
-func hasLargeTextBlob(res *mcp.CallToolResult) bool {
-	for _, c := range res.Content {
-		if e, ok := c.(*mcp.EmbeddedResource); ok && e.Resource != nil && len(e.Resource.Blob) > MaxBlobBytes && textMIMEType(e.Resource.MIMEType) {
-			return true
+func hasLargeTextBlob(res *mcp.CallToolResult) bool { return anyLargeTextBlob(res.Content) }
+
+func anyLargeTextBlob(blocks []mcp.Content) bool {
+	for _, c := range blocks {
+		switch v := c.(type) {
+		case *mcp.EmbeddedResource:
+			if v.Resource != nil && len(v.Resource.Blob) > MaxBlobBytes && textMIMEType(v.Resource.MIMEType) {
+				return true
+			}
+		case *mcp.ToolResultContent:
+			if anyLargeTextBlob(v.Content) {
+				return true
+			}
 		}
 	}
 	return false
