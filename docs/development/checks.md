@@ -18,6 +18,11 @@
 | `make release-check` | `goreleaser check` and a snapshot build into `dist/`, as CI's Release config job does. Not part of `make check`: the first run builds GoReleaser and takes minutes |
 | `make hooks` | Enables the git hooks below |
 
+Besides the standard and enabled linters, `.golangci.yml` enforces these project rules:
+
+- `depguard`: `github.com/mark3labs/mcp-go` is not imported; the official `github.com/modelcontextprotocol/go-sdk` is the only MCP library;
+- `forbidigo`: `fmt.Print*` and reading the environment (`os.Getenv`, `os.LookupEnv`, `os.Environ`) only in `cmd/`; the standard `log` package nowhere (use `log/slog`).
+
 The repository policy rejects:
 
 - agent instruction files other than `AGENTS.md`, in any letter case: `CLAUDE.md`, `AGENT.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.cursor/`, `.cursorrules`, `.windsurfrules`, `.clinerules*`;
