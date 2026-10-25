@@ -48,7 +48,7 @@ The mirror's receiving middleware recovers panics in request handling, which the
 
 ## Readiness and status
 
-`Gate.Run` starts every supervisor and mirror, then serves. A watcher marks the gate started once every mirror has listed its catalog, or when `startupGracePeriod` ends. `/_readyz` reads `Gate.Readiness`: a server counts as mounted once its catalog was listed, and as unhealthy while mounted and in a state other than `ready` or `degraded`. `/_status` merges `Supervisor.Status` with `Mirror.Stats`, and reads the child's resident memory from `/proc/<pid>/statm`.
+`Gate.Run` starts every supervisor and mirror, then serves. A watcher marks the gate started once every mirror has listed its catalog or its supervisor waits for an OAuth login, or when `startupGracePeriod` ends. `/_readyz` reads `Gate.Readiness`: a server counts as mounted once its catalog was listed, as unhealthy while mounted and in a state other than `ready` or `degraded`, and as needing a login while its supervisor is `needs-login`, mounted or not. `DownstreamOptions` gives an OAuth server a `Source` over the store in the state directory. `/_status` merges `Supervisor.Status` with `Mirror.Stats`, and reads the child's resident memory from `/proc/<pid>/statm`.
 
 ## Learned pins
 

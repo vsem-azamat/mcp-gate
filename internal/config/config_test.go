@@ -412,3 +412,40 @@ func TestForwardMeta(t *testing.T) {
 		}
 	}
 }
+
+func TestOAuth(t *testing.T) {
+	head := "version: 1\nauth: {tokens: {a: s}}\nservers:\n  a:\n    http:\n"
+	c, err := Parse([]byte(head+"      url: https://a.example.com/mcp\n      oauth: {}\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := c.Servers["a"].HTTP.OAuth; o == nil || o.RedirectURL != DefaultRedirectURL {
+		t.Errorf("oauth = %+v", o)
+	}
+	c, err = Parse([]byte(head+"      url: http://127.0.0.1:8080/mcp\n      oauth:\n        clientID: c\n        clientSecret: \"${SECRET}\"\n"+
+		"        redirectURL: https://app.example.com/cb\n        scopes: [read, offline_access]\n"+
+		"        authServerMetadataURL: https://auth.example.com/.well-known/oauth-authorization-server\n"), env(map[string]string{"SECRET": "s3cret"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := c.Servers["a"].HTTP.OAuth; o.ClientSecret != "s3cret" || len(o.Scopes) != 2 {
+		t.Errorf("oauth = %+v", o)
+	}
+	for _, tc := range []struct{ name, body, want string }{
+		{"plain http", "      url: http://a.example.com/mcp\n      oauth: {}\n", "servers.a.http.url: must be an https URL, or http on a loopback address, with oauth"},
+		{"authorization header", "      url: https://a.example.com/mcp\n      headers: {authorization: x}\n      oauth: {}\n", "servers.a.http.headers.Authorization: cannot be set with oauth"},
+		{"secret without id", "      url: https://a.example.com/mcp\n      oauth: {clientSecret: x}\n", "servers.a.http.oauth.clientSecret: needs clientID"},
+		{"plain redirect", "      url: https://a.example.com/mcp\n      oauth: {redirectURL: 'http://app.example.com/cb'}\n", "servers.a.http.oauth.redirectURL: must be an https URL"},
+		{"plain metadata", "      url: https://a.example.com/mcp\n      oauth: {authServerMetadataURL: 'http://auth.example.com/x'}\n", "servers.a.http.oauth.authServerMetadataURL: must be an https URL"},
+		{"bad scope", "      url: https://a.example.com/mcp\n      oauth: {scopes: ['a b']}\n", "servers.a.http.oauth.scopes[0]: must be a scope token"},
+		{"twice", "      url: https://a.example.com/mcp\n      oauth: {scopes: [a, a]}\n", "servers.a.http.oauth.scopes[1]: is listed twice"},
+		{"unknown", "      url: https://a.example.com/mcp\n      oauth: {tokenURL: x}\n", "field tokenURL not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(head+tc.body), noEnv)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}

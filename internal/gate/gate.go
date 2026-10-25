@@ -25,6 +25,7 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/escrow"
 	"github.com/vsem-azamat/mcp-gate/internal/filescan"
+	"github.com/vsem-azamat/mcp-gate/internal/oauth"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
@@ -180,7 +181,7 @@ func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
 		Name: name, Version: g.opts.Version, Policy: policy.New(s), ForwardMeta: s.ForwardMeta,
 		Redaction: redaction, Files: files, Logger: g.logger,
 	})
-	o := DownstreamOptions(g.cfg, name, s, g.opts.Environ, g.opts.Version, g.logger)
+	o := DownstreamOptions(g.cfg, name, s, g.opts.Environ, g.opts.Version, oauth.NewStore(g.opts.StateDir), g.logger)
 	o.Redactor = engine
 	o.Notifications = mirror.Notifications()
 	o.OnSession = mirror.OnSession
@@ -221,8 +222,9 @@ func (g *Gate) replacer(name string, s *config.Server) proxy.ReplacerFunc {
 	return nil
 }
 
-// DownstreamOptions turns a server's config into supervisor options.
-func DownstreamOptions(cfg *config.Config, name string, s *config.Server, environ []string, version string, logger *slog.Logger) downstream.Options {
+// DownstreamOptions turns a server's config into supervisor options. An OAuth server takes its
+// grant from store; with a nil store it has none.
+func DownstreamOptions(cfg *config.Config, name string, s *config.Server, environ []string, version string, store *oauth.Store, logger *slog.Logger) downstream.Options {
 	o := downstream.Options{
 		Name:            name,
 		Disabled:        s.Disabled,
@@ -242,6 +244,12 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 		}
 	} else {
 		o.HTTP = &downstream.HTTP{URL: s.HTTP.URL, Headers: s.HTTP.Headers}
+		if oc := s.HTTP.OAuth; oc != nil {
+			o.HTTP.OAuth = oauth.NewSource(oauth.SourceOptions{
+				Name: name, ServerURL: s.HTTP.URL, ClientID: oc.ClientID, ClientSecret: oc.ClientSecret,
+				Store: store, HTTPClient: oauth.NewHTTPClient(), Logger: logger,
+			})
+		}
 	}
 	return o
 }
@@ -374,7 +382,10 @@ func (g *Gate) awaitStartup(ctx context.Context) {
 	for {
 		all := true
 		for _, name := range g.names {
-			all = all && g.servers[name].mirror.Ready()
+			s := g.servers[name]
+			// A server waiting for a login does not connect without someone; it does not hold
+			// the startup.
+			all = all && (s.mirror.Ready() || s.sup.Status().State == downstream.NeedsLogin)
 		}
 		if all {
 			g.started.Store(true)
@@ -424,7 +435,8 @@ func (g *Gate) shutdown(parent context.Context) error {
 }
 
 // Readiness reports the state /_readyz serves. A server is mounted once its catalog was listed;
-// it is unhealthy when it was mounted and has lost its connection since.
+// it is unhealthy when it was mounted and has lost its connection since. A server waiting for
+// an OAuth login is reported whether or not it was mounted.
 func (g *Gate) Readiness() upstream.Readiness {
 	r := upstream.Readiness{Started: g.started.Load()}
 	if !r.Started {
@@ -432,11 +444,15 @@ func (g *Gate) Readiness() upstream.Readiness {
 	}
 	for _, name := range g.names {
 		s := g.servers[name]
+		st := s.sup.Status().State
+		if st == downstream.NeedsLogin {
+			r.NeedsLogin = append(r.NeedsLogin, name)
+		}
 		if !s.mirror.Ready() {
 			continue
 		}
 		r.Mounted++
-		if st := s.sup.Status().State; st != downstream.Ready && st != downstream.Degraded {
+		if st != downstream.Ready && st != downstream.Degraded {
 			r.Unhealthy = append(r.Unhealthy, name)
 		}
 	}

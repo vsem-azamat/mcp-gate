@@ -212,7 +212,30 @@ type Stdio struct {
 type HTTP struct {
 	URL     string            `yaml:"url"`
 	Headers map[string]string `yaml:"headers,omitempty"`
+	// OAuth, if set, authorizes the requests with an OAuth grant obtained by mcp-gate auth login.
+	OAuth *OAuth `yaml:"oauth,omitempty"`
 }
+
+// OAuth configures the OAuth client of an HTTP server. Every key is optional: by default the
+// authorization server is discovered from the server and the client registers dynamically.
+type OAuth struct {
+	// ClientID names a client registered with the authorization server in advance; empty
+	// registers one dynamically at login.
+	ClientID string `yaml:"clientID,omitempty"`
+	// ClientSecret is the secret of ClientID, for a confidential client.
+	ClientSecret string `yaml:"clientSecret,omitempty"`
+	// RedirectURL is where the authorization server sends the browser after sign-in.
+	RedirectURL string `yaml:"redirectURL,omitempty"`
+	// Scopes, if set, are requested instead of the scopes the server advertises.
+	Scopes []string `yaml:"scopes,omitempty"`
+	// AuthServerMetadataURL, if set, is where the authorization server's metadata is read,
+	// instead of the well-known locations under its issuer.
+	AuthServerMetadataURL string `yaml:"authServerMetadataURL,omitempty"`
+}
+
+// DefaultRedirectURL is the redirect URL of an OAuth client that sets none. Nothing listens on
+// it: mcp-gate auth login asks for the address the browser was sent to.
+const DefaultRedirectURL = "http://localhost:8090/oauth/callback"
 
 // Restart configures restarts after a failure.
 type Restart struct {
@@ -346,6 +369,9 @@ func (c *Config) applyDefaults() {
 		if s.Restart.MaxBackoff == nil {
 			v := Duration(DefaultMaxBackoff)
 			s.Restart.MaxBackoff = &v
+		}
+		if s.HTTP != nil && s.HTTP.OAuth != nil && s.HTTP.OAuth.RedirectURL == "" {
+			s.HTTP.OAuth.RedirectURL = DefaultRedirectURL
 		}
 		if s.Stdio != nil && s.Stdio.InheritEnv == nil {
 			s.Stdio.InheritEnv = append([]string(nil), DefaultInheritEnv...)

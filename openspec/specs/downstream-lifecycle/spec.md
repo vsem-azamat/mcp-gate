@@ -8,7 +8,7 @@ A supervisor keeps one downstream MCP server connected: it starts a stdio server
 
 ### Requirement: States
 
-A supervised server SHALL be in one of the states `starting`, `ready`, `degraded`, `backoff`, `disabled` and `stopped`. A disabled server SHALL never be started. Calls SHALL go through only in `ready` and `degraded`; in any other state a call SHALL fail at once with an error naming the state. Each call SHALL be bounded by `callTimeout` when it is not zero. Stopping the supervisor SHALL cancel the calls in flight.
+A supervised server SHALL be in one of the states `starting`, `ready`, `degraded`, `backoff`, `needs-login`, `disabled` and `stopped`. A disabled server SHALL never be started. Calls SHALL go through only in `ready` and `degraded`; in any other state a call SHALL fail at once with an error naming the state. Each call SHALL be bounded by `callTimeout` when it is not zero. Stopping the supervisor SHALL cancel the calls in flight.
 
 #### Scenario: Call during backoff
 
@@ -19,6 +19,20 @@ A supervised server SHALL be in one of the states `starting`, `ready`, `degraded
 
 - **WHEN** `callTimeout` is `100ms` and the server never answers a call
 - **THEN** the call fails with a deadline error and the server stays usable
+
+### Requirement: OAuth
+
+An HTTP server with an `oauth` block SHALL authorize its requests with its grant as the oauth spec requires. Before each connect attempt the supervisor SHALL check for a usable grant; without one it SHALL enter `needs-login`, record the error `OAuth login required (<reason>): run mcp-gate auth login <config> <name>`, log it once rather than on every attempt, send nothing to the server, and try again after the backoff, which counts as no restart, staying in `needs-login` until a connect succeeds. A connect that fails because the grant was rejected SHALL do the same. When a call fails and the grant is no longer usable, the server SHALL be probed at once, and a failed probe with the grant unusable SHALL close the session without waiting for more failures, so that the server enters `needs-login`.
+
+#### Scenario: No grant, then a login
+
+- **WHEN** an OAuth server has no grant, and one is saved while the supervisor runs
+- **THEN** it is `needs-login` with the login command in its error, calls fail naming `needs-login`, no request reaches the server, and it then becomes `ready`
+
+#### Scenario: Grant revoked mid-session
+
+- **WHEN** the authorization server revokes the grant of a connected server
+- **THEN** the server becomes `needs-login`, its error names `invalid_grant` and no token
 
 ### Requirement: Protocol version
 
@@ -143,12 +157,17 @@ The supervisor SHALL pass the server's progress notifications, log messages and 
 
 ### Requirement: check -connect
 
-`mcp-gate check -connect <file>` SHALL, after validating the file, supervise every enabled server at once, wait up to `-timeout` (default 60s) for each to become ready or fail, print one line per server (its protocol version, whether it was pinned automatically, and its number of tools; `disabled`; or the redacted error) and stop them all. The exit status SHALL be 0 when every enabled server connected and 2 otherwise.
+`mcp-gate check -connect [-state-dir DIR] <file>` SHALL, after validating the file, supervise every enabled server at once, OAuth servers with the grants of the state directory (by default the first entry of `$STATE_DIRECTORY`), wait up to `-timeout` (default 60s) for each to become ready, fail or need a login, print one line per server (its protocol version, whether it was pinned automatically, and its number of tools; `disabled`; the login error; or the redacted error) and stop them all. The exit status SHALL be 0 when every enabled server connected and 2 otherwise.
 
 #### Scenario: Mixed servers
 
 - **WHEN** a config has a stdio server, a stdio server that ignores discover, an HTTP server and a disabled server
 - **THEN** each line reports its server, the second one pinned automatically, and the exit status is 0
+
+#### Scenario: OAuth server without a grant
+
+- **WHEN** an OAuth server has no grant in the state directory
+- **THEN** its line names the `mcp-gate auth login` command and the exit status is 2
 
 #### Scenario: Server that cannot start
 

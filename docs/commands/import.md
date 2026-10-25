@@ -29,6 +29,7 @@ mcp-gate check gate.yaml
 | `mcpProxy.options.redact.escrowTTL`, `escrowMaxEntries` | `escrow.ttl`, `escrow.maxEntries` |
 | a server's own `redact.escrowTTL` | `redact.escrowTTL` |
 | `redact.fileTools`, `fileRoots`, `fileMaxBytes` | `redact.files.tools`, `roots`, `maxBytes` |
+| `oauth` of a streamable HTTP server: `clientId`, `clientSecret`, `redirectUri`, `scopes`, `authServerMetadataUrl` | `http.oauth`: `clientID`, `clientSecret`, `redirectURL`, `scopes`, `authServerMetadataURL` |
 | `$VAR`, `${VAR}` | `${VAR}`; any other `$` becomes `$$` |
 
 Options set in `mcpProxy.options` are applied to each server, as mcp-proxy did, except filters there, which mcp-proxy ignored. Keys mcp-proxy ignores, `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid`, `autoReconnect`, a `toolFilter` that allows an empty list (no filter in mcp-proxy) and an empty block list are dropped with a comment.
@@ -49,8 +50,12 @@ The escrow keys map one to one; the key hash stays in `MCP_HUB_ESCROW_KEY_SHA256
 
 mcp-proxy children inherited the whole environment; mcp-gate children get only `inheritEnv` and `env`. A command such as `/usr/bin/env -u SECRET -u HOME MODE=fast server --stdio` is unwrapped: the command becomes `server --stdio`, `MODE=fast` goes to `env`, `HOME` is removed from `inheritEnv`, and `SECRET` is dropped with a comment, since it is not inherited anyway. `-i` gives `inheritEnv: []` and `-C dir` gives `cwd`. A form the importer does not understand is kept as it is, with a note.
 
+## OAuth
+
+An `oauth` block is kept, and each OAuth server needs a login after the import: `mcp-gate auth login <config> <server>` for each (see [auth](../commands/auth.md)). mcp-proxy's tokens are not imported. `pkceDisabled: false` is dropped; `pkceDisabled: true` and any other key in the block are not implemented, since mcp-gate always uses PKCE and an OAuth setting it ignored could change whom the server trusts. A `clientSecret` written in the file gives a warning. An `oauth` block on a stdio server, which mcp-proxy ignored, is dropped with a warning.
+
 ## Keys this build does not implement
 
-Every other key that changes behaviour (a `baseURL` with a path, OAuth, the SSE transport) makes the import fail, listing the keys and writing nothing. `-partial` writes the config anyway and lists each dropped key in a comment marked `NOT IMPLEMENTED IN THIS BUILD`; `mcp-gate check` rejects that file until those comments are removed, which means accepting that the keys are dropped.
+Every other key that changes behaviour (a `baseURL` with a path, the OAuth keys above, the SSE transport) makes the import fail, listing the keys and writing nothing. `-partial` writes the config anyway and lists each dropped key in a comment marked `NOT IMPLEMENTED IN THIS BUILD`; `mcp-gate check` rejects that file until those comments are removed, which means accepting that the keys are dropped.
 
 Notes go to stderr. Neither they nor errors quote values from the input. Exit status: 0 written, 2 otherwise.

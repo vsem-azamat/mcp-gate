@@ -52,7 +52,19 @@ servers:
       inherit: false
       tokens: {shop-bot: "${GATE_TOKEN_SHOP}"}
     disabled: true
+  mail:
+    http:
+      url: https://mail.example.com/mcp
+      oauth: {}              # discovered, client registered at login
+  docs:
+    http:
+      url: https://docs.example.com/mcp
+      oauth:
+        authServerMetadataURL: https://auth.example.com/.well-known/oauth-authorization-server/tenant
+        scopes: [docs.read, offline_access]
 ```
+
+An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth](../commands/auth.md)).
 
 ## Keys
 
@@ -78,6 +90,12 @@ servers:
 | `stdio.inheritEnv` | `PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR` | The gate's variables the child inherits; `*` at the end matches a prefix; `[]` inherits nothing |
 | `http.url` | required | Streamable HTTP endpoint, `http` or `https`, without user information or fragment |
 | `http.headers` | none | Headers sent with every request, such as an API key. Headers mcp-gate sets (`Accept`, `Accept-Encoding`, `Content-Type`, every `Mcp-` header and the like) cannot be set |
+| `http.oauth` | none | Authorize the requests with an OAuth grant obtained by [`mcp-gate auth login`](../commands/auth.md). The `url` must then be https, or http on a loopback address, and `headers` cannot set `Authorization`. Every key below is optional |
+| `oauth.clientID` | registered at login | A client registered with the authorization server in advance; without it the login registers one dynamically |
+| `oauth.clientSecret` | none | The secret of `clientID`, for a confidential client; put it in the environment |
+| `oauth.redirectURL` | `http://localhost:8090/oauth/callback` | Where the browser is sent after sign-in; nothing needs to listen there. https, or http on a loopback address |
+| `oauth.scopes` | discovered | Scopes to request instead of those the server names |
+| `oauth.authServerMetadataURL` | discovered | Where to read the authorization server's metadata, in the RFC 8414 or OpenID Connect well-known form, for a server whose metadata is not found at its issuer |
 | `callTimeout` | `0s` | Bound on each request; `0s` is none. While a call runs no probe is sent, so with `0s` a server that stops answering mid-call is not noticed until the call ends |
 | `maxMessageBytes` | `16MiB` | Largest stdio frame, HTTP response body or event; a larger response fails only its request. `4KiB` to `1GiB` |
 | `protocolVersion` | none | Pin the protocol version offered to the server |

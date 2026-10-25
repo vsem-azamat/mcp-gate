@@ -49,8 +49,12 @@
       "args": ["-u", "HUB_TOKEN_LAPTOP", "-u", "HUB_TOKEN_PHONE", "browser-server", "--headless"],
       "options": {"toolFilter": {"mode": "block", "list": ["eval"]}, "redact": {"enabled": true, "fileTools": [], "fileRoots": []}}
     },
-    "legacy": {
-      "url": "https://legacy.example.com/sse"
+    "docs": {
+      "url": "https://docs.example.com/mcp",
+      "transportType": "streamable-http",
+      "timeout": "60s",
+      "oauth": {"authServerMetadataUrl": "https://auth.example.com/.well-known/oauth-authorization-server/tenant", "scopes": ["docs.read", "offline_access"]},
+      "options": {"authTokens": ["${HUB_TOKEN_LAPTOP}", "${HUB_TOKEN_PHONE}"]}
     }
   }
 }

@@ -7,6 +7,7 @@ How the parts of mcp-gate are put together. Behaviour is specified in `openspec/
 | Page | Contents |
 | --- | --- |
 | [Downstream servers](downstream.md) | Supervisors, stdio children and the HTTP client that connect to downstream servers |
+| [OAuth](oauth.md) | The OAuth client of HTTP servers: discovery, login, the grant store, tokens and refresh |
 | [Escrow and file scanning](escrow.md) | The secret escrow, its HTTP API and failed-auth limit, and the scanning of downloaded files |
 | [Redaction](redaction.md) | The redaction engine, its rules and priorities, and the MCP adapter |
 | [Serving](serving.md) | The listener, routes and tokens, the catalog mirror, call forwarding, health and status |

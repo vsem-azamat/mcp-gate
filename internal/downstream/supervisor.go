@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -66,6 +67,29 @@ type Stdio struct {
 type HTTP struct {
 	URL     string
 	Headers map[string]string
+	// OAuth, if set, authorizes the requests.
+	OAuth Authorizer
+}
+
+// Authorizer authorizes the requests to an HTTP server with OAuth. It never starts a login
+// itself: when the server has no usable grant, LoginRequired reports it and the supervisor
+// waits in NeedsLogin until it changes.
+type Authorizer interface {
+	auth.OAuthHandler
+	// LoginRequired reports whether the server has no usable grant.
+	LoginRequired() bool
+	// Reason says why, when it has none.
+	Reason() string
+}
+
+// LoginRequiredError is the error of a connect that found no usable OAuth grant.
+type LoginRequiredError struct {
+	Name   string
+	Reason string
+}
+
+func (e *LoginRequiredError) Error() string {
+	return fmt.Sprintf("OAuth login required (%s): run mcp-gate auth login <config> %s", e.Reason, e.Name)
 }
 
 // Options configure a Supervisor. Exactly one of Stdio and HTTP is set.
@@ -214,12 +238,13 @@ type State int
 
 // The states of a supervised server.
 const (
-	Starting State = iota // connecting, for the first time or after a restart
-	Ready                 // connected and answering
-	Degraded              // connected, but the last probe failed; calls still go through
-	Backoff               // waiting before the next restart
-	Disabled              // disabled in the config
-	Stopped               // stopped by Stop
+	Starting   State = iota // connecting, for the first time or after a restart
+	Ready                   // connected and answering
+	Degraded                // connected, but the last probe failed; calls still go through
+	Backoff                 // waiting before the next restart
+	Disabled                // disabled in the config
+	Stopped                 // stopped by Stop
+	NeedsLogin              // an OAuth server without a usable grant, waiting for a login
 )
 
 func (s State) String() string {
@@ -236,6 +261,8 @@ func (s State) String() string {
 		return "disabled"
 	case Stopped:
 		return "stopped"
+	case NeedsLogin:
+		return "needs-login"
 	default:
 		return fmt.Sprintf("State(%d)", int(s))
 	}
@@ -297,6 +324,8 @@ type Supervisor struct {
 	inflight   int
 	calls      uint64 // calls started, to tell whether one overlapped a probe
 	changed    chan struct{}
+	// kick wakes the watch loop to probe at once: a call found the OAuth grant rejected.
+	kick chan struct{}
 
 	stop      chan struct{}
 	stopCtx   context.Context // cancelled by Stop, which ends the calls in flight
@@ -322,7 +351,7 @@ func New(opts Options) (*Supervisor, error) {
 	logger := opts.Logger.With("server", opts.Name)
 	s := &Supervisor{
 		opts: opts, logger: logger, redactor: r, learned: opts.LearnedPin,
-		changed: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}),
+		changed: make(chan struct{}), kick: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
 	}
 	s.stopCtx, s.cancel = context.WithCancel(context.Background())
 	impl := &mcp.Implementation{Name: opts.ClientName, Version: opts.ClientVersion}
@@ -441,10 +470,18 @@ func (s *Supervisor) Call(ctx context.Context, fn func(context.Context, *mcp.Cli
 	s.inflight++
 	s.calls++
 	s.mu.Unlock()
+	var err error
 	defer func() {
 		s.mu.Lock()
 		s.inflight--
 		s.mu.Unlock()
+		if err != nil && s.loginLost() {
+			// Probe at once, now that no call holds the probe back.
+			select {
+			case s.kick <- struct{}{}:
+			default:
+			}
+		}
 	}()
 	// Stop cancels the call: closing a session waits for its calls to finish.
 	ctx, cancel := context.WithCancel(ctx)
@@ -454,7 +491,14 @@ func (s *Supervisor) Call(ctx context.Context, fn func(context.Context, *mcp.Cli
 		ctx, cancel = context.WithTimeout(ctx, s.opts.CallTimeout)
 		defer cancel()
 	}
-	return fn(ctx, cs)
+	err = fn(ctx, cs)
+	return err
+}
+
+// loginLost reports whether the server uses OAuth and has no usable grant.
+func (s *Supervisor) loginLost() bool {
+	h := s.opts.HTTP
+	return h != nil && h.OAuth != nil && h.OAuth.LoginRequired()
 }
 
 // setState records a state and wakes Wait.
@@ -496,12 +540,16 @@ func (s *Supervisor) run(base context.Context) {
 	defer close(s.done)
 	backoff := s.opts.InitialBackoff
 	for attempt := 0; ; attempt++ {
-		if attempt > 0 {
-			s.mu.Lock()
-			s.restarts++
-			s.mu.Unlock()
+		s.mu.Lock()
+		// While a login is awaited, attempts only look for a grant: they count as no restart,
+		// and the state stays until one connects.
+		if s.state != NeedsLogin {
+			if attempt > 0 {
+				s.restarts++
+			}
+			s.setStateLocked(Starting)
 		}
-		s.setState(Starting)
+		s.mu.Unlock()
 		a, err := s.connect(base)
 		if err == nil {
 			s.mu.Lock()
@@ -525,12 +573,19 @@ func (s *Supervisor) run(base context.Context) {
 				backoff = s.opts.InitialBackoff
 			}
 		} else if !s.stopping() {
-			s.recordError(err)
+			var lr *LoginRequiredError
+			if errors.As(err, &lr) {
+				s.waitLogin(lr)
+			} else {
+				s.recordError(err)
+			}
 		}
 		if s.stopping() {
 			return
 		}
-		s.setState(Backoff)
+		if s.Status().State != NeedsLogin {
+			s.setState(Backoff)
+		}
 		t := time.NewTimer(backoff)
 		select {
 		case <-t.C:
@@ -539,6 +594,19 @@ func (s *Supervisor) run(base context.Context) {
 			return
 		}
 		backoff = min(backoff*2, s.opts.MaxBackoff)
+	}
+}
+
+// waitLogin records a missing grant, logging it once rather than on every attempt.
+func (s *Supervisor) waitLogin(lr *LoginRequiredError) {
+	msg := s.ErrorText(lr)
+	s.mu.Lock()
+	again := s.state == NeedsLogin && s.lastErr == msg
+	s.lastErr, s.lastErrAt = msg, time.Now()
+	s.setStateLocked(NeedsLogin)
+	s.mu.Unlock()
+	if !again {
+		s.logger.Warn("server needs an OAuth login", "error", msg)
 	}
 }
 
@@ -573,6 +641,9 @@ func (s *Supervisor) connect(base context.Context) (*attempt, error) {
 		case <-ctx.Done():
 		}
 	}()
+	if h := s.opts.HTTP; h != nil && h.OAuth != nil && h.OAuth.LoginRequired() {
+		return nil, &LoginRequiredError{Name: s.opts.Name, Reason: h.OAuth.Reason()}
+	}
 	pin := s.opts.ProtocolVersion
 	if pin == "" {
 		pin = s.learned
@@ -661,11 +732,15 @@ func (s *Supervisor) dial(ctx context.Context, version string) (*attempt, error)
 		}
 		transport = connTransport{newLineConn(proc.Stdout(), proc.Stdin(), s.opts.MaxMessageBytes, s.logger)}
 	} else {
-		transport = &mcp.StreamableClientTransport{
+		t := &mcp.StreamableClientTransport{
 			Endpoint:     s.opts.HTTP.URL,
 			HTTPClient:   s.http,
 			MaxEventSize: s.opts.MaxMessageBytes + frameEdge*4, // the limiter enforces the limit first
 		}
+		if s.opts.HTTP.OAuth != nil {
+			t.OAuthHandler = s.opts.HTTP.OAuth
+		}
+		transport = t
 	}
 	var opts *mcp.ClientSessionOptions
 	if version != "" {
@@ -680,6 +755,9 @@ func (s *Supervisor) dial(ctx context.Context, version string) (*attempt, error)
 		}
 		if s.httpBase != nil {
 			s.httpBase.CloseIdleConnections()
+		}
+		if h := s.opts.HTTP; h != nil && h.OAuth != nil && h.OAuth.LoginRequired() {
+			return nil, &LoginRequiredError{Name: s.opts.Name, Reason: h.OAuth.Reason()}
 		}
 		return nil, fmt.Errorf("connect: %w", err)
 	}
@@ -721,6 +799,7 @@ func (s *Supervisor) serve(base context.Context, a *attempt) error {
 		case <-exited:
 			return fmt.Errorf("process exited: %w", errOrExit(a.proc.ExitErr()))
 		case <-tick.C:
+		case <-s.kick:
 		}
 		s.mu.Lock()
 		busy, calls := s.inflight > 0, s.calls
@@ -745,9 +824,11 @@ func (s *Supervisor) serve(base context.Context, a *attempt) error {
 		}
 		failures++
 		s.recordError(fmt.Errorf("probe: %w", err))
+		// A grant that was rejected does not come back by waiting for more probes.
+		lost := s.loginLost()
 		s.mu.Lock()
 		s.setStateLocked(Degraded)
-		restart := failures >= s.opts.ProbeFailures && s.inflight == 0
+		restart := (failures >= s.opts.ProbeFailures || lost) && s.inflight == 0
 		if restart {
 			s.session = nil // no new call starts on it
 		}

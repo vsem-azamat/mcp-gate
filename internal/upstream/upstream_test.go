@@ -192,6 +192,8 @@ func TestHealthHandler(t *testing.T) {
 		{"one mounted", &Readiness{Started: true, Mounted: 1}, http.StatusOK, prefix + `"ok","version":"v1"}`},
 		{"degraded", &Readiness{Started: true, Mounted: 2, Unhealthy: []string{"a"}}, http.StatusServiceUnavailable, prefix + `"degraded","unhealthy":["a"],"version":"v1"}`},
 		{"unavailable", &Readiness{Started: true}, http.StatusServiceUnavailable, prefix + `"unavailable","version":"v1"}`},
+		{"needs login", &Readiness{Started: true, Mounted: 1, NeedsLogin: []string{"b"}}, http.StatusServiceUnavailable, prefix + `"degraded","needsLogin":["b"],"version":"v1"}`},
+		{"only needs login", &Readiness{Started: true, NeedsLogin: []string{"b"}}, http.StatusServiceUnavailable, prefix + `"unavailable","needsLogin":["b"],"version":"v1"}`},
 	}
 	for _, c := range cases {
 		var readiness func() Readiness
