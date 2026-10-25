@@ -1,10 +1,14 @@
-// Command mcp-gate is an MCP gateway. Only the command-line skeleton exists so far.
+// Command mcp-gate is an MCP gateway. So far it provides the compare command, which diffs the
+// catalogs that MCP endpoints serve.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/vsem-azamat/mcp-gate/internal/version"
 )
@@ -12,27 +16,39 @@ import (
 // Exit codes returned by run.
 const (
 	exitOK    = 0
+	exitDrift = 1 // compare found differences
 	exitUsage = 2
+	// exitTrouble is a failure at run time; it shares 2 with usage errors, as diff(1) does.
+	exitTrouble = 2
 )
 
 const usage = `Usage: mcp-gate <command>
 
 Commands:
+  compare    compare the catalogs that MCP endpoints or snapshots serve
   help       show this help
   version    print the version and commit
 `
 
+// lookupEnv reads an environment variable, like os.LookupEnv.
+type lookupEnv func(string) (string, bool)
+
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(ctx, os.Args[1:], os.LookupEnv, os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
 // run executes the command named by args and returns the process exit code.
-func run(args []string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, env lookupEnv, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		_, _ = io.WriteString(stderr, usage)
 		return exitUsage
 	}
 	switch args[0] {
+	case "compare":
+		return runCompare(ctx, args[1:], env, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		_, _ = io.WriteString(stdout, usage)
 		return exitOK

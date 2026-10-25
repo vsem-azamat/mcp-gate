@@ -4,4 +4,5 @@ Engineering documentation for mcp-gate. Pages describe the current state only. B
 
 | Section | Contents |
 | --- | --- |
-| [Development](development/README.md) | Setup, checks, tool pinning, CI, dependency updates and releasing |
+| [Commands](commands/README.md) | How to use the `mcp-gate` subcommands |
+| [Development](development/README.md) | Setup, checks, testing, tool pinning, CI, dependency updates and releasing |

@@ -5,8 +5,14 @@ import (
 	"strings"
 	"testing"
 
+	"go.uber.org/goleak"
+
 	"github.com/vsem-azamat/mcp-gate/internal/version"
 )
+
+func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+
+func noEnv(string) (string, bool) { return "", false }
 
 func TestRun(t *testing.T) {
 	t.Parallel()
@@ -32,7 +38,7 @@ func TestRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr bytes.Buffer
-			code := run(tt.args, &stdout, &stderr)
+			code := run(t.Context(), tt.args, noEnv, &stdout, &stderr)
 			if code != tt.wantCode {
 				t.Errorf("exit code = %d, want %d", code, tt.wantCode)
 			}
