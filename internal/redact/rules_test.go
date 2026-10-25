@@ -81,7 +81,7 @@ func TestRussianLabels(t *testing.T) {
 	}
 }
 
-// The rule order is part of the behaviour: the earlier rule wins an overlap. It is the same
+// The rule order is part of the behaviour: the earlier rule gives its kind to an overlap. It is the same
 // whatever the options.
 func TestRuleOrder(t *testing.T) {
 	t.Parallel()
@@ -163,17 +163,66 @@ func TestPriorityDecidesOverlaps(t *testing.T) {
 		t.Fatalf("Russian off: spans = %+v", spans)
 	}
 
-	// The high-entropy rule runs before the Russian label rule and wins its value.
+	// The high-entropy rule runs before the Russian label rule and gives its kind to the value.
 	e := newEngine(t, Options{Russian: true, HighEntropy: true})
 	spans = e.Find("токен: " + fake("", 32))
 	if len(spans) != 1 || spans[0].Finding.Kind != "high_entropy" {
 		t.Fatalf("spans = %+v", spans)
 	}
 
-	// A vendor format wins over the generic key-value rule.
+	// A vendor format gives its kind to the generic key-value match around it.
 	spans = newEngine(t, Options{}).Find("token: " + fake("ghp_", 36))
 	if len(spans) != 1 || spans[0].Finding.Kind != "github_token" {
 		t.Fatalf("spans = %+v", spans)
+	}
+}
+
+func TestOverlappingFindingsAreMerged(t *testing.T) {
+	t.Parallel()
+
+	token := fake("ghp_", 36)
+	tests := []struct {
+		name, text, want string
+		value            string
+	}{
+		{
+			// The unquoted password value runs into the token; the token's rule runs first.
+			name:  "password running into a token",
+			text:  "password: hunter22," + token,
+			want:  "password: [REDACTED:github_token]",
+			value: "hunter22," + token,
+		},
+		{
+			name:  "password and token across an escaped newline",
+			text:  `password: hunter22\n` + token + " tail",
+			want:  "password: [REDACTED:github_token] tail",
+			value: `hunter22\n` + token,
+		},
+		{
+			name:  "one value over two higher-priority findings",
+			text:  "password: " + token + "," + fake("AKIA", 0) + "ABCDEFGHIJKLMNOP!",
+			want:  "password: [REDACTED:aws_access_key]", // the AWS rule has the lowest number
+			value: token + "," + fake("AKIA", 0) + "ABCDEFGHIJKLMNOP!",
+		},
+		{
+			name:  "adjacent findings stay apart",
+			text:  token + " password: hunter22",
+			want:  "[REDACTED:github_token] password: [REDACTED:password]",
+			value: token,
+		},
+	}
+	e := newEngine(t, Options{})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := e.RedactString(tt.text, Marker{}); got != tt.want {
+				t.Errorf("RedactString = %q, want %q", got, tt.want)
+			}
+			spans := e.Find(tt.text)
+			if len(spans) == 0 || spans[0].Finding.Value != tt.value || tt.text[spans[0].Start:spans[0].End] != tt.value {
+				t.Errorf("first span = %+v, want value %q", spans, tt.value)
+			}
+		})
 	}
 }
 

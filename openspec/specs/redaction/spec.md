@@ -43,12 +43,17 @@ A candidate value SHALL NOT be reported when it is shorter than three characters
 
 ### Requirement: Rule priority
 
-Every rule SHALL have its own numeric priority, and rules SHALL run in priority order whatever options are set. When findings of two rules overlap, the finding of the rule with the lower number SHALL win and the other SHALL be dropped. Vendor formats SHALL come before the generic key-value rules, the high-entropy rule after them, and the Russian label rule last. The Russian `логин/пароль` pair rule SHALL come before every other rule, so that no other finding on its line can split it.
+Every rule SHALL have its own numeric priority, and rules SHALL run in priority order whatever options are set. Findings that overlap SHALL become one finding covering all of them, so that no part of any of them stays visible; its kind SHALL be that of the finding from the rule with the lowest number, and its value SHALL be the whole covered text. A replacer therefore gets one value that can hold more than one secret, or a secret with text around it: a replacer that keeps values (such as an escrow) keeps the merged value as one. Findings that only touch SHALL stay separate. Vendor formats SHALL come before the generic key-value rules, the high-entropy rule after them, and the Russian label rule last. The Russian `логин/пароль` pair rule SHALL come before every other rule, so that no other finding on its line can split it.
 
 #### Scenario: Vendor format inside a key-value pair
 
 - **WHEN** a text contains `token: ` followed by a GitHub token
 - **THEN** there is one finding, of kind `github_token`
+
+#### Scenario: Password running into a token
+
+- **WHEN** a text contains `password: hunter22,` directly followed by a GitHub token
+- **THEN** `hunter22,` and the token are replaced together by one `github_token` finding, and `hunter22` does not survive
 
 #### Scenario: Login and password pair
 
