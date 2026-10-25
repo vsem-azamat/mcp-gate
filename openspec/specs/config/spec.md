@@ -41,7 +41,7 @@ After decoding, every string value SHALL be expanded: `${NAME}` SHALL be replace
 
 ### Requirement: Servers
 
-The config SHALL have at least one server under `servers`. A server name SHALL match `[a-z0-9][a-z0-9._-]{0,62}`. Each server SHALL have exactly one of `stdio` (with a required `command`, and optional `args`, `cwd`, `env` and `inheritEnv`) and `http` (with a required `url` and optional `headers`), and MAY set `callTimeout` (default `0s`, no bound), `maxMessageBytes` (default `16MiB`, between `4KiB` and `1GiB`), `protocolVersion` (one of the versions the SDK supports), `probeInterval` (default `30s`, at least `1s`), `restart.maxBackoff` (default `30s`, at least `1s`) and `disabled`.
+The config SHALL have at least one server under `servers`. A server name SHALL match `[a-z0-9][a-z0-9._-]{0,62}`. Each server SHALL have exactly one of `stdio` (with a required `command`, and optional `args`, `cwd`, `env` and `inheritEnv`) and `http` (with a required `url` and optional `headers`), and MAY set `callTimeout` (default `0s`, no bound), `maxMessageBytes` (default `16MiB`, between `4KiB` and `1GiB`), `protocolVersion` (one of the versions the SDK supports), `probeInterval` (default `30s`, at least `1s`), `restart.maxBackoff` (default `30s`, between `1s` and `5m`) and `disabled`.
 
 An `http` server MAY have an `oauth` block (see the oauth spec), whose keys are all optional: `clientID`, `clientSecret`, which SHALL need `clientID`, `redirectURL` (default `http://localhost:8090/oauth/callback`), `scopes` and `authServerMetadataURL`. With `oauth`, the server's `url`, `redirectURL` and `authServerMetadataURL` SHALL be https URLs, or http URLs on a loopback address; `scopes` SHALL be distinct, non-empty printable ASCII without spaces, quotes or backslashes; and `headers` SHALL NOT set `Authorization`.
 
@@ -129,7 +129,7 @@ A YAML syntax or type error SHALL be reported with its line. Every expansion and
 - a server's `command`, `args` and `env` to `stdio`, and `url` and `headers` with `transportType: streamable-http` to `http`;
 - `timeout` to `callTimeout`; a server without `timeout` SHALL get `callTimeout: 0s` with a comment that mcp-proxy had none;
 - `options.disabled` to `disabled`;
-- `options.pingInterval` to `probeInterval` and `options.reconnectInterval` to `restart.maxBackoff`, a server inheriting the values in `mcpProxy.options` as mcp-proxy did;
+- `options.pingInterval` to `probeInterval` and `options.reconnectInterval` to `restart.maxBackoff`, a server inheriting the values in `mcpProxy.options` as mcp-proxy did; values below the minimum are raised and a reconnect interval above `5m` is lowered, with a warning;
 - `mcpProxy.addr` to `listen.addr` and `mcpProxy.startupGracePeriod` to `startupGracePeriod`;
 - `options.authTokens` to named tokens: those of `mcpProxy.options` to `auth.tokens`, a server's own list that differs from them to its `auth.tokens` with `inherit: false`, and a server left with no token (an empty list, or none anywhere) to `auth.public: true`. Tokens written as `${VAR}` SHALL be named after the variable, lower-cased, without the prefix up to the last `_` that all of them share; when that leaves a name empty, invalid or taken twice, or a token is written out, they SHALL be named `token1`, `token2` and so on, and a written-out token SHALL be warned about;
 - `options.logEnabled` to `log.requests`;

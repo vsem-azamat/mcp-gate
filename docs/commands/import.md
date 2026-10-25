@@ -19,7 +19,7 @@ mcp-gate check gate.yaml
 | `timeout` | `callTimeout`; none becomes `0s` with a comment |
 | `options.disabled` (any letter case) | `disabled` |
 | `options.pingInterval` | `probeInterval` |
-| `options.reconnectInterval` | `restart.maxBackoff` |
+| `options.reconnectInterval` | `restart.maxBackoff`, lowered to `5m` at most |
 | `mcpProxy.addr` | `listen.addr` |
 | `mcpProxy.startupGracePeriod` | `startupGracePeriod` |
 | `options.authTokens` | named tokens: `auth.tokens`, a server's own `auth.tokens` with `inherit: false`, or `auth.public: true` |

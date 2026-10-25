@@ -362,3 +362,23 @@ func TestImportEscrowAndFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestImportLowersReconnectInterval(t *testing.T) {
+	t.Parallel()
+	doc := `{"mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${T_A}"], "reconnectInterval": "1h"}},
+  "mcpServers": {"a": {"command": "x"}}}`
+	res, err := Import([]byte(doc), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Parse(res.YAML, anyValue)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, res.YAML)
+	}
+	if got := c.Servers["a"].Restart.MaxBackoff.D(); got != config.MaxMaxBackoff {
+		t.Errorf("maxBackoff = %v", got)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "mcpServers.a: the reconnect interval is lowered to the maximum of 5m") {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+}

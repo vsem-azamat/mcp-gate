@@ -59,8 +59,9 @@ type Source struct {
 // A 401 to a token that a refresh after a 401 obtained, within retryWindow of the previous 401,
 // is counted; the maxForced-th in a row means the server rejects the grant's tokens. A single
 // one is no proof: the token may have been dropped in its turn, as a server restart does. The
-// window outlasts the backoff between connect attempts (with restart.maxBackoff up to 10
-// minutes), so a server that rejects every token is noticed however its attempts are spaced.
+// window outlasts the time between connect attempts (restart.maxBackoff, at most
+// config.MaxMaxBackoff, plus the connect timeout), so a server that rejects every token is
+// noticed however its attempts are spaced.
 const (
 	retryWindow = 10 * time.Minute
 	maxForced   = 3

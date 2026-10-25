@@ -239,7 +239,7 @@ func TestParseErrors(t *testing.T) {
 		{"decimal size", head + "    stdio: {command: x}\n    maxMessageBytes: 16MB\n", "size is a string"},
 		{"small size", head + "    stdio: {command: x}\n    maxMessageBytes: 1KiB\n", "maxMessageBytes: must be between"},
 		{"short probe", head + "    stdio: {command: x}\n    probeInterval: 10ms\n", "probeInterval: must be at least"},
-		{"short backoff", head + "    stdio: {command: x}\n    restart: {maxBackoff: 0s}\n", "maxBackoff: must be at least"},
+		{"short backoff", head + "    stdio: {command: x}\n    restart: {maxBackoff: 0s}\n", "maxBackoff: must be between 1s and 5m"},
 		{"bad name", "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  Notes:\n    stdio: {command: x}\n", "servers.Notes: server names"},
 		{"underscore name", "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  _status:\n    stdio: {command: x}\n", "server names"},
 		{"no transport", head + "    disabled: true\n", "needs stdio or http"},
@@ -447,5 +447,18 @@ func TestOAuth(t *testing.T) {
 				t.Errorf("err = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestMaxBackoffBounds(t *testing.T) {
+	head := "version: 1\nauth: {tokens: {a: s}}\nservers:\n  a:\n    stdio: {command: x}\n    restart: {maxBackoff: "
+	if _, err := Parse([]byte(head+"5m}\n"), noEnv); err != nil {
+		t.Errorf("5m: %v", err)
+	}
+	for _, v := range []string{"5m1s", "1h", "500ms"} {
+		_, err := Parse([]byte(head+v+"}\n"), noEnv)
+		if err == nil || !strings.Contains(err.Error(), "servers.a.restart.maxBackoff: must be between 1s and 5m") {
+			t.Errorf("%s: err = %v", v, err)
+		}
 	}
 }

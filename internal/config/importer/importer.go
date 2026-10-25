@@ -393,6 +393,11 @@ func (im *importer) server(servers *object, name string, global *options) (*serv
 	s.backoff = cmpOr(local.reconnectInterval, global.reconnectInterval)
 	s.probe = im.atLeast(s.probe, config.MinProbeInterval, o.path+": the ping interval")
 	s.backoff = im.atLeast(s.backoff, config.MinMaxBackoff, o.path+": the reconnect interval")
+	if s.backoff != nil && *s.backoff > config.MaxMaxBackoff {
+		im.warn("%s: the reconnect interval is lowered to the maximum of %s", o.path, config.FormatDuration(config.MaxMaxBackoff))
+		v := config.MaxMaxBackoff
+		s.backoff = &v
+	}
 	im.ignored(o)
 	return s, nil
 }

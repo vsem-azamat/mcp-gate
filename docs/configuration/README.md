@@ -100,7 +100,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `maxMessageBytes` | `16MiB` | Largest stdio frame, HTTP response body or event; a larger response fails only its request. `4KiB` to `1GiB` |
 | `protocolVersion` | none | Pin the protocol version offered to the server |
 | `probeInterval` | `30s` | Time between liveness probes, at least `1s` |
-| `restart.maxBackoff` | `30s` | Longest wait between restarts, at least `1s` |
+| `restart.maxBackoff` | `30s` | Longest wait between restarts, `1s` to `5m`; the upper bound keeps an OAuth server's connect attempts within the window in which repeated 401s reject its grant |
 | `disabled` | `false` | Never start the server |
 | `tools` | all | `{allow: [names]}` or `{deny: [names]}`. An empty allow list exposes every tool, as mcp-proxy's `toolFilter` did |
 | `prompts` | all | `{allow: [...]}` or `{deny: [...]}` by prompt name. An empty allow list exposes none and the capability is not advertised |

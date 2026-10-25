@@ -26,10 +26,13 @@ const (
 	MaxMaxMessageBytes = 1 << 30
 	MinProbeInterval   = time.Second
 	MinMaxBackoff      = time.Second
-	MaxEscrowEntries   = 100000
-	MinFileMaxBytes    = 1 << 10
-	MaxFileMaxBytes    = 1 << 30
-	maxNameLen         = 64
+	// MaxMaxBackoff keeps connect attempts (backoff plus the 60 s connect timeout) within the
+	// 10 minutes in which the OAuth client counts a server's 401s as one run.
+	MaxMaxBackoff    = 5 * time.Minute
+	MaxEscrowEntries = 100000
+	MinFileMaxBytes  = 1 << 10
+	MaxFileMaxBytes  = 1 << 30
+	maxNameLen       = 64
 )
 
 // ServerNameRE is the form of a server name: it becomes the path /<name>/mcp.
@@ -213,8 +216,8 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	if s.ProbeInterval != nil && s.ProbeInterval.D() < MinProbeInterval {
 		add(path+".probeInterval", "must be at least %s", MinProbeInterval)
 	}
-	if s.Restart.MaxBackoff != nil && s.Restart.MaxBackoff.D() < MinMaxBackoff {
-		add(path+".restart.maxBackoff", "must be at least %s", MinMaxBackoff)
+	if s.Restart.MaxBackoff != nil && (s.Restart.MaxBackoff.D() < MinMaxBackoff || s.Restart.MaxBackoff.D() > MaxMaxBackoff) {
+		add(path+".restart.maxBackoff", "must be between %s and %s", FormatDuration(MinMaxBackoff), FormatDuration(MaxMaxBackoff))
 	}
 	s.Tools.validate(path+".tools", add)
 	s.Prompts.validate(path+".prompts", add)
