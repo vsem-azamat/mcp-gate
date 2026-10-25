@@ -57,7 +57,7 @@ GoReleaser is the exception: CI runs it through `goreleaser/goreleaser-action` a
 Dependabot ([`.github/dependabot.yml`](../../.github/dependabot.yml)) opens grouped pull requests every week:
 
 - the product's Go module;
-- the tool modules, with every dependency type allowed, because all their requirements are indirect and Dependabot otherwise skips them;
+- the tool modules, limited to the tools themselves: their other requirements are indirect and stay at what each tool was released with, since bumping them on their own breaks the build;
 - GitHub Actions, which covers the action SHAs.
 
 Dependabot does not see the `version:` that the workflows pass to GoReleaser, so GoReleaser is upgraded by hand as described in Tool Pinning.
