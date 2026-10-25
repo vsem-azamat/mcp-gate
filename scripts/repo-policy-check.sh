@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # Rejects tracked files that the repository rules forbid: tool-specific agent instruction
 # files, OpenSpec change folders, scratch or temporary output, workflow actions that are not
-# pinned to a commit SHA, and workflows that run different GoReleaser versions.
+# pinned to a commit SHA, GoReleaser versions that differ between the workflows and the Makefile,
+# and git hooks that are not executable.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0
 err() { echo "repo-policy: $*" >&2; fail=1; }
 
 while IFS= read -r path; do
-  case "$path" in
-    CLAUDE.md | */CLAUDE.md | CLAUDE.local.md | */CLAUDE.local.md | GEMINI.md | */GEMINI.md | .cursorrules)
+  # names are compared in lower case, so CLAUDE.md, Claude.md and claude.md are all caught
+  lower=${path,,}
+  case "/$lower" in
+    */claude.md | */claude.local.md | */gemini.md | */agent.md | */.cursorrules | */.windsurfrules | \
+      */.clinerules | */.clinerules/* | */.clinerules[-._]* | */.cursor/* | */.github/copilot-instructions.md)
       err "$path: AGENTS.md is the only agent instruction file" ;;
+  esac
+  case "$lower" in
     openspec/changes/*)
       err "$path: specs are edited in place; openspec/changes/ is not committed" ;;
-    tmp/* | */tmp/* | scratch/* | */scratch/* | plans/* | */plans/* | *.log | *.tmp | *.bak | *.orig | .env | .env.*)
+    tmp/* | */tmp/* | scratch/* | */scratch/* | plans/* | */plans/* | *.log | *.tmp | *.bak | *.orig | .env | .env.* | */.env | */.env.*)
       err "$path: scratch, plan, temporary or local environment file" ;;
   esac
 done < <(git ls-files)
@@ -61,12 +67,23 @@ while IFS= read -r -d '' wf; do
     }
     END { if (open) missing() }' "$wf")$'\n'
 done < <(git ls-files -z '.github/workflows/*.yml' '.github/workflows/*.yaml')
+# make release-check runs the same version.
+if mk=$(grep -E '^GORELEASER_VERSION[[:space:]]*:?=' Makefile); then
+  versions+="version $(sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//' <<<"$mk")"$'\n'
+else
+  err "Makefile: no GORELEASER_VERSION for make release-check"
+fi
 while IFS= read -r l; do
   [[ "$l" == missing\ * ]] && err "${l#missing }"
 done <<<"$versions"
 distinct=$(grep '^version ' <<<"$versions" | cut -d' ' -f2- | sort -u || true)
 [ "$(grep -c . <<<"$distinct")" -le 1 ] ||
-  err "workflows run different GoReleaser versions: $(tr '\n' ' ' <<<"$distinct")"
+  err "workflows and the Makefile run different GoReleaser versions: $(tr '\n' ' ' <<<"$distinct")"
+
+# Git runs only executable hooks; a hook committed without the bit is silently skipped.
+while read -r mode _ _ path; do
+  [ "$mode" = 100755 ] || err "$path: git hook is not executable (git update-index --chmod=+x $path)"
+done < <(git ls-files -s -- .githooks)
 
 [ "$fail" = 0 ] && echo "repo-policy: ok"
 exit "$fail"

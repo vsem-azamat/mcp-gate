@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
-# Checks the Markdown in the repository: every relative link in a tracked .md file resolves,
-# and docs/ is an indexed tree (see below). Links inside code spans and fenced
-# code blocks are ignored.
+# Checks the Markdown in the repository:
+# - every relative link in a tracked .md file resolves, inline ([x](target)) and reference-style
+#   ([x]: target); links inside code spans and fenced code blocks are ignored;
+# - every docs/ directory has a README.md index that links each page and subdirectory in it;
+# - every docs/ page but docs/README.md starts with a breadcrumb line "[Docs](<path>)" whose
+#   target is docs/README.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0
 err() { echo "docs-check: $*" >&2; fail=1; }
 
+# prose <file>: the file without fenced code blocks and code spans
+prose() {
+  awk '/^[[:space:]]*(```|~~~)/ { code = !code; next } !code' "$1" | sed -E 's/`[^`]*`//g'
+}
+
 # links <file>: the link targets in a Markdown file, one per line, outside code
 links() {
-  awk '/^[[:space:]]*(```|~~~)/ { code = !code; next } !code' "$1" |
-    sed -E 's/`[^`]*`//g' |
-    grep -oE '\]\([^)[:space:]]+' |
-    cut -c3- || true
+  local text
+  text=$(prose "$1")
+  { grep -oE '\]\([^)[:space:]]+' <<<"$text" | cut -c3- || true; } | tr -d '<>'
+  { grep -E '^ {0,3}\[[^]]+\]:[[:space:]]*[^[:space:]]+' <<<"$text" |
+    sed -E 's/^ {0,3}\[[^]]+\]:[[:space:]]*([^[:space:]]+).*/\1/' || true; } | tr -d '<>'
 }
 
 while IFS= read -r -d '' file; do
   dir=$(dirname "$file")
   while IFS= read -r target; do
+    [ -n "$target" ] || continue
     case "$target" in
       http://* | https://* | mailto:* | '#'*) continue ;;
     esac
@@ -26,9 +36,9 @@ while IFS= read -r -d '' file; do
   done < <(links "$file")
 done < <(git ls-files -z '*.md')
 
-# Every docs directory has a README.md index that links each page and subdirectory in it, and
-# every page but docs/README.md has a breadcrumb line that starts with "[Docs](".
 if [ -d docs ]; then
+  [ -f docs/README.md ] || err "missing docs/README.md index"
+  index=$(realpath docs/README.md 2>/dev/null || true)
   while IFS= read -r dir; do
     if [ ! -f "$dir/README.md" ]; then
       err "missing $dir/README.md index"
@@ -42,10 +52,22 @@ if [ -d docs ]; then
         grep -qxF "$name/README.md" <<<"$indexed" || err "$dir/README.md does not link $name/README.md"
       elif [[ "$name" == *.md ]]; then
         grep -qxF "$name" <<<"$indexed" || err "$dir/README.md does not link $name"
-        head -n 6 "$entry" | grep -q '^\[Docs\](' || err "$entry: missing breadcrumb line under the title"
       fi
     done
   done < <(find docs -type d)
+
+  while IFS= read -r page; do
+    [ "$page" = docs/README.md ] && continue
+    crumb=$(head -n 6 "$page" | grep -m1 -oE '^\[Docs\]\([^)]+\)' || true)
+    if [ -z "$crumb" ]; then
+      err "$page: missing breadcrumb line [Docs](...) under the title"
+      continue
+    fi
+    target=${crumb#'[Docs]('}
+    target=${target%)}
+    [ "$(realpath "$(dirname "$page")/$target" 2>/dev/null || true)" = "$index" ] ||
+      err "$page: breadcrumb [Docs]($target) does not point to docs/README.md"
+  done < <(find docs -type f -name '*.md')
 fi
 
 [ "$fail" = 0 ] && echo "docs-check: ok"
