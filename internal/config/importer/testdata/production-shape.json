@@ -1,0 +1,51 @@
+{
+  "mcpProxy": {
+    "baseURL": "https://hub.example.com",
+    "addr": "127.0.0.1:9090",
+    "name": "hub-example",
+    "version": "1.0.0",
+    "type": "streamable-http",
+    "startupGracePeriod": "90s",
+    "options": {
+      "panicIfInvalid": false,
+      "logEnabled": true,
+      "autoReconnect": true,
+      "reconnectInterval": "30s",
+      "authTokens": ["${HUB_TOKEN_LAPTOP}", "${HUB_TOKEN_PHONE}"],
+      "redact": {"enabled": true, "escrowTTL": "24h", "escrowMaxEntries": 1000}
+    }
+  },
+  "mcpServers": {
+    "files": {
+      "url": "https://files.example.com/mcp",
+      "transportType": "streamable-http",
+      "timeout": "120s",
+      "options": {
+        "toolFilter": {"mode": "allow", "list": ["read_file", "list_files"]},
+        "redact": {"enabled": true, "escrowTTL": "24h", "fileTools": ["download_file"], "fileRoots": ["/srv/downloads"]}
+      }
+    },
+    "mail": {
+      "url": "https://mail.example.com/mcp",
+      "transportType": "streamable-http",
+      "timeout": "120s",
+      "oauth": {},
+      "options": {
+        "authTokens": ["${MAIL_TOKEN}"],
+        "resourceFilter": {"mode": "allow", "list": []},
+        "promptFilter": {"mode": "allow", "list": []},
+        "logEnabled": false,
+        "Disabled": false,
+        "toolFilter": {"mode": "allow", "list": ["search"]}
+      }
+    },
+    "browser": {
+      "command": "/usr/bin/env",
+      "args": ["-u", "HUB_TOKEN_LAPTOP", "-u", "HUB_TOKEN_PHONE", "browser-server", "--headless"],
+      "options": {"toolFilter": {"mode": "block", "list": ["eval"]}}
+    },
+    "legacy": {
+      "url": "https://legacy.example.com/sse"
+    }
+  }
+}

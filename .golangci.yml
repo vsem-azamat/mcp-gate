@@ -103,6 +103,10 @@ linters:
       - path: ^internal/redact/mcpredact/
         linters: [staticcheck]
         text: SA1019.*(ToolUseContent|ToolResultContent)
+      # Tests read their own fixtures.
+      - path: _test\.go$
+        linters: [gosec]
+        text: G304
       # The command is where output is printed and the environment is read.
       - path: ^cmd/
         linters: [forbidigo]

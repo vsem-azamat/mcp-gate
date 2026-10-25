@@ -1,0 +1,44 @@
+{
+  "mcpProxy": {
+    "name": "hub-example",
+    "version": "1.0.0",
+    "type": "streamable-http",
+    "options": {
+      "panicIfInvalid": false,
+      "autoReconnect": true,
+      "reconnectInterval": "30s",
+      "pingInterval": 20000000000
+    }
+  },
+  "mcpServers": {
+    "notes": {
+      "command": "/usr/bin/env",
+      "args": ["-u", "SECRET_ONE", "-u", "SECRET_TWO", "-u", "HOME", "NOTES_MODE=fast", "HOME=/srv/notes-home", "notes-server", "--transport", "stdio"],
+      "env": {"NOTES_DB": "$NOTES_DB_PATH", "SECRET_ONE": "removed-by-wrapper"},
+      "timeout": "180s",
+      "options": {"toolFilter": {"mode": "allow", "list": []}}
+    },
+    "clean-room": {
+      "command": "env",
+      "args": ["-i", "--chdir=/srv/clean", "ONLY=this", "clean-server"],
+      "options": {"Disabled": true}
+    },
+    "plain": {
+      "command": "plain-server",
+      "args": ["--price", "$5", "--token", "${PLAIN_TOKEN}"],
+      "timeout": 5,
+      "options": {"pingInterval": "10s", "reconnectInterval": "200ms"}
+    },
+    "shop": {
+      "transportType": "streamable-http",
+      "url": "https://shop.example.com/mcp",
+      "headers": {"X-Api-Key": "${SHOP_KEY}", "Accept-Encoding": "identity"},
+      "timeout": "120s"
+    },
+    "wrapped-oddly": {
+      "command": "/usr/bin/env",
+      "args": ["-S", "odd-server --flag"],
+      "timeout": "2m"
+    }
+  }
+}

@@ -1,0 +1,77 @@
+# Written by mcp-gate import from an mcp-proxy config. Review the comments, then run mcp-gate check.
+# mcpProxy.version is dropped: mcp-gate reports its own version.
+# mcpProxy.type is dropped: mcp-gate serves streamable HTTP.
+# mcpProxy.options.panicIfInvalid is dropped: it has no equivalent.
+# mcpProxy.options.autoReconnect is dropped: mcp-gate always restarts a failed server, with backoff up to restart.maxBackoff.
+# stdio servers no longer inherit the whole environment: only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
+version: 1
+name: hub-example
+servers:
+  clean-room:
+    stdio:
+      command: clean-server
+      cwd: /srv/clean
+      env:
+        ONLY: this
+      # env -i: nothing is inherited
+      inheritEnv: []
+    callTimeout: 0s # mcp-proxy had no timeout for this server
+    probeInterval: 20s # mcp-proxy pingInterval
+    restart:
+      maxBackoff: 30s # mcp-proxy reconnectInterval
+    disabled: true
+  # env -u SECRET_ONE, SECRET_TWO is dropped: a stdio child inherits only inheritEnv (default PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR) and env.
+  # mcpServers.notes.options.toolFilter is dropped: an empty allow list means no tool filter in mcp-proxy.
+  notes:
+    stdio:
+      command: notes-server
+      args:
+        - --transport
+        - stdio
+      env:
+        HOME: /srv/notes-home
+        NOTES_DB: ${NOTES_DB_PATH}
+        NOTES_MODE: fast
+      # env -u HOME: removed from the default
+      inheritEnv:
+        - PATH
+        - LANG
+        - LC_*
+        - TZ
+        - USER
+        - XDG_RUNTIME_DIR
+    callTimeout: 3m
+    probeInterval: 20s # mcp-proxy pingInterval
+    restart:
+      maxBackoff: 30s # mcp-proxy reconnectInterval
+  plain:
+    stdio:
+      command: plain-server
+      args:
+        - --price
+        - $$5
+        - --token
+        - ${PLAIN_TOKEN}
+    callTimeout: 0s # mcp-proxy discarded its sub-millisecond timeout, so it had none
+    probeInterval: 10s # mcp-proxy pingInterval
+    restart:
+      maxBackoff: 1s # mcp-proxy reconnectInterval
+  shop:
+    http:
+      url: https://shop.example.com/mcp
+      headers:
+        X-Api-Key: ${SHOP_KEY}
+    callTimeout: 2m
+    probeInterval: 20s # mcp-proxy pingInterval
+    restart:
+      maxBackoff: 30s # mcp-proxy reconnectInterval
+  wrapped-oddly:
+    stdio:
+      command: /usr/bin/env
+      args:
+        - -S
+        - odd-server --flag
+    callTimeout: 2m
+    probeInterval: 20s # mcp-proxy pingInterval
+    restart:
+      maxBackoff: 30s # mcp-proxy reconnectInterval
