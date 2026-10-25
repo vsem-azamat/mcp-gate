@@ -92,6 +92,12 @@ type Options struct {
 	ProbeInterval time.Duration
 	MaxBackoff    time.Duration
 
+	// Notifications receive the server's notifications.
+	Notifications Notifications
+	// OnSession, if set, is called with each new session once it is ready to serve calls. It
+	// runs on the supervision loop and must not block.
+	OnSession func(*mcp.ClientSession)
+
 	Logger *slog.Logger
 	// Redactor scrubs child stderr lines and error messages; nil uses the default rules.
 	Redactor *redact.Engine
@@ -104,6 +110,75 @@ type Options struct {
 	InitialBackoff  time.Duration
 	StableAfter     time.Duration // a session that lived this long resets the backoff
 	ProbeFailures   int           // consecutive failed probes before a restart
+}
+
+// Notifications are handlers for the notifications a server sends. The SDK calls them one at
+// a time, in the order the notifications arrive, so they must not block; a nil handler ignores
+// its notification.
+type Notifications struct {
+	// ToolsChanged, PromptsChanged and ResourcesChanged are called when the server reports that
+	// a list changed. On sessions from 2026-07-28 the SDK subscribes to the changes the server
+	// offers with subscriptions/listen, without waiting for the answer; until the server
+	// acknowledges the subscription, the three are called after every successful probe instead.
+	ToolsChanged, PromptsChanged, ResourcesChanged func()
+	// Progress receives progress notifications for calls in flight.
+	Progress func(*mcp.ProgressNotificationParams)
+	// Log receives log messages.
+	Log func(*mcp.LoggingMessageParams) //nolint:staticcheck // servers of older protocol versions still send log messages
+}
+
+// subscribes reports whether the SDK opens subscriptions/listen on cs: a session from 2026-07-28
+// whose server offers a list change n has a handler for.
+func (n *Notifications) subscribes(cs *mcp.ClientSession) bool {
+	res := cs.InitializeResult()
+	if res == nil || res.ProtocolVersion < StatelessVersion || res.Capabilities == nil {
+		return false
+	}
+	c := res.Capabilities
+	return n.ToolsChanged != nil && c.Tools != nil && c.Tools.ListChanged ||
+		n.PromptsChanged != nil && c.Prompts != nil && c.Prompts.ListChanged ||
+		n.ResourcesChanged != nil && c.Resources != nil && c.Resources.ListChanged
+}
+
+func (n *Notifications) allChanged() {
+	for _, f := range []func(){n.ToolsChanged, n.PromptsChanged, n.ResourcesChanged} {
+		if f != nil {
+			f()
+		}
+	}
+}
+
+// clientOptions returns the SDK client options for n.
+func (n *Notifications) clientOptions(logger *slog.Logger) *mcp.ClientOptions {
+	o := &mcp.ClientOptions{
+		Logger:         logger,
+		Capabilities:   &mcp.ClientCapabilities{},
+		MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true},
+	}
+	if f := n.ToolsChanged; f != nil {
+		o.ToolListChangedHandler = func(context.Context, *mcp.ToolListChangedRequest) { f() }
+	}
+	if f := n.PromptsChanged; f != nil {
+		o.PromptListChangedHandler = func(context.Context, *mcp.PromptListChangedRequest) { f() }
+	}
+	if f := n.ResourcesChanged; f != nil {
+		o.ResourceListChangedHandler = func(context.Context, *mcp.ResourceListChangedRequest) { f() }
+	}
+	if f := n.Progress; f != nil {
+		o.ProgressNotificationHandler = func(_ context.Context, r *mcp.ProgressNotificationClientRequest) {
+			if r.Params != nil {
+				f(r.Params)
+			}
+		}
+	}
+	if f := n.Log; f != nil {
+		o.LoggingMessageHandler = func(_ context.Context, r *mcp.LoggingMessageRequest) { //nolint:staticcheck // servers still send log messages
+			if r.Params != nil {
+				f(r.Params)
+			}
+		}
+	}
+	return o
 }
 
 func (o *Options) applyDefaults() {
@@ -173,8 +248,12 @@ type Status struct {
 	ProtocolVersion string
 	// AutoPinned reports that the session runs on the automatic pin.
 	AutoPinned bool
+	// LearnedPin is the automatic pin kept for later connects, if any.
+	LearnedPin string
 	// Restarts counts the connection attempts after the first.
-	Restarts    int
+	Restarts int
+	// Sessions counts the sessions opened so far.
+	Sessions    int
 	LastError   string // redacted
 	LastErrorAt time.Time
 	// PID is the child's process ID, for a stdio server with a running child.
@@ -210,6 +289,8 @@ type Supervisor struct {
 	learned    string
 	autoPinned bool
 	restarts   int
+	sessions   int
+	acked      *mcp.ClientSession // the last session whose server acknowledged subscriptions/listen
 	lastErr    string
 	lastErrAt  time.Time
 	pid        int
@@ -218,6 +299,8 @@ type Supervisor struct {
 	changed    chan struct{}
 
 	stop      chan struct{}
+	stopCtx   context.Context // cancelled by Stop, which ends the calls in flight
+	cancel    context.CancelFunc
 	done      chan struct{}
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -241,11 +324,10 @@ func New(opts Options) (*Supervisor, error) {
 		opts: opts, logger: logger, redactor: r, learned: opts.LearnedPin,
 		changed: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}),
 	}
-	s.client = mcp.NewClient(&mcp.Implementation{Name: opts.ClientName, Version: opts.ClientVersion}, &mcp.ClientOptions{
-		Logger:         logger,
-		Capabilities:   &mcp.ClientCapabilities{},
-		MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true},
-	})
+	s.stopCtx, s.cancel = context.WithCancel(context.Background())
+	impl := &mcp.Implementation{Name: opts.ClientName, Version: opts.ClientVersion}
+	s.client = mcp.NewClient(impl, opts.Notifications.clientOptions(logger))
+	s.client.AddReceivingMiddleware(s.watchAck)
 	if opts.Stdio != nil {
 		s.stderr = procutil.NewLineLog(logger, s.scrub, 0)
 	} else {
@@ -296,7 +378,10 @@ func (s *Supervisor) Start(ctx context.Context) {
 // Stop stops the server, ending its child's process group, and waits until that is done or ctx
 // is done. In-flight calls fail.
 func (s *Supervisor) Stop(ctx context.Context) error {
-	s.stopOnce.Do(func() { close(s.stop) })
+	s.stopOnce.Do(func() {
+		close(s.stop)
+		s.cancel()
+	})
 	s.startOnce.Do(func() { close(s.done) }) // never started
 	select {
 	case <-s.done:
@@ -316,9 +401,9 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 func (s *Supervisor) Status() Status {
 	s.mu.Lock()
 	st := Status{
-		State: s.state, ProtocolVersion: s.version, Restarts: s.restarts,
+		State: s.state, ProtocolVersion: s.version, Restarts: s.restarts, Sessions: s.sessions,
 		LastError: s.lastErr, LastErrorAt: s.lastErrAt, PID: s.pid,
-		AutoPinned: s.autoPinned,
+		AutoPinned: s.autoPinned, LearnedPin: s.learned,
 	}
 	s.mu.Unlock()
 	if s.stderr != nil {
@@ -361,8 +446,11 @@ func (s *Supervisor) Call(ctx context.Context, fn func(context.Context, *mcp.Cli
 		s.inflight--
 		s.mu.Unlock()
 	}()
+	// Stop cancels the call: closing a session waits for its calls to finish.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(s.stopCtx, cancel)() //nolint:contextcheck // stopCtx only signals Stop; the call keeps ctx
 	if s.opts.CallTimeout > 0 {
-		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.opts.CallTimeout)
 		defer cancel()
 	}
@@ -525,6 +613,34 @@ func (s *Supervisor) connect(base context.Context) (*attempt, error) {
 	return a, nil
 }
 
+// subscriptionsAck is the notification a server sends when it accepts subscriptions/listen.
+const subscriptionsAck = "notifications/subscriptions/acknowledged"
+
+// watchAck records the sessions whose server acknowledged subscriptions/listen.
+func (s *Supervisor) watchAck(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if method == subscriptionsAck {
+			if cs, ok := req.GetSession().(*mcp.ClientSession); ok {
+				s.mu.Lock()
+				s.acked = cs
+				s.mu.Unlock()
+			}
+		}
+		return next(ctx, method, req)
+	}
+}
+
+// unsubscribed reports whether cs should have a change subscription that its server has not
+// acknowledged, so that changes are not reported.
+func (s *Supervisor) unsubscribed(cs *mcp.ClientSession) bool {
+	if !s.opts.Notifications.subscribes(cs) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acked != cs
+}
+
 // dial starts the transport and runs the MCP handshake offering version ("" for the latest).
 func (s *Supervisor) dial(ctx context.Context, version string) (*attempt, error) {
 	a := &attempt{sessDone: make(chan struct{})}
@@ -574,6 +690,7 @@ func (s *Supervisor) dial(ctx context.Context, version string) (*attempt, error)
 	}()
 	s.mu.Lock()
 	s.session, s.version = cs, cs.InitializeResult().ProtocolVersion
+	s.sessions++
 	if a.proc != nil {
 		s.pid = a.proc.PID()
 	}
@@ -585,6 +702,9 @@ func (s *Supervisor) dial(ctx context.Context, version string) (*attempt, error)
 // serve watches a connected session until it ends and returns why.
 func (s *Supervisor) serve(base context.Context, a *attempt) error {
 	s.setState(Ready)
+	if s.opts.OnSession != nil {
+		s.opts.OnSession(a.session)
+	}
 	var exited <-chan struct{}
 	if a.proc != nil {
 		exited = a.proc.Done()
@@ -618,6 +738,9 @@ func (s *Supervisor) serve(base context.Context, a *attempt) error {
 		case err == nil || isReply(err):
 			failures = 0
 			s.setState(Ready)
+			if err == nil && s.unsubscribed(a.session) {
+				s.opts.Notifications.allChanged()
+			}
 			continue
 		}
 		failures++

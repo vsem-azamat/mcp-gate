@@ -2,13 +2,13 @@
 
 ## Purpose
 
-A supervisor keeps one downstream MCP server connected: it starts a stdio server as a child process or connects to an HTTP server, negotiates the protocol version, bounds message sizes, probes the server, and restarts it after a failure. One supervisor serves every call to its server. `mcp-gate check -connect` uses it to try every server of a config.
+A supervisor keeps one downstream MCP server connected: it starts a stdio server as a child process or connects to an HTTP server, negotiates the protocol version, bounds message sizes, probes the server, and restarts it after a failure. One supervisor serves every call to its server. `mcp-gate serve` runs one per enabled server, and `mcp-gate check -connect` uses them to try every server of a config.
 
 ## Requirements
 
 ### Requirement: States
 
-A supervised server SHALL be in one of the states `starting`, `ready`, `degraded`, `backoff`, `disabled` and `stopped`. A disabled server SHALL never be started. Calls SHALL go through only in `ready` and `degraded`; in any other state a call SHALL fail at once with an error naming the state. Each call SHALL be bounded by `callTimeout` when it is not zero.
+A supervised server SHALL be in one of the states `starting`, `ready`, `degraded`, `backoff`, `disabled` and `stopped`. A disabled server SHALL never be started. Calls SHALL go through only in `ready` and `degraded`; in any other state a call SHALL fail at once with an error naming the state. Each call SHALL be bounded by `callTimeout` when it is not zero. Stopping the supervisor SHALL cancel the calls in flight.
 
 #### Scenario: Call during backoff
 
@@ -121,6 +121,25 @@ When the child exits, the connection closes, or the probes fail as above, the su
 
 - **WHEN** an HTTP server answers 503 for a while and then recovers
 - **THEN** the server goes through `degraded` and `backoff`, then becomes `ready` again
+
+### Requirement: Notifications
+
+The supervisor SHALL pass the server's progress notifications, log messages and list-changed notifications to handlers given in its options, which must not block. When list-changed handlers are given, a session from `2026-07-28` SHALL subscribe with `subscriptions/listen` to the changes the server offers; until the server acknowledges the subscription, every list-changed handler SHALL be called after each successful probe instead, so that a server that rejects it still has its changes noticed. Each new session SHALL be reported once it serves calls, so that its catalog can be listed.
+
+#### Scenario: Rejected subscription
+
+- **WHEN** a `2026-07-28` server that offers list changes answers `subscriptions/listen` with an error
+- **THEN** the session serves calls and the list-changed handlers are called after each successful probe
+
+#### Scenario: Acknowledged subscription
+
+- **WHEN** a `2026-07-28` server acknowledges the subscription, over stdio or HTTP
+- **THEN** the list-changed handlers are called only when the server reports a change
+
+#### Scenario: Progress
+
+- **WHEN** a call's tool sends progress notifications for the call's token
+- **THEN** the progress handler receives them while the call runs
 
 ### Requirement: check -connect
 

@@ -33,7 +33,18 @@ import (
 //   - crash: the stdio fake exits with status 3; the HTTP fake fails the call;
 //   - env: returns the process environment, one variable per line, sorted;
 //   - pids: returns {"pid", "pgid", "grandchild"} of the stdio fake;
-//   - stats: returns {"pingsDuringCalls"}, the pings that arrived while a tool call ran.
+//   - stats: returns {"pingsDuringCalls", "cancelled"}: the pings that arrived while a tool call
+//     ran, and the calls of sleep, hang and progress that ended because they were cancelled;
+//   - progress {"steps": number, "ms": number, "size": number}: sends that many progress
+//     notifications for the call's progress token, waiting ms before each, with messages
+//     "step <n>" padded with dots to size bytes, then returns "done";
+//   - meta: returns the request's _meta as JSON;
+//   - addtool {"name": string}: adds a tool of that name, which the server reports as a list
+//     change;
+//   - badblob: returns an embedded text/plain resource whose blob is not valid UTF-8.
+//
+// With Catalog set, it also serves the prompt "greet", the resources "fake://info" and
+// "fake://hidden", and the template "fake://items/{id}"; reads return "contents of <uri>".
 type Fake struct {
 	Name string `json:"name,omitempty"`
 	// ProtocolVersions, if set, narrows the versions the server negotiates.
@@ -51,6 +62,11 @@ type Fake struct {
 	// StartDelay, for the stdio fake, waits this long before reading stdin, like a server that
 	// is slow to start.
 	StartDelay time.Duration `json:"startDelay,omitempty"`
+	// Catalog serves a prompt, resources and a resource template besides the tools.
+	Catalog bool `json:"catalog,omitempty"`
+	// RejectListen answers subscriptions/listen with a JSON-RPC error, like a server that does
+	// not offer change notifications to 2026-07-28 clients.
+	RejectListen bool `json:"rejectListen,omitempty"`
 
 	// The stdio fake only:
 
@@ -199,7 +215,7 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 						return nil, err
 					}
 				}
-				return h(ctx, args)
+				return h(context.WithValue(ctx, requestKey{}, req), args)
 			})
 	}
 	number := func(args map[string]any, k string) int {
@@ -215,6 +231,7 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 		case <-time.After(time.Duration(number(args, "ms")) * time.Millisecond):
 			return text("slept"), nil
 		case <-ctx.Done():
+			st.cancelled.Add(1)
 			return nil, ctx.Err()
 		}
 	})
@@ -222,7 +239,11 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 		return text(strings.Repeat("x", number(args, "bytes"))), nil
 	})
 	tool("hang", func(ctx context.Context, _ map[string]any) (*mcp.CallToolResult, error) {
-		return nil, unanswered(ctx, stop)
+		err := unanswered(ctx, stop)
+		if ctx.Err() != nil {
+			st.cancelled.Add(1)
+		}
+		return nil, err
 	})
 	tool("crash", func(context.Context, map[string]any) (*mcp.CallToolResult, error) {
 		if crash != nil {
@@ -236,9 +257,67 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 		return text(strings.Join(env, "\n")), nil
 	})
 	tool("stats", func(context.Context, map[string]any) (*mcp.CallToolResult, error) {
-		data, err := json.Marshal(map[string]int64{"pingsDuringCalls": st.pingsDuringCalls.Load()})
+		data, err := json.Marshal(map[string]int64{"pingsDuringCalls": st.pingsDuringCalls.Load(), "cancelled": st.cancelled.Load()})
 		return text(string(data)), err
 	})
+	tool("progress", func(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
+		req, _ := ctx.Value(requestKey{}).(*mcp.CallToolRequest)
+		for i := range number(args, "steps") {
+			select {
+			case <-time.After(time.Duration(number(args, "ms")) * time.Millisecond):
+			case <-ctx.Done():
+				st.cancelled.Add(1)
+				return nil, ctx.Err()
+			}
+			if req != nil && req.Params.GetProgressToken() != nil {
+				msg := fmt.Sprintf("step %d", i+1)
+				if pad := number(args, "size"); pad > len(msg) {
+					msg += strings.Repeat(".", pad-len(msg))
+				}
+				_ = req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+					ProgressToken: req.Params.GetProgressToken(), Progress: float64(i + 1), Message: msg,
+				})
+			}
+		}
+		return text("done"), nil
+	})
+	tool("meta", func(ctx context.Context, _ map[string]any) (*mcp.CallToolResult, error) {
+		req, _ := ctx.Value(requestKey{}).(*mcp.CallToolRequest)
+		var meta mcp.Meta
+		if req != nil {
+			meta = req.Params.Meta
+		}
+		data, err := json.Marshal(meta)
+		return text(string(data)), err
+	})
+	tool("addtool", func(_ context.Context, args map[string]any) (*mcp.CallToolResult, error) {
+		name, _ := args["name"].(string)
+		s.AddTool(&mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}},
+			func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) { return text(name), nil })
+		return text("added"), nil
+	})
+	tool("badblob", func(context.Context, map[string]any) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+			URI: "fake://blob", MIMEType: "text/plain", Blob: []byte{0xff, 0xfe, 'x'},
+		}}}}, nil
+	})
+	if f.Catalog {
+		s.AddPrompt(&mcp.Prompt{Name: "greet", Arguments: []*mcp.PromptArgument{{Name: "who"}}},
+			func(_ context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				return &mcp.GetPromptResult{Messages: []*mcp.PromptMessage{{
+					Role: "user", Content: &mcp.TextContent{Text: "hello " + req.Params.Arguments["who"]},
+				}}}, nil
+			})
+		read := func(_ context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+				URI: req.Params.URI, MIMEType: "text/plain", Text: "contents of " + req.Params.URI,
+			}}}, nil
+		}
+		s.AddResource(&mcp.Resource{Name: "info", URI: "fake://info"}, read)
+		s.AddResource(&mcp.Resource{Name: "hidden", URI: "fake://hidden"}, read)
+		s.AddResourceTemplate(&mcp.ResourceTemplate{Name: "items", URITemplate: "fake://items/{id}"}, read)
+		s.AddResourceTemplate(&mcp.ResourceTemplate{Name: "any", URITemplate: "fake://{+path}"}, read)
+	}
 	tool("pids", func(context.Context, map[string]any) (*mcp.CallToolResult, error) {
 		pgid, _ := syscall.Getpgid(os.Getpid())
 		data, err := json.Marshal(map[string]int{"pid": os.Getpid(), "pgid": pgid, "grandchild": grandchild})
@@ -252,7 +331,11 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 type fakeStats struct {
 	calls            atomic.Int64 // tool calls running, the stats call excluded
 	pingsDuringCalls atomic.Int64
+	cancelled        atomic.Int64
 }
+
+// requestKey carries the tool call request to the fake's tool functions.
+type requestKey struct{}
 
 func behaviour(f Fake, stop <-chan struct{}, st *fakeStats) mcp.Middleware {
 	start := time.Now()
@@ -273,6 +356,9 @@ func behaviour(f Fake, stop <-chan struct{}, st *fakeStats) mcp.Middleware {
 					st.calls.Add(1)
 					defer st.calls.Add(-1)
 				}
+			}
+			if f.RejectListen && method == "subscriptions/listen" {
+				return nil, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "no subscriptions"}
 			}
 			if f.RefuseProbes && (method == "ping" || method == "tools/list") {
 				return nil, &jsonrpc.Error{Code: -32000, Message: "busy"}
