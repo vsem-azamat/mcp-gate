@@ -124,9 +124,9 @@ func (p *Policy) SetHiddenResources(uris []string) {
 
 // ReadAllowed reports whether a resource URI may be read. Lists are filtered when the catalog is
 // mirrored, but a read of a URI that is not listed reaches the first template it matches, so
-// under a deny list the URI is checked again: against the listed entries and the URIs of hidden
-// resources, after normalization. Under an allow list a read can only reach an allowed resource
-// or template.
+// under a deny list the URI is checked again: its comparison key against the keys of the listed
+// entries and of the URIs of hidden resources. Under an allow list a read can only reach an
+// allowed resource or template.
 func (p *Policy) ReadAllowed(uri string) bool {
 	if p.Resources.ExposesNothing() {
 		return false
@@ -140,54 +140,77 @@ func (p *Policy) ReadAllowed(uri string) bool {
 	return !blocked
 }
 
-// NormalizeURI gives equivalent spellings of a URI one form, so that a deny list cannot be
-// sidestepped by "test://echo/%73ecret" or "TEST://Host/secret": the fragment is dropped, the
-// scheme and host are lower-cased, percent-encoded unreserved characters are decoded and other
-// percent-encodings are upper-cased (RFC 3986 section 6.2.2). The path keeps its case.
+// NormalizeURI returns the key a URI is compared by, so that a deny list is not sidestepped by
+// another spelling of a denied URI that a server would read the same: every percent-encoding is
+// decoded until none is left, the query and fragment are dropped, the scheme and authority are
+// lower-cased, and in the authority and path parameters after ";" are dropped, empty and "."
+// segments removed and ".." segments resolved. The path keeps its case. The key errs towards treating different
+// URIs as one, which under a deny list refuses more, never less.
 func NormalizeURI(raw string) string {
-	// Decoding can form a new escape ("%7%30" becomes "%70"), so repeat until the form is
-	// stable. Each pass shortens the string or leaves it unchanged.
+	// Decoding can form a new escape ("%7%30" becomes "%70"), so repeat until nothing changes.
+	// Each pass shortens the string or leaves it unchanged.
 	for {
-		n := normalizeOnce(raw)
+		n := decodeOnce(raw)
 		if n == raw {
-			return n
+			break
 		}
 		raw = n
 	}
+	raw, _, _ = strings.Cut(raw, "#")
+	raw, _, _ = strings.Cut(raw, "?")
+	scheme, rest, ok := strings.Cut(raw, ":")
+	if !ok || scheme == "" || strings.ContainsAny(scheme, "/") {
+		return cleanPath(raw)
+	}
+	scheme = strings.ToLower(scheme)
+	authority, hier := strings.CutPrefix(rest, "//")
+	if !hier {
+		return scheme + ":" + cleanPath(rest)
+	}
+	path := ""
+	if i := strings.IndexByte(authority, '/'); i >= 0 {
+		authority, path = authority[:i], authority[i:]
+	}
+	// The authority is cleaned as the first segment of the path, since for many schemes (such
+	// as "fake://hidden") it names the resource itself.
+	return scheme + "://" + cleanPath(strings.ToLower(authority)+path)
 }
 
-func normalizeOnce(raw string) string {
-	raw, _, _ = strings.Cut(raw, "#")
+// cleanPath drops ";" parameters and empty and "." segments, and resolves ".." segments. A path
+// that started with "/" keeps it.
+func cleanPath(path string) string {
+	var out []string
+	for seg := range strings.SplitSeq(path, "/") {
+		seg, _, _ = strings.Cut(seg, ";")
+		switch seg {
+		case "", ".":
+		case "..":
+			if len(out) > 0 {
+				out = out[:len(out)-1]
+			}
+		default:
+			out = append(out, seg)
+		}
+	}
+	joined := strings.Join(out, "/")
+	if strings.HasPrefix(path, "/") {
+		return "/" + joined
+	}
+	return joined
+}
+
+func decodeOnce(raw string) string {
 	var b strings.Builder
 	b.Grow(len(raw))
 	for i := 0; i < len(raw); i++ {
 		if raw[i] == '%' && i+2 < len(raw) && isHex(raw[i+1]) && isHex(raw[i+2]) {
-			c := unhex(raw[i+1])<<4 | unhex(raw[i+2])
-			if isUnreserved(c) {
-				b.WriteByte(c)
-			} else {
-				b.WriteByte('%')
-				b.WriteString(strings.ToUpper(raw[i+1 : i+3]))
-			}
+			b.WriteByte(unhex(raw[i+1])<<4 | unhex(raw[i+2]))
 			i += 2
 			continue
 		}
 		b.WriteByte(raw[i])
 	}
-	uri := b.String()
-	scheme, rest, ok := strings.Cut(uri, ":")
-	if !ok || scheme == "" || strings.ContainsAny(scheme, "/?") {
-		return uri
-	}
-	scheme = strings.ToLower(scheme)
-	if authority, ok := strings.CutPrefix(rest, "//"); ok {
-		end := strings.IndexAny(authority, "/?")
-		if end < 0 {
-			end = len(authority)
-		}
-		return scheme + "://" + strings.ToLower(authority[:end]) + authority[end:]
-	}
-	return scheme + ":" + rest
+	return b.String()
 }
 
 func isHex(c byte) bool {
@@ -203,8 +226,4 @@ func unhex(c byte) byte {
 	default:
 		return c - 'A' + 10
 	}
-}
-
-func isUnreserved(c byte) bool {
-	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~'
 }

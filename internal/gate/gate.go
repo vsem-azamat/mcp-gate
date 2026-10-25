@@ -3,9 +3,12 @@
 package gate
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -62,6 +65,10 @@ type Gate struct {
 	srv     *http.Server
 	pins    *pinStore
 	started atomic.Bool
+	// drain is closed when shutdown begins; it ends the subscriptions/listen streams, which
+	// would otherwise hold the shutdown for its whole grace.
+	drain     chan struct{}
+	drainOnce sync.Once
 }
 
 type server struct {
@@ -78,6 +85,7 @@ func New(opts Options) (*Gate, error) {
 	}
 	cfg := opts.Config
 	g := &Gate{opts: opts, cfg: cfg, logger: opts.Logger, servers: map[string]*server{}, mux: http.NewServeMux()}
+	g.drain = make(chan struct{})
 	var err error
 	if g.pins, err = loadPins(opts.StateDir); err != nil {
 		g.logger.Warn("cannot read the learned protocol pins; starting without them", "error", err.Error())
@@ -89,6 +97,9 @@ func New(opts Options) (*Gate, error) {
 		}
 	}
 	remote := upstream.NewRemote(cfg.Listen.BehindProxy, trusted)
+	if cfg.Listen.BehindProxy && len(cfg.Listen.AllowedHosts) == 0 {
+		g.logger.Warn("listen.behindProxy is set without listen.allowedHosts: no Host is checked, so the proxy must check it")
+	}
 	all := make([]string, 0, len(cfg.Servers))
 	for name := range cfg.Servers {
 		all = append(all, name)
@@ -117,6 +128,7 @@ func New(opts Options) (*Gate, error) {
 			upstream.StatusHandler(admin, func() any { return g.Status() })))
 	}
 	g.srv = upstream.NewServer(cfg.Listen.Addr, g.mux, g.logger)
+	g.srv.RegisterOnShutdown(func() { g.drainOnce.Do(func() { close(g.drain) }) })
 	return g, nil
 }
 
@@ -197,7 +209,7 @@ func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 			MaxRequestBodyBytes:          upstream.MaxBodyBytes,
 			Logger:                       upstream.SDKLogger(g.logger.With("server", s.name)),
 		})
-	h = upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, h)
+	h = upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, g.endListenOnDrain(h))
 	inner := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !mirror.Ready() {
@@ -218,6 +230,41 @@ func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 	return upstream.Recover(g.logger, s.name, h)
 }
 
+// endListenOnDrain cancels a subscriptions/listen request when shutdown begins. The body has
+// been read into memory by ReadBody.
+func (g *Gate) endListenOnDrain(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.Body != http.NoBody {
+			body, err := io.ReadAll(r.Body)
+			if err == nil && isListen(body) {
+				ctx, cancel := context.WithCancel(r.Context())
+				defer cancel()
+				go func() {
+					select {
+					case <-g.drain:
+						cancel()
+					case <-ctx.Done():
+					}
+				}()
+				r = r.WithContext(ctx)
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isListen reports whether a request body is a subscriptions/listen request.
+func isListen(body []byte) bool {
+	if !bytes.Contains(body, []byte("subscriptions/listen")) {
+		return false
+	}
+	var req struct {
+		Method string `json:"method"`
+	}
+	return json.Unmarshal(body, &req) == nil && req.Method == "subscriptions/listen"
+}
+
 // Handler is the gate's HTTP handler.
 func (g *Gate) Handler() http.Handler { return g.mux }
 
@@ -232,7 +279,9 @@ func (g *Gate) Listen(ctx context.Context) (net.Listener, error) {
 func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	for _, name := range g.names {
 		s := g.servers[name]
-		s.mirror.Start(ctx)
+		// The mirror outlives ctx: calls finishing during the shutdown grace still get their
+		// progress. shutdown closes it.
+		s.mirror.Start(context.WithoutCancel(ctx))
 		s.sup.Start(ctx)
 	}
 	served := make(chan error, 1)
@@ -288,6 +337,7 @@ func (g *Gate) awaitStartup(ctx context.Context) {
 }
 
 // shutdown stops the listener and the servers; parent carries values only, it is never cancelled.
+// It returns only the listener's errors.
 func (g *Gate) shutdown(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, ShutdownGrace)
 	defer cancel()
@@ -298,7 +348,8 @@ func (g *Gate) shutdown(parent context.Context) error {
 			errs = append(errs, err)
 		}
 	}
-	var mu sync.Mutex
+	// A server that does not stop in time is logged; it does not fail the shutdown, which the
+	// signal asked for.
 	var wg sync.WaitGroup
 	for _, name := range g.names {
 		s := g.servers[name]
@@ -306,9 +357,7 @@ func (g *Gate) shutdown(parent context.Context) error {
 			ctx, cancel := context.WithTimeout(parent, stopTimeout)
 			defer cancel()
 			if err := s.sup.Stop(ctx); err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Errorf("stop %s: %w", s.name, err))
-				mu.Unlock()
+				g.logger.Error("server did not stop", "server", s.name, "error", err.Error())
 			}
 			s.mirror.Close()
 		})

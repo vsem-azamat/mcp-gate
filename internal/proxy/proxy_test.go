@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
@@ -140,3 +143,44 @@ func TestProgressForUnknownTokenIsDropped(t *testing.T) {
 		t.Errorf("sinks %v", pt.sinks)
 	}
 }
+
+func TestInvalidUpdateKeepsPrevious(t *testing.T) {
+	m := New(Options{Name: "s", Policy: policy.New(&config.Server{})})
+	good := &mcp.Tool{Name: "a", InputSchema: map[string]any{"type": "object"}}
+	m.tools = m.applyTools([]*mcp.Tool{good})
+	m.tools = m.applyTools([]*mcp.Tool{{Name: "a", InputSchema: map[string]any{"type": "string"}}})
+	if m.tools["a"] != good {
+		t.Errorf("tool a after an invalid update: %+v", m.tools["a"])
+	}
+	m.tools = m.applyTools(nil)
+	if len(m.tools) != 0 {
+		t.Errorf("a tool that is gone is kept: %v", m.tools)
+	}
+}
+
+func TestReceiveRecoversAndAuditsRefusals(t *testing.T) {
+	var logs strings.Builder
+	m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	panics := m.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) { panic("secret-value") })
+	res, err := panics(t.Context(), "tools/list", &mcp.ListToolsRequest{})
+	var rpc *jsonrpc.Error
+	if res != nil || !errors.As(err, &rpc) || rpc.Code != jsonrpc.CodeInternalError {
+		t.Errorf("panic: %v %v", res, err)
+	}
+	m.Attach(stubDown{})
+	refuses := m.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) { return nil, errors.New("unknown tool") })
+	_, _ = refuses(t.Context(), "tools/call", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "env"}})
+	out := logs.String()
+	if strings.Contains(out, "secret-value") || !strings.Contains(out, `"msg":"call"`) ||
+		!strings.Contains(out, `"tool":"env"`) || !strings.Contains(out, `"outcome":"denied"`) {
+		t.Errorf("logs %s", out)
+	}
+}
+
+type stubDown struct{}
+
+func (stubDown) Call(context.Context, func(context.Context, *mcp.ClientSession) error) error {
+	return errors.New("no session")
+}
+
+func (stubDown) ErrorText(err error) string { return err.Error() }

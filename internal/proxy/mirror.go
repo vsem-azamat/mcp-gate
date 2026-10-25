@@ -112,6 +112,7 @@ func New(opts Options) *Mirror {
 		Logger:       upstream.SDKLogger(logger),
 		Capabilities: Capabilities(opts.Policy),
 	})
+	m.server.AddReceivingMiddleware(m.receive)
 	return m
 }
 
@@ -311,8 +312,9 @@ func (m *Mirror) apply(kinds int, l *listing) {
 	if kinds&kindResources != 0 {
 		var hidden []string
 		m.resources, hidden = m.applyResources(l.resources)
-		m.templates = m.applyTemplates(l.templates)
+		// Before the templates, so that no new template reaches a newly hidden resource.
 		m.opts.Policy.SetHiddenResources(hidden)
+		m.templates = m.applyTemplates(l.templates)
 	}
 	if kinds != 0 {
 		m.lastSync = time.Now()
@@ -377,6 +379,9 @@ func (m *Mirror) applyTools(list []*mcp.Tool) map[string]*mcp.Tool {
 		}
 		if err := validTool(t); err != nil {
 			m.logger.Warn("skipping an invalid tool", "tool", t.Name, "error", err.Error())
+			if old, ok := m.tools[t.Name]; ok {
+				want[t.Name] = old // keep the previous version
+			}
 			continue
 		}
 		want[t.Name] = t

@@ -17,8 +17,8 @@ How `mcp-gate serve` puts the downstream servers behind one listener. The behavi
 
 ```
 client ─POST /<name>/mcp─▶ Recover ─▶ LogRequests (log.requests) ─▶ AllowHosts ─▶ RequireToken
-   ─▶ CrossOriginProtection ─▶ 503 until mounted ─▶ ReadBody (4 MiB, 30 s)
-   ─▶ SDK StreamableHTTPHandler (stateless) ─▶ Mirror's mcp.Server ─▶ handler
+   ─▶ CrossOriginProtection ─▶ 503 until mounted ─▶ ReadBody (4 MiB, 30 s) ─▶ endListenOnDrain
+   ─▶ SDK StreamableHTTPHandler (stateless) ─▶ Mirror's mcp.Server ─▶ receive middleware ─▶ handler
    ─▶ Supervisor.Call ─▶ downstream ClientSession
 ```
 
@@ -37,6 +37,12 @@ A forwarded call builds the downstream `_meta` (`downstreamMeta`), opens a progr
 Downstream notifications arrive from the SDK one at a time on the session's reader, so the handlers only enqueue (64 deep, counting what they drop) and one worker per mirror delivers progress and logs the server's log messages.
 
 Results go through `mcpredact` with the server's engine and a replacer: `redact.Marker` by default, or what `gate.Options.Replacer` returns for the server, which is where a replacer that keeps values plugs in. Each call counts its findings through a wrapping replacer for the audit line.
+
+The mirror's receiving middleware recovers panics in request handling, which the SDK runs on goroutines of its own, and writes the audit line of a tool call or prompt get that the SDK refuses before a handler runs (an unknown or filtered name); a context value tells whether a handler was reached. The notification worker and the progress sinks recover their own panics.
+
+## Shutdown
+
+`http.Server.Shutdown` waits for every open request, and a `2026-07-28` client listening for changes keeps one POST open for good. `endListenOnDrain` recognises `subscriptions/listen` bodies and ties their context to a channel closed from `RegisterOnShutdown`, so those streams end at once and only real calls use the 10 second grace. The mirrors run on a context detached from the signal, so calls finishing in the grace still get their progress; `shutdown` closes them after stopping the servers. A server that does not stop in time is logged and does not change the exit status.
 
 ## Readiness and status
 

@@ -115,7 +115,7 @@ func validateTokens(path string, tokens map[string]string, add func(path, format
 		if !TokenNameRE.MatchString(name) {
 			add(p, "token names are lower-case letters, digits, '.', '_' and '-', start with a letter or digit and are at most 63 characters")
 		}
-		if v := tokens[name]; v == "" || strings.ContainsFunc(v, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		if v := tokens[name]; v == "" || strings.ContainsFunc(v, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 			add(p, "must be a non-empty token without spaces or control characters")
 		}
 	}

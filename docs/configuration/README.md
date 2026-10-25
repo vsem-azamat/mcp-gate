@@ -57,7 +57,7 @@ servers:
 | `listen.addr` | `127.0.0.1:9090` | `host:port` to serve on |
 | `listen.behindProxy` | `false` | The gate sits behind a reverse proxy: the SDK's DNS-rebinding check (a loopback listener only answers loopback Host names) is off, and the request log reads `X-Forwarded-For` from `trustedProxies` |
 | `listen.trustedProxies` | `127.0.0.1/32 ::1/128` | CIDRs of the proxies whose `X-Forwarded-For` is believed |
-| `listen.allowedHosts` | none (any) | Host names, optionally with a port, the MCP routes answer; others get 403. Set it when `behindProxy` is on |
+| `listen.allowedHosts` | none (any) | Host names, optionally with a port, the MCP routes answer; others get 403. Set it when `behindProxy` is on; without it the gate logs a warning at start |
 | `startupGracePeriod` | `30s` | Longest time `/_readyz` reports `initializing` while servers connect |
 | `logLevel` | `info` | `debug`, `info`, `warn` or `error`; `debug` adds the servers' own log messages |
 | `auth.tokens` | none | Client tokens by name, accepted by every server that inherits them. The name identifies the caller in the audit log |
@@ -78,7 +78,7 @@ servers:
 | `disabled` | `false` | Never start the server |
 | `tools` | all | `{allow: [names]}` or `{deny: [names]}`. An empty allow list exposes every tool, as mcp-proxy's `toolFilter` did |
 | `prompts` | all | `{allow: [...]}` or `{deny: [...]}` by prompt name. An empty allow list exposes none and the capability is not advertised |
-| `resources` | all | The same, matching a resource's URI or name and a template's URI template or name. Under a deny list, a read of a denied URI through a template is refused too |
+| `resources` | all | The same, matching a resource's URI or name and a template's URI template or name. Under a deny list, a read of a denied URI through a template is refused too, in any spelling the gate can tell is the same; an allow list is the safer choice |
 | `auth.inherit` | `true` | Accept the global `auth.tokens` too |
 | `auth.tokens` | none | Tokens this server accepts in addition; with `inherit`, their names differ from the global ones |
 | `auth.public` | `false` | Serve without a token. Excludes `tokens` and `inherit` |

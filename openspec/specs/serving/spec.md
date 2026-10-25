@@ -8,7 +8,12 @@
 
 ### Requirement: serve
 
-`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid. Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server, listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. On SIGINT or SIGTERM it SHALL stop accepting connections, give calls in flight up to 10 seconds, stop every server in parallel, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
+`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid. Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server, listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. On SIGINT or SIGTERM it SHALL stop accepting connections, end the `subscriptions/listen` streams, give calls in flight up to 10 seconds (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
+
+#### Scenario: Shutdown with a listening client
+
+- **WHEN** a `2026-07-28` client listens for changes and another runs a call with progress while the gate gets SIGTERM
+- **THEN** the shutdown does not wait for the listening client, and the call completes with its progress
 
 #### Scenario: Invalid config
 
@@ -17,7 +22,7 @@
 
 ### Requirement: Routes
 
-Each enabled server SHALL be served at exactly `/<name>/mcp`; any other path, including the route of a disabled server, SHALL get 404. A route SHALL run, in this order: the Host check, the token check, cross-origin protection, a 503 with `Retry-After: 5` while the server's catalog has never been listed, a request body limit of 4 MiB (413) read within 30 seconds (408), and the SDK's stateless streamable HTTP handler, which answers GET with 405. When `listen.allowedHosts` is set, a request whose Host is not in it (an entry without a port matching any port, without regard to case) SHALL get 403. Unless `listen.behindProxy` is set, the SDK's DNS-rebinding check SHALL reject a request to a loopback listener whose Host is not a loopback name. A handler panic SHALL be answered with 500 and logged without its value. The listener SHALL bound request headers to 64 KiB read within 10 seconds and close idle connections after 120 seconds, and SHALL NOT bound the time a call takes.
+Each enabled server SHALL be served at exactly `/<name>/mcp`; any other path, including the route of a disabled server, SHALL get 404. A route SHALL run, in this order: the Host check, the token check, cross-origin protection, a 503 with `Retry-After: 5` while the server's catalog has never been listed, a request body limit of 4 MiB (413) read within 30 seconds (408), and the SDK's stateless streamable HTTP handler, which answers GET with 405. When `listen.allowedHosts` is set, a request whose Host is not in it (an entry without a port matching any port, without regard to case) SHALL get 403. Unless `listen.behindProxy` is set, the SDK's DNS-rebinding check SHALL reject a request to a loopback listener whose Host is not a loopback name. A panic in an HTTP handler SHALL be answered with 500, and a panic while handling an MCP request or a notification with an internal JSON-RPC error or nothing; either SHALL be logged by its type, without its value. The listener SHALL bound request headers to 64 KiB read within 10 seconds and close idle connections after 120 seconds, and SHALL NOT bound the time a call takes.
 
 #### Scenario: Server not connected yet
 
@@ -45,17 +50,17 @@ A route SHALL accept the tokens in `auth.tokens` unless the server sets `auth.in
 
 ### Requirement: Filters
 
-`tools`, `prompts` and `resources` SHALL each be an allow list or a deny list. Tools and prompts SHALL be matched by name; resources by URI or name, and resource templates by URI template or name. An entry SHALL pass an allow list when any of its keys is listed and fail a deny list when any of its keys is listed. A tool allow list that is empty SHALL filter nothing; an empty prompt or resource allow list SHALL expose none, and the capability SHALL NOT be advertised. A call of a tool or a get of a prompt that is filtered out SHALL fail. Under a resource deny list, a read SHALL be refused when its URI, after normalization (fragment dropped, scheme and host lower-cased, percent-encoded unreserved characters decoded until stable, other escapes upper-cased), is a listed entry or the URI of a resource the list hides, so that a template cannot reach a hidden resource.
+`tools`, `prompts` and `resources` SHALL each be an allow list or a deny list. Tools and prompts SHALL be matched by name; resources by URI or name, and resource templates by URI template or name. An entry SHALL pass an allow list when any of its keys is listed and fail a deny list when any of its keys is listed. A tool allow list that is empty SHALL filter nothing; an empty prompt or resource allow list SHALL expose none, and the capability SHALL NOT be advertised. A call of a tool or a get of a prompt that is filtered out SHALL fail. Under a resource deny list, a read SHALL be refused when the comparison key of its URI is the key of a listed entry or of the URI of a resource the list hides, so that a template does not reach a hidden resource by another spelling. The key SHALL decode every percent-encoding until none is left, drop the query and the fragment, lower-case the scheme and the authority, and in the authority and path drop `;` parameters and empty and `.` segments and resolve `..` segments. A deny list matches spellings, not what a server makes of them, so it is a best effort; an allow list is the boundary. Under an allow list, a read SHALL reach only an allowed resource or a resource through an allowed template, which may also match URIs of resources the list does not allow.
 
 #### Scenario: Allow lists
 
 - **WHEN** a server allows the tools `echo` and `sleep`, no prompts, and the resource `fake://info` and the template `items`
-- **THEN** it lists those two tools and that resource, does not advertise prompts, refuses a call of another tool and a read of another resource, and reads `fake://items/7` through the template
+- **THEN** it lists those two tools and that resource, does not advertise prompts, refuses a call of another tool with a `denied` audit line and a read of another resource, and reads `fake://items/7` through the template
 
 #### Scenario: Deny list and templates
 
 - **WHEN** a server denies `fake://hidden` and also serves the template `fake://{+path}`
-- **THEN** reads of `fake://hidden`, `FAKE://hidden`, `fake://%68idden` and `fake://hidden#x` are refused and `fake://other` is read through the template
+- **THEN** reads of `fake://hidden`, `FAKE://hidden`, `fake://%68idden`, `fake://hidden#x`, `fake://hidden/`, `fake://hidden?` and `fake://x/../hidden` are refused and `fake://other` is read through the template
 
 ### Requirement: Catalog mirror
 
@@ -129,7 +134,7 @@ When `redact.enabled` is true, the default, tool results, prompt results, resour
 
 ### Requirement: Audit and request logs
 
-Every forwarded call SHALL be logged as one line with the message `call` and the attributes `server`, `principal` (the token name, empty on a public server), `method`, the tool or prompt name or the resource URI (redacted and cut at 256 bytes), `durMs`, `outcome` (`ok`, `tool_error`, `error`, `denied`, `unavailable`, `withheld` or `input_required`) and `redactions`, the number of findings replaced. Arguments and results SHALL NOT be logged. With `log.requests`, each HTTP request to the server's route SHALL be logged with its method, status, duration and remote address, but not its path, query or headers. Behind a proxy, the remote address SHALL be the right-most `X-Forwarded-For` entry that is not in `listen.trustedProxies`, read only when the peer is in it. The SDK's informational lines, which it writes for every session and so for every stateless request, SHALL be logged at debug level.
+Every forwarded call, and every tool call or prompt get the SDK refuses before it is forwarded (such as one of a tool the policy hides, with outcome `denied`), SHALL be logged as one line with the message `call` and the attributes `server`, `principal` (the token name, empty on a public server), `method`, the tool or prompt name or the resource URI (redacted and cut at 256 bytes), `durMs`, `outcome` (`ok`, `tool_error`, `error`, `denied`, `unavailable`, `withheld` or `input_required`) and `redactions`, the number of findings replaced. Arguments and results SHALL NOT be logged. With `log.requests`, each HTTP request to the server's route SHALL be logged with its method, status, duration and remote address, but not its path, query or headers. Behind a proxy, the remote address SHALL be the right-most `X-Forwarded-For` entry that is not in `listen.trustedProxies`, read only when the peer is in it. The SDK's informational lines, which it writes for every session and so for every stateless request, SHALL be logged at debug level.
 
 #### Scenario: Audit line
 

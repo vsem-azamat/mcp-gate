@@ -135,6 +135,7 @@ func TestServingErrors(t *testing.T) {
 		{"bad token name", "version: 1\nauth: {tokens: {Laptop: x}}\n" + srv, "auth.tokens.Laptop: token names"},
 		{"empty token", "version: 1\nauth: {tokens: {a: ''}}\n" + srv, "auth.tokens.a: must be a non-empty token"},
 		{"token with space", "version: 1\nauth: {tokens: {a: 'b c'}}\n" + srv, "auth.tokens.a: must be a non-empty token"},
+		{"token with a no-break space", "version: 1\nauth: {tokens: {a: \"b\\u00a0c\"}}\n" + srv, "auth.tokens.a: must be a non-empty token"},
 		{"same value", "version: 1\nauth: {tokens: {a: s, b: s}}\n" + srv, "the tokens a and b have the same value"},
 		{"shadowed name", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    auth: {tokens: {a: t}}\n", "servers.a.auth.tokens.a: is also a global token name"},
 		{"inherit nothing", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    auth: {inherit: false}\n", "accepts no token"},

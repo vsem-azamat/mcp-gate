@@ -40,7 +40,10 @@ type call struct {
 	count     *counter
 }
 
-func (m *Mirror) begin(method string, extra *mcp.RequestExtra, attrs ...any) *call {
+func (m *Mirror) begin(ctx context.Context, method string, extra *mcp.RequestExtra, attrs ...any) *call {
+	if reached, ok := ctx.Value(reachedKey{}).(*bool); ok {
+		*reached = true
+	}
 	m.stats.calls.Add(1)
 	principal := ""
 	if extra != nil {
@@ -73,7 +76,7 @@ func (c *call) downstreamError(ctx context.Context, err error) error {
 	c.outcome = outcomeError
 	switch {
 	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
-		return err
+		return ctx.Err() // the client has gone; the error may quote the server's URL
 	case errors.Is(err, context.DeadlineExceeded):
 		return fmt.Errorf("server %s did not answer in time", c.m.opts.Name)
 	}
@@ -100,7 +103,7 @@ func (c *call) withheld(err error) error {
 
 func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name := req.Params.Name
-	c := m.begin("tools/call", req.Extra, "tool", name)
+	c := m.begin(ctx, "tools/call", req.Extra, "tool", m.logText(name))
 	defer c.end()
 	if !m.opts.Policy.Tools.Allows(name) {
 		c.outcome = outcomeDenied
@@ -143,7 +146,7 @@ func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.C
 
 func (m *Mirror) getPrompt(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 	name := req.Params.Name
-	c := m.begin("prompts/get", req.Extra, "prompt", name)
+	c := m.begin(ctx, "prompts/get", req.Extra, "prompt", m.logText(name))
 	defer c.end()
 	if !m.opts.Policy.Prompts.Allows(name) {
 		c.outcome = outcomeDenied
@@ -169,7 +172,7 @@ func (m *Mirror) getPrompt(ctx context.Context, req *mcp.GetPromptRequest) (*mcp
 
 func (m *Mirror) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	uri := req.Params.URI
-	c := m.begin("resources/read", req.Extra, "uri", m.logText(uri))
+	c := m.begin(ctx, "resources/read", req.Extra, "uri", m.logText(uri))
 	defer c.end()
 	if !m.opts.Policy.ReadAllowed(uri) {
 		c.outcome = outcomeDenied
@@ -291,4 +294,45 @@ func reservedMetaKey(k string) bool {
 		}
 	}
 	return false
+}
+
+// reachedKey marks, in a request's context, whether the request reached a mirror handler.
+type reachedKey struct{}
+
+// receive is the mirror server's receiving middleware. It answers a request whose handling
+// panics with an internal error, logging only the panic's type, since the SDK handles requests
+// on goroutines of its own that nothing else recovers. It also writes the audit line of a tool
+// call or prompt get that the SDK refuses before a handler runs, such as one of a tool the
+// policy hides.
+func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
+		defer func() {
+			if v := recover(); v != nil {
+				m.logger.Error("request handler panicked", "method", method, "type", fmt.Sprintf("%T", v))
+				res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "mcp-gate: internal error"}
+			}
+		}()
+		var key, name string
+		switch r := req.(type) {
+		case *mcp.CallToolRequest:
+			if r.Params != nil {
+				key, name = "tool", r.Params.Name
+			}
+		case *mcp.GetPromptRequest:
+			if r.Params != nil {
+				key, name = "prompt", r.Params.Name
+			}
+		}
+		if key == "" {
+			return next(ctx, method, req)
+		}
+		reached := new(bool)
+		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
+		if err != nil && !*reached {
+			c := m.begin(ctx, method, req.GetExtra(), key, m.logText(name))
+			c.outcome = outcomeDenied
+			c.end()
+		}
+		return res, err
+	}
 }

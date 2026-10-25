@@ -2,11 +2,13 @@ package gate_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -142,5 +144,37 @@ func TestCompareWithHub(t *testing.T) {
 	}
 	if ca.Counts() != "2 tools, 1 prompt, 1 resource, 1 resource template" {
 		t.Errorf("counts %s", ca.Counts())
+	}
+}
+
+// TestShutdown checks that a listening client does not hold the shutdown, and that a call in
+// flight finishes within the grace period with its progress.
+func TestShutdown(t *testing.T) {
+	r := startGate(t, configDoc("", map[string]string{"s": stdioServer(t, testkit.Fake{}, "")}), gateOpts{})
+	r.waitReady(t, "s")
+	_ = r.connect(t, "s", clientOpts{version: "2026-07-28", changed: func() {}})
+	var progress atomic.Int32
+	cs := r.connect(t, "s", clientOpts{version: "2026-07-28", progress: func(*mcp.ProgressNotificationClientRequest) { progress.Add(1) }})
+	done := make(chan error, 1)
+	go func() {
+		params := &mcp.CallToolParams{Name: "progress", Arguments: map[string]any{"steps": 10, "ms": 100}}
+		params.SetProgressToken("p")
+		_, err := cs.CallTool(context.Background(), params)
+		done <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	r.stop()
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("shutdown took %s", d)
+	}
+	if err := <-done; err != nil {
+		t.Errorf("the call in flight failed: %v", err)
+	}
+	if progress.Load() < 8 {
+		t.Errorf("progress during the shutdown: %d", progress.Load())
+	}
+	if lines := r.logs.lines("calls still running at shutdown are cut off"); len(lines) != 0 {
+		t.Errorf("cut off: %v", lines)
 	}
 }

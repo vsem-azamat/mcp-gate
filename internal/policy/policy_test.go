@@ -48,18 +48,27 @@ func TestFilters(t *testing.T) {
 
 func TestNormalizeURI(t *testing.T) {
 	for in, want := range map[string]string{
-		"test://echo/private":       "test://echo/private",
-		"TEST://Echo/Private":       "test://echo/Private",
-		"test://echo/%70rivate":     "test://echo/private",
-		"test://echo/%2fprivate":    "test://echo/%2Fprivate",
-		"test://echo/private#frag":  "test://echo/private",
-		"test://echo/%7%30":         "test://echo/p",           // decoding formed %70
-		"test://echo/%257%30rivate": "test://echo/%2570rivate", // %25 is a literal percent
-		"urn:Example:Thing":         "urn:Example:Thing",
-		"no-scheme/path":            "no-scheme/path",
-		"test://host?q=%41":         "test://host?q=A",
-		"":                          "",
-		"%":                         "%",
+		"test://echo/private":        "test://echo/private",
+		"TEST://Echo/Private":        "test://echo/Private",
+		"test://echo/%70rivate":      "test://echo/private",
+		"test://echo/%2fprivate":     "test://echo/private",
+		"test://echo/private#frag":   "test://echo/private",
+		"test://echo/private?":       "test://echo/private",
+		"test://echo/private?a=1":    "test://echo/private",
+		"test://echo/private/":       "test://echo/private",
+		"test://echo/private;v=1":    "test://echo/private",
+		"test://echo/./private":      "test://echo/private",
+		"test://echo//private":       "test://echo/private",
+		"test://echo/x/../private":   "test://echo/private",
+		"test://echo/x%2F..%2F%70ri": "test://echo/pri",
+		"test://echo/%7%30":          "test://echo/p", // decoding formed %70
+		"test://echo/%2570":          "test://echo/p",
+		"file:///etc/./notes":        "file:///etc/notes",
+		"urn:Example:Thing":          "urn:Example:Thing",
+		"no-scheme/path":             "no-scheme/path",
+		"test://host":                "test://host",
+		"":                           "",
+		"%":                          "%",
 	} {
 		if got := NormalizeURI(in); got != want {
 			t.Errorf("NormalizeURI(%q) = %q, want %q", in, got, want)
@@ -71,14 +80,20 @@ func TestReadAllowed(t *testing.T) {
 	deny := New(&config.Server{Resources: &config.Filter{Deny: []string{"fake://listed"}}})
 	deny.SetHiddenResources([]string{"fake://hidden"})
 	for uri, want := range map[string]bool{
-		"fake://listed":    false,
-		"FAKE://listed":    false,
-		"fake://hidden":    false,
-		"fake://%68idden":  false,
-		"fake://hidden#x":  false,
-		"fake://other":     true,
-		"fake://HIDDEN":    false, // the host is not case-sensitive
-		"fake://items/one": true,
+		"fake://listed":      false,
+		"FAKE://listed":      false,
+		"fake://hidden":      false,
+		"fake://%68idden":    false,
+		"fake://hidden#x":    false,
+		"fake://other":       true,
+		"fake://HIDDEN":      false, // the host is not case-sensitive
+		"fake://items/one":   true,
+		"fake://hidden/":     false,
+		"fake://hidden?":     false,
+		"fake://./hidden":    false,
+		"fake://x/../hidden": false,
+		"fake://hidden%2F":   false,
+		"fake://hidden;":     false,
 	} {
 		if got := deny.ReadAllowed(uri); got != want {
 			t.Errorf("deny list: ReadAllowed(%q) = %v, want %v", uri, got, want)

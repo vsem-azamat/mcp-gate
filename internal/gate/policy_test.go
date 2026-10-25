@@ -61,6 +61,13 @@ func TestFilters(t *testing.T) {
 	if _, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "env"}); err == nil {
 		t.Error("allow: a filtered tool was called")
 	}
+	denied := false
+	for _, l := range r.logs.lines("call") {
+		denied = denied || l["server"] == "allow" && l["tool"] == "env" && l["outcome"] == "denied" && l["principal"] == "laptop"
+	}
+	if !denied {
+		t.Error("allow: no audit line for the filtered tool")
+	}
 	caps := cs.InitializeResult().Capabilities
 	if caps.Prompts != nil || caps.Resources == nil || caps.Logging != nil || //nolint:staticcheck // the mirror must not advertise logging
 		caps.Resources.Subscribe {
@@ -88,7 +95,7 @@ func TestFilters(t *testing.T) {
 	}
 	// fake://hidden is not listed, and a read of it through the fake://{+path} template, in any
 	// spelling, is refused too.
-	for _, uri := range []string{"fake://hidden", "FAKE://hidden", "fake://%68idden", "fake://hidden#x"} {
+	for _, uri := range []string{"fake://hidden", "FAKE://hidden", "fake://%68idden", "fake://hidden#x", "fake://hidden/", "fake://hidden?", "fake://x/../hidden"} {
 		if _, err := cs.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: uri}); err == nil {
 			t.Errorf("deny: read %s", uri)
 		}

@@ -138,7 +138,7 @@ func AllowHosts(hosts []string, next http.Handler) http.Handler {
 			name = h
 		}
 		for _, allowed := range hosts {
-			if strings.EqualFold(allowed, r.Host) || strings.EqualFold(allowed, name) {
+			if strings.EqualFold(allowed, r.Host) || strings.EqualFold(strings.Trim(allowed, "[]"), name) {
 				next.ServeHTTP(w, r)
 				return
 			}

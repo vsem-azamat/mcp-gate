@@ -87,13 +87,14 @@ func TestRequireToken(t *testing.T) {
 
 func TestAllowHosts(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	h := AllowHosts([]string{"mcp.example.com", "other.example.com:8443"}, next)
+	h := AllowHosts([]string{"mcp.example.com", "other.example.com:8443", "[::1]"}, next)
 	for host, want := range map[string]int{
 		"mcp.example.com":        http.StatusNoContent,
 		"MCP.example.com:443":    http.StatusNoContent,
 		"other.example.com:8443": http.StatusNoContent,
 		"other.example.com":      http.StatusForbidden,
 		"evil.example.com":       http.StatusForbidden,
+		"[::1]:9090":             http.StatusNoContent,
 	} {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/s/mcp", nil)
 		req.Host = host

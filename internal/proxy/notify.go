@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -41,16 +42,18 @@ func (m *Mirror) notifyLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case e := <-m.events:
-			switch {
-			case e.progress != nil:
-				p := *e.progress
-				if p.Message != "" {
-					p.Message = m.scrub(p.Message)
+			safely(m.logger, "notification", func() {
+				switch {
+				case e.progress != nil:
+					p := *e.progress
+					if p.Message != "" {
+						p.Message = m.scrub(p.Message)
+					}
+					m.progress.deliver(&p)
+				case e.log != nil:
+					m.logMessage(ctx, e.log)
 				}
-				m.progress.deliver(&p)
-			case e.log != nil:
-				m.logMessage(ctx, e.log)
-			}
+			})
 		}
 	}
 }
@@ -152,9 +155,11 @@ func (s *progressSink) run(logger *slog.Logger) {
 			continue
 		}
 		up := &mcp.ProgressNotificationParams{ProgressToken: s.token, Progress: p.Progress, Total: p.Total, Message: p.Message}
-		if err := s.ss.NotifyProgress(s.ctx, up); err != nil {
-			logger.Debug("progress not delivered", "error", err.Error())
-		}
+		safely(logger, "progress", func() {
+			if err := s.ss.NotifyProgress(s.ctx, up); err != nil {
+				logger.Debug("progress not delivered", "error", err.Error())
+			}
+		})
 	}
 }
 
@@ -186,4 +191,15 @@ type countingReplacer struct {
 func (r *countingReplacer) Replace(f redact.Finding) string {
 	r.n.n.Add(1)
 	return r.next.Replace(f)
+}
+
+// safely runs fn and logs a panic in it by type, so that one bad notification does not end the
+// gate.
+func safely(logger *slog.Logger, what string, fn func()) {
+	defer func() {
+		if v := recover(); v != nil {
+			logger.Error("panic while handling a "+what, "type", fmt.Sprintf("%T", v))
+		}
+	}()
+	fn()
 }
