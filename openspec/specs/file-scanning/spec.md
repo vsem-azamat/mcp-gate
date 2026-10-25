@@ -1,0 +1,74 @@
+# file-scanning Specification
+
+## Purpose
+
+Some tools download a file to the gate's host and report its local path instead of returning its content, so its secrets would never pass through result redaction. File scanning reads the files that a server's download tools write, after their results are redacted, and withholds from the result every file that holds secrets: the path is replaced by a marker, and the file is kept in the escrow when it is on. Only files the tool wrote under the configured roots during the call are read, so that neither a client nor a server can make the gate read another file.
+
+## Requirements
+
+### Requirement: File tools
+
+File scanning SHALL apply to the tools listed in a server's `redact.files.tools`, on a server whose results are redacted, and only to results that are not tool errors. It SHALL run after the result is redacted.
+
+#### Scenario: Other tools
+
+- **WHEN** a tool that is not a file tool reports a path to a file with secrets
+- **THEN** its result passes as redaction left it
+
+### Requirement: Paths
+
+The paths of a call SHALL be the absolute paths in its result and arguments: string members named `path`, `file_path`, `filePath`, `outputPath`, `output_path`, `localPath`, `local_path`, `savedTo` or `saved_to` of the structured content, of text content that is JSON, and of the arguments, at a depth of at most 8; strings starting with `file://` (percent-decoded) among them; the URIs of resource links and embedded resources; and the path after `downloaded to`, `saved to` or `written to` in text content, quoted or starting with `/`. Trailing `.`, `,` and `;` SHALL be dropped, and relative paths ignored. A call that names more than 64 paths SHALL withhold its result (see Failing closed).
+
+A path SHALL be read only when, with every symlink resolved, it lies strictly under one of `redact.files.roots` (also resolved) and names a regular file with one link whose inode changed at or after the call started; for a path that only the arguments name, at or after the start, and for one the result names, 2 seconds before it. The file SHALL be opened through its root without following a symlink, and every check SHALL run on the opened file. Any other path SHALL be passed over: it names no file this call wrote. A path that does not exist SHALL be passed over; one written under a root whose symlinks cannot be resolved for another reason (such as a directory it cannot enter) SHALL fail.
+
+#### Scenario: Paths a caller or server cannot use
+
+- **WHEN** a file tool names a file outside the roots, a symlink inside a root that leads out of it, a file with a second hard link, a file whose inode predates the call, a directory or a missing file
+- **THEN** none is read and the result is unchanged
+
+#### Scenario: Ways to report a path
+
+- **WHEN** a file tool reports a path as `Media downloaded to <path>.`, as a `path` member of structured content, nested in a member of an object, or as a `file://` resource link
+- **THEN** each file is scanned
+
+### Requirement: Scanning
+
+A file whose name ends in `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx` or `.ppk` SHALL count as holding a `secret_file`. A file SHALL be scanned as text when its name marks text (`.env` files, `id_*` keys, names with `kubeconfig`, `credentials`, `secret` or `secrets`, and the extensions `pem`, `key`, `json`, `yaml`, `yml`, `toml`, `ini`, `conf`, `cfg`, `properties`, `txt`, `log`, `sh`, `xml`, `csv`, `md`, `tf` and `tfvars`) or its first 8 KiB hold no NUL and are UTF-8 (allowing a character cut at the end); any other file is binary and SHALL pass. Text SHALL be scanned with the server's redaction engine, as JSON when it is a JSON document, and the kinds found SHALL be reported. At most two files SHALL be read at once in the process.
+
+#### Scenario: Binary file
+
+- **WHEN** a file tool writes a JPEG that holds a password string
+- **THEN** the result is unchanged
+
+### Requirement: Withholding
+
+A file with secrets SHALL be withheld: kept in the escrow when it is on, and every content block whose text, URI or embedded resource text mentions its path (as reported, cleaned or resolved) SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
+
+#### Scenario: File with a password
+
+- **WHEN** a file tool writes `DB_PASSWORD=hunter2!x` to a file under a root and reports its path in text and in structured content
+- **THEN** the client sees neither the path nor the content, the text names the file and `contains: password` with a `[REDACTED:file #<handle>]` marker, the structured `path` is the marker, and the escrow returns the file's bytes for the handle
+
+#### Scenario: Without an escrow
+
+- **WHEN** the same happens with the escrow off
+- **THEN** the marker is `[REDACTED:file]`
+
+### Requirement: Failing closed
+
+When a file that is to be scanned cannot be, the whole result SHALL be withheld, as a result that cannot be redacted is: the client gets an error saying the result was withheld, and the audit outcome is `withheld`. That covers a call naming more than 64 paths, a path under a root that cannot be resolved, a file under a root that cannot be opened (other than missing or a symlink) or checked, a text or credential-store file larger than `redact.files.maxBytes` (default `20MiB`; for a larger file only the first 8 KiB decide whether it is binary), a read error, a size that changes while it is read, text that is not valid UTF-8, the call ending before the file was read, and a panic. The error and the log SHALL NOT name the file's path or quote its content.
+
+#### Scenario: Too large
+
+- **WHEN** a file tool writes a 2600-byte log file and `maxBytes` is `1KiB`
+- **THEN** the call fails with an error saying the result was withheld, and the audit outcome is `withheld`
+
+#### Scenario: Large binary
+
+- **WHEN** a file tool writes a video larger than `maxBytes`
+- **THEN** the result is unchanged
+
+#### Scenario: Not UTF-8
+
+- **WHEN** a file tool writes a `.txt` file in Latin-1
+- **THEN** the call fails with the result withheld

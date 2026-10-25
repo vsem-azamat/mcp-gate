@@ -5,6 +5,7 @@ package gate
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/escrow"
+	"github.com/vsem-azamat/mcp-gate/internal/filescan"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
@@ -47,9 +50,12 @@ type Options struct {
 	StateDir string
 	Version  string
 	Logger   *slog.Logger
-	// Replacer, if set, returns the replacer for a server's redaction findings; nil writes
-	// [REDACTED:<kind>] markers.
-	Replacer func(server string) redact.Replacer
+	// EscrowKeyHash, if set, is the SHA-256 of the escrow API key: the escrow is on, results'
+	// findings are kept in it and /_escrow/ serves them.
+	EscrowKeyHash *[sha256.Size]byte
+	// Replacer, if set, returns the replacer for the findings in one call's result, in place of
+	// the escrow's or the [REDACTED:<kind>] marker; for tests.
+	Replacer func(server string, req proxy.Request) redact.Replacer
 	// Tune, if set, adjusts each server's supervisor options; for tests.
 	Tune func(*downstream.Options)
 }
@@ -61,6 +67,7 @@ type Gate struct {
 	logger  *slog.Logger
 	names   []string // enabled servers, sorted
 	servers map[string]*server
+	escrow  *escrow.Escrow // nil when off
 	mux     *http.ServeMux
 	srv     *http.Server
 	pins    *pinStore
@@ -99,6 +106,17 @@ func New(opts Options) (*Gate, error) {
 	remote := upstream.NewRemote(cfg.Listen.BehindProxy, trusted)
 	if cfg.Listen.BehindProxy && len(cfg.Listen.AllowedHosts) == 0 {
 		g.logger.Warn("listen.behindProxy is set without listen.allowedHosts: no Host is checked, so the proxy must check it")
+	}
+	if opts.EscrowKeyHash != nil {
+		// The API answers on the listener ahead of every MCP route check (Host, tokens), as the
+		// contract it keeps was served; its own key and failed-auth limit guard it.
+		g.escrow = escrow.New(escrow.Options{
+			KeyHash: *opts.EscrowKeyHash, MaxEntries: cfg.Escrow.MaxEntries, Remote: remote, Logger: g.logger,
+		})
+		g.mux.Handle(escrow.Route, upstream.Recover(g.logger, "_escrow", g.escrow.Handler()))
+		g.logger.Info("secret escrow enabled", "route", escrow.Route, "maxEntries", g.escrow.MaxEntries())
+	} else {
+		g.logger.Info("secret escrow disabled", "reason", escrow.KeyHashEnv+" is not set")
 	}
 	all := make([]string, 0, len(cfg.Servers))
 	for name := range cfg.Servers {
@@ -141,15 +159,26 @@ func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
 		if err != nil {
 			return nil, err
 		}
-		var replacer redact.Replacer
-		if g.opts.Replacer != nil {
-			replacer = g.opts.Replacer(name)
+		redaction = proxy.NewRedaction(engine, g.replacer(name, s), int(*s.MaxMessageBytes))
+	}
+	var files proxy.FileScanner
+	if f := s.Redact.Files; f != nil && engine != nil {
+		o := filescan.Options{
+			Server: name, Tools: f.Tools, Roots: f.Roots, MaxBytes: int64(*f.MaxBytes),
+			TTL: s.Redact.EscrowTTL.D(), Engine: engine, Logger: g.logger.With("server", name),
 		}
-		redaction = proxy.NewRedaction(engine, replacer, int(*s.MaxMessageBytes))
+		if g.escrow != nil {
+			o.Keep = g.escrow.KeepFile
+		}
+		sc := filescan.New(o)
+		if missing := sc.MissingRoots(); len(missing) > 0 {
+			g.logger.Warn("file roots do not exist yet; files written elsewhere are not scanned", "server", name, "roots", len(missing))
+		}
+		files = sc
 	}
 	mirror := proxy.New(proxy.Options{
 		Name: name, Version: g.opts.Version, Policy: policy.New(s), ForwardMeta: s.ForwardMeta,
-		Redaction: redaction, Logger: g.logger,
+		Redaction: redaction, Files: files, Logger: g.logger,
 	})
 	o := DownstreamOptions(g.cfg, name, s, g.opts.Environ, g.opts.Version, g.logger)
 	o.Redactor = engine
@@ -170,6 +199,26 @@ func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
 	}
 	mirror.Attach(sup)
 	return &server{name: name, cfg: s, sup: sup, mirror: mirror}, nil
+}
+
+// replacer returns what replaces the findings in a server's results: the test hook, the escrow's
+// markers, or nil for the plain marker.
+func (g *Gate) replacer(name string, s *config.Server) proxy.ReplacerFunc {
+	switch {
+	case g.opts.Replacer != nil:
+		return func(r proxy.Request) redact.Replacer {
+			if rep := g.opts.Replacer(name, r); rep != nil {
+				return rep
+			}
+			return redact.Marker{}
+		}
+	case g.escrow != nil:
+		ttl := s.Redact.EscrowTTL.D()
+		return func(r proxy.Request) redact.Replacer {
+			return g.escrow.Replacer(escrow.Source{Server: name, Tool: r.Name, TTL: ttl, Arguments: r.Arguments})
+		}
+	}
+	return nil
 }
 
 // DownstreamOptions turns a server's config into supervisor options.
@@ -284,6 +333,13 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 		// progress. shutdown closes it.
 		s.mirror.Start(context.WithoutCancel(ctx))
 		s.sup.Start(ctx)
+	}
+	var sweeper sync.WaitGroup
+	defer sweeper.Wait()
+	sweep, stopSweep := context.WithCancel(ctx)
+	defer stopSweep()
+	if g.escrow != nil {
+		sweeper.Go(func() { g.escrow.Run(sweep) })
 	}
 	served := make(chan error, 1)
 	go func() { served <- g.srv.Serve(ln) }()

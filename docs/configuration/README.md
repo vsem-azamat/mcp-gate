@@ -21,6 +21,9 @@ auth:
   tokens: {laptop: "${GATE_TOKEN_LAPTOP}", phone: "${GATE_TOKEN_PHONE}"}
 admin:
   tokens: {owner: "${GATE_ADMIN_TOKEN}"}
+escrow:
+  ttl: 24h
+  maxEntries: 1000
 servers:
   notes:
     stdio:
@@ -32,7 +35,10 @@ servers:
     callTimeout: 3m
     tools: {allow: [search, read_note]}
     prompts: {allow: []}
-    redact: {ru: true}
+    redact:
+      ru: true
+      escrowTTL: 1h
+      files: {tools: [download_attachment], roots: [/srv/notes/downloads], maxBytes: 20MiB}
     log: {requests: true}
   shop:
     http:
@@ -62,6 +68,8 @@ servers:
 | `logLevel` | `info` | `debug`, `info`, `warn` or `error`; `debug` adds the servers' own log messages |
 | `auth.tokens` | none | Client tokens by name, accepted by every server that inherits them. The name identifies the caller in the audit log |
 | `admin.tokens` | none | Tokens by name that may read `/_status`; without them `/_status` is 404 |
+| `escrow.ttl` | `24h` | How long the escrow keeps a secret, unless its server sets `redact.escrowTTL`. The escrow is on only when `MCP_HUB_ESCROW_KEY_SHA256` is set (see [serve](../commands/serve.md#escrow)) |
+| `escrow.maxEntries` | `1000` | Most secrets and files kept at once, up to 100000; the oldest is evicted |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |
@@ -87,6 +95,10 @@ servers:
 | `redact.ru` | `false` | Add the Russian label rules |
 | `redact.highEntropy` | `false` | Add the high-entropy rule |
 | `redact.disableRules` | none | Redaction kinds never reported, such as `jwt` |
+| `redact.escrowTTL` | `escrow.ttl` | How long the escrow keeps this server's secrets |
+| `redact.files.tools` | required with `files` | Tools that save a file locally and report its path; the files they write are scanned and withheld when they hold secrets. Needs `redact.enabled` |
+| `redact.files.roots` | required with `files` | Absolute directories the tools write to (not `/`); only files under them, written during the call, are read |
+| `redact.files.maxBytes` | `20MiB` | Largest file scanned, `1KiB` to `1GiB`. A larger text file withholds the whole result; a larger binary file passes |
 | `forwardMeta` | none | `_meta` keys of a client request passed to the server, by exact name, such as `example.com/trace`. Others are dropped: they describe the client. `progressToken` and `mcp`/`modelcontextprotocol`-prefixed keys are the gate's and cannot be listed |
 
 Each server has exactly one of `stdio` and `http`. Every server that is not `public` must accept at least one token, and no two tokens a server accepts may have the same value. Token names are lower-case letters, digits, `.`, `_` and `-`; values may not contain spaces or control characters.

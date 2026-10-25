@@ -83,9 +83,9 @@ func TestCheckConnect(t *testing.T) {
 	r := runCmd(t, noEnv, "check", "-connect", "-timeout", "20s", path)
 	want := []string{
 		"legacy: ready, protocol 2025-11-25 (pinned automatically",
-		"local: ready, protocol 2025-06-18, 12 tools",
+		"local: ready, protocol 2025-06-18, 13 tools",
 		"off: disabled",
-		"remote: ready, protocol 2026-07-28, 12 tools",
+		"remote: ready, protocol 2026-07-28, 13 tools",
 	}
 	for _, w := range want {
 		if !strings.Contains(r.stdout, w) {
@@ -109,7 +109,8 @@ func TestCheckConnectFailure(t *testing.T) {
 const proxyConfig = `{
   "mcpProxy": {"name": "hub", "type": "streamable-http", "options": {"authTokens": ["${TOKEN_A}"], "redact": {"enabled": true, "escrowTTL": "1h"}}},
   "mcpServers": {
-    "notes": {"command": "/usr/bin/env", "args": ["-u", "TOKEN_A", "notes-server"], "timeout": "90s"}
+    "notes": {"command": "/usr/bin/env", "args": ["-u", "TOKEN_A", "notes-server"], "timeout": "90s"},
+    "shop": {"url": "https://shop.example.com/mcp", "transportType": "streamable-http", "oauth": {}}
   }
 }`
 
@@ -117,12 +118,13 @@ func TestImport(t *testing.T) {
 	t.Parallel()
 	path := writeFile(t, "config.json", proxyConfig)
 	r := runCmd(t, noEnv, "import", path)
-	if r.code != exitUsage || !strings.Contains(r.stderr, "mcpProxy.options.redact.escrowTTL") || r.stdout != "" {
+	if r.code != exitUsage || !strings.Contains(r.stderr, "mcpServers.shop.oauth") || r.stdout != "" {
 		t.Errorf("import without -partial = %+v", r)
 	}
 	r = runCmd(t, noEnv, "import", "-partial", path)
-	if r.code != exitOK || !strings.Contains(r.stderr, "dropped, not implemented: mcpProxy.options.redact.escrowTTL") ||
-		!strings.Contains(r.stdout, "command: notes-server") || !strings.Contains(r.stdout, config.PartialMarker) {
+	if r.code != exitOK || !strings.Contains(r.stderr, "dropped, not implemented: mcpServers.shop.oauth") ||
+		!strings.Contains(r.stdout, "command: notes-server") || !strings.Contains(r.stdout, "escrow:\n  ttl: 1h") ||
+		!strings.Contains(r.stdout, config.PartialMarker) {
 		t.Fatalf("import -partial = %+v", r)
 	}
 	gate := writeFile(t, "gate.yaml", r.stdout)

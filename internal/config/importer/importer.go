@@ -101,6 +101,9 @@ type document struct {
 	tokens  []string          // the global client tokens, converted
 	names   map[string]string // token value to token name
 	servers []*server
+	// escrowTTL and maxEntries are the global escrow settings.
+	escrowTTL  *time.Duration
+	maxEntries int64
 }
 
 type server struct {
@@ -139,6 +142,10 @@ type options struct {
 type redactBlock struct {
 	present, enabled, highEntropy bool
 	disableRules                  []string
+	escrowTTL                     *time.Duration
+	maxEntries                    int64 // escrowMaxEntries, read from the global block only
+	files                         *config.Files
+	path                          string // of the block in the input
 }
 
 func (im *importer) root(v any) (*document, error) {
@@ -164,6 +171,9 @@ func (im *importer) root(v any) (*document, error) {
 	global, err := im.proxy(proxy, doc)
 	if err != nil {
 		return nil, err
+	}
+	if r := global.redact; r != nil {
+		doc.escrowTTL, doc.maxEntries = r.escrowTTL, r.maxEntries
 	}
 	servers, err := root.object("mcpServers")
 	if err != nil {

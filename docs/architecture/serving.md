@@ -22,6 +22,8 @@ client ─POST /<name>/mcp─▶ Recover ─▶ LogRequests (log.requests) ─�
    ─▶ Supervisor.Call ─▶ downstream ClientSession
 ```
 
+`/_healthz`, `/_readyz`, `/_status` and, with the escrow on, `/_escrow/` are separate handlers on the same mux, outside this chain (see [Escrow and file scanning](escrow.md)).
+
 The upstream side is the SDK's streamable HTTP handler in stateless mode, with `PropagateRequestCancellation`: every POST gets a fresh `ServerSession` over the mirror's one `*mcp.Server`, and the handler's context ends with the POST. Nothing about a client is kept between requests, so any number of clients share the one downstream session that the supervisor keeps. The listener has no read timeout, since net/http would cancel a long call's context when it passes; `ReadBody` reads the body under its own deadline and clears it.
 
 `RequireToken` checks the `Authorization` header against SHA-256 digests of the route's tokens, every one compared in constant time, and hands the token's name to the SDK's bearer middleware as the `TokenInfo` user, where the handlers read it for the audit line.
@@ -36,7 +38,7 @@ A forwarded call builds the downstream `_meta` (`downstreamMeta`: only the serve
 
 Downstream notifications arrive from the SDK one at a time on the session's reader, so the handlers only enqueue (64 deep, counting what they drop) and one worker per mirror delivers progress and logs the server's log messages.
 
-Results go through `mcpredact` with the server's engine and a replacer: `redact.Marker` by default, or what `gate.Options.Replacer` returns for the server, which is where a replacer that keeps values plugs in. Each call counts its findings through a wrapping replacer for the audit line.
+Results go through `mcpredact` with the server's engine and the replacer that the server's `proxy.ReplacerFunc` returns for the call: `redact.Marker` by default, the escrow's with the escrow on, or what `gate.Options.Replacer` returns in tests. The function gets a `proxy.Request` with the method, the name and the arguments, which a replacer that keeps values records as the source. Each call counts its findings through a wrapping replacer for the audit line. A tool result then goes through the server's file scanner, if it has one.
 
 The mirror's receiving middleware recovers panics in request handling, which the SDK runs on goroutines of its own, and writes the audit line of a tool call or prompt get that the SDK refuses before a handler runs (an unknown or filtered name); a context value tells whether a handler was reached. The notification worker and the progress sinks recover their own panics.
 

@@ -55,7 +55,9 @@ type Options struct {
 	ForwardMeta []string
 	// Redaction redacts results; nil passes them unchanged.
 	Redaction *Redaction
-	Logger    *slog.Logger
+	// Files, if set, scans the files tool calls write, after their results are redacted.
+	Files  FileScanner
+	Logger *slog.Logger
 }
 
 // kinds of catalog entries, as bits.

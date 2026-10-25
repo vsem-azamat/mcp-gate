@@ -125,6 +125,26 @@ func TestServingDefaults(t *testing.T) {
 	if c.EffectiveTokens("b") != nil {
 		t.Error("a public server has tokens")
 	}
+	if c.Escrow.TTL.D() != DefaultEscrowTTL || c.Escrow.MaxEntries != DefaultEscrowMaxEntries || a.Redact.EscrowTTL.D() != DefaultEscrowTTL || a.Redact.Files != nil {
+		t.Errorf("escrow defaults = %+v, %+v", c.Escrow, a.Redact)
+	}
+}
+
+func TestEscrowKeys(t *testing.T) {
+	t.Parallel()
+	c, err := Parse([]byte("version: 1\nescrow: {ttl: 2h, maxEntries: 50}\nauth: {tokens: {t: secret}}\nservers:\n"+
+		"  a:\n    stdio: {command: srv}\n    redact: {escrowTTL: 30m, files: {tools: [download], roots: [/srv/dl]}}\n"+
+		"  b:\n    stdio: {command: srv}\n    redact: {files: {tools: [download], roots: [/srv/dl], maxBytes: 1MiB}}\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := c.Servers["a"].Redact, c.Servers["b"].Redact
+	if c.Escrow.TTL.D() != 2*time.Hour || c.Escrow.MaxEntries != 50 || a.EscrowTTL.D() != 30*time.Minute || b.EscrowTTL.D() != 2*time.Hour {
+		t.Errorf("ttl = %v, %v, %v; maxEntries %d", c.Escrow.TTL.D(), a.EscrowTTL.D(), b.EscrowTTL.D(), c.Escrow.MaxEntries)
+	}
+	if *a.Files.MaxBytes != DefaultFileMaxBytes || *b.Files.MaxBytes != 1<<20 || !slices.Equal(a.Files.Roots, []string{"/srv/dl"}) {
+		t.Errorf("files = %+v, %+v", a.Files, b.Files)
+	}
 }
 
 func TestServingErrors(t *testing.T) {
@@ -154,7 +174,17 @@ func TestServingErrors(t *testing.T) {
 		{"duplicate meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [x/a, x/a]\n", "servers.a.forwardMeta[1]: is listed twice"},
 		{"progress token", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [progressToken]\n", "servers.a.forwardMeta[0]: is a key mcp-gate sets itself"},
 		{"reserved meta key", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    forwardMeta: [io.modelcontextprotocol/clientInfo]\n", "servers.a.forwardMeta[0]: is a key mcp-gate sets itself"},
-		{"escrow keys", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {fileTools: [x]}\n", "field fileTools not found"},
+		{"proxy file keys", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {fileTools: [x]}\n", "field fileTools not found"},
+		{"zero escrow ttl", "version: 1\nescrow: {ttl: 0s}\nauth: {tokens: {a: s}}\n" + srv, "escrow.ttl: must be positive"},
+		{"many entries", "version: 1\nescrow: {maxEntries: 100001}\nauth: {tokens: {a: s}}\n" + srv, "escrow.maxEntries: must be between"},
+		{"zero server ttl", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {escrowTTL: 0s}\n", "servers.a.redact.escrowTTL: must be positive"},
+		{"files without tools", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [], roots: [/d]}}\n", "servers.a.redact.files.tools: must name"},
+		{"files without roots", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [x]}}\n", "servers.a.redact.files.roots: must name"},
+		{"relative root", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [x], roots: [d]}}\n", "servers.a.redact.files.roots[0]: must be an absolute path"},
+		{"slash root", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [x], roots: [/]}}\n", "servers.a.redact.files.roots[0]: must be an absolute path other than /"},
+		{"twice a tool", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [x, x], roots: [/d]}}\n", "servers.a.redact.files.tools[1]: is listed twice"},
+		{"tiny file limit", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [x], roots: [/d], maxBytes: 10B}}\n", "servers.a.redact.files.maxBytes: must be between"},
+		{"files unredacted", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {enabled: false, files: {tools: [x], roots: [/d]}}\n", "servers.a.redact.files: needs redact.enabled"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

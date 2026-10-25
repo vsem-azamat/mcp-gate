@@ -143,11 +143,6 @@ func TestImportUnimplemented(t *testing.T) {
 		t.Fatalf("err = %v, want an UnimplementedError", err)
 	}
 	want := []string{
-		"mcpProxy.options.redact.escrowMaxEntries",
-		"mcpProxy.options.redact.escrowTTL",
-		"mcpServers.files.options.redact.escrowTTL",
-		"mcpServers.files.options.redact.fileRoots",
-		"mcpServers.files.options.redact.fileTools",
 		"mcpServers.legacy (sse transport)",
 		"mcpServers.mail.oauth",
 	}
@@ -239,6 +234,56 @@ func TestConvertVars(t *testing.T) {
 		var warnings []string
 		if got := convertVars(in, &warnings, "p"); got != want {
 			t.Errorf("convertVars(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestImportEscrowAndFiles(t *testing.T) {
+	t.Parallel()
+	doc := `{
+  "mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${T_A}"],
+    "redact": {"enabled": true, "escrowTTL": "2h", "escrowMaxEntries": 500000, "fileTools": ["dl"], "fileRoots": ["/srv/dl"]}}},
+  "mcpServers": {
+    "inherits": {"command": "a"},
+    "own": {"command": "b", "options": {"redact": {"enabled": true, "escrowTTL": "30m", "escrowMaxEntries": 5,
+      "fileTools": ["get", "get"], "fileRoots": ["/srv/b/", "rel"], "fileMaxBytes": 10}}},
+    "noroots": {"command": "c", "options": {"redact": {"enabled": true, "fileTools": ["get"], "fileRoots": ["rel"]}}},
+    "off": {"command": "d", "options": {"redact": {"enabled": false, "fileTools": ["get"], "fileRoots": ["/srv/d"]}}}
+  }
+}`
+	res, err := Import([]byte(doc), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Parse(res.YAML, anyValue)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, res.YAML)
+	}
+	if c.Escrow.TTL.D().String() != "2h0m0s" || c.Escrow.MaxEntries != config.MaxEscrowEntries {
+		t.Errorf("escrow = %+v", c.Escrow)
+	}
+	in, own := c.Servers["inherits"].Redact, c.Servers["own"].Redact
+	if in.EscrowTTL.D().String() != "2h0m0s" || in.Files == nil || !slices.Equal(in.Files.Tools, []string{"dl"}) {
+		t.Errorf("inherits = %+v %+v", in, in.Files)
+	}
+	if own.EscrowTTL.D().String() != "30m0s" || !slices.Equal(own.Files.Tools, []string{"get"}) ||
+		!slices.Equal(own.Files.Roots, []string{"/srv/b"}) || *own.Files.MaxBytes != config.MinFileMaxBytes {
+		t.Errorf("own = %+v %+v", own, own.Files)
+	}
+	if c.Servers["noroots"].Redact.Files != nil || c.Servers["off"].Redact.Files != nil || *c.Servers["off"].Redact.Enabled {
+		t.Errorf("noroots/off = %+v, %+v", c.Servers["noroots"].Redact, c.Servers["off"].Redact)
+	}
+	warnings := strings.Join(res.Warnings, "\n")
+	for _, want := range []string{
+		"mcpProxy.options.redact.escrowMaxEntries is lowered",
+		"mcpServers.own.options.redact.escrowMaxEntries is dropped",
+		"mcpServers.own.options.redact.fileRoots[1] is dropped",
+		"mcpServers.own.options.redact.fileMaxBytes is moved",
+		"mcpServers.noroots.options.redact.fileTools is dropped",
+		"mcpServers.off: redact has settings but enabled is false",
+	} {
+		if !strings.Contains(warnings, want) {
+			t.Errorf("warnings lack %q:\n%s", want, warnings)
 		}
 	}
 }

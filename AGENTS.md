@@ -63,13 +63,15 @@ This repository is public. Before every commit and PR, check that nothing privat
 | `internal/config/` | Config file: strict YAML, `${VAR}` expansion, defaults, validation |
 | `internal/config/importer/` | Conversion of an mcp-proxy `config.json` for `mcp-gate import` |
 | `internal/downstream/` | Supervisor of one downstream server: stdio line connection, size-limited HTTP client, probes, restarts, version pin, notifications |
+| `internal/escrow/` | Secret escrow: in-memory store, replacer that keeps findings, kept files, the frozen `/_escrow/` HTTP API and its failed-auth limit |
+| `internal/filescan/` | Scanning of the files download tools write: paths, safe opening under roots, withholding, failing closed |
 | `internal/gate/` | `mcp-gate serve` assembled: supervisors, mirrors and routes per server, readiness, `/_status`, learned pins file, shutdown |
 | `internal/policy/` | Tool, prompt and resource filters; URI normalization for resource reads |
 | `internal/proxy/` | Catalog mirror of one server, call forwarding, progress, notification queue, result redaction, audit line |
 | `internal/procutil/` | Child processes: clean environment, process groups, stderr line log, OOM score, non-dumpable gate, subreaper |
 | `internal/redact/` | Redaction engine: rules with priorities, findings, replacers (no MCP or HTTP imports) |
 | `internal/redact/mcpredact/` | Redaction of MCP SDK results and errors, failing closed |
-| `internal/testkit/` | Fake MCP servers for tests: catalog hub, scriptable stdio and HTTP fakes |
+| `internal/testkit/` | Fake MCP servers for tests: catalog hub, scriptable stdio and HTTP fakes; the escrow contract check |
 | `internal/upstream/` | HTTP listener side: limits, named tokens, Host check, request log, health and status handlers |
 | `internal/version/` | Build version and commit |
 | `openspec/specs/` | Behavior specifications, one directory per capability |

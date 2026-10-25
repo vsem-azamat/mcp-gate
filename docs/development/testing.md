@@ -21,9 +21,13 @@
 - `testkit.StdioCommand` returns a command that re-executes the test binary as a stdio MCP server. A package that uses it calls `testkit.RunFake()` first in `TestMain`, which runs the fake and exits when the binary was started that way.
 - `testkit.NewFakeHTTP` serves it over stateless streamable HTTP, optionally with JSON responses or gzip, and `SetDown` makes it answer 503.
 
-Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `hang`, `crash` (the stdio fake exits), `env`, `pids`, `stats` (pings during calls, cancelled calls), `progress` (progress notifications of a given count and size), `meta` (the request's `_meta`), `addtool` (a list change) and `badblob` (a result redaction must withhold). Options narrow the protocol versions, leave `server/discover` unanswered (a legacy server), reject `subscriptions/listen`, handle one request at a time, stop answering after a while, refuse probes with an error reply, serve a prompt, resources and templates, and for stdio exit at start, ignore SIGTERM, start a grandchild in the process group, or write to stderr and stdout.
+Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `hang`, `crash` (the stdio fake exits), `env`, `pids`, `stats` (pings during calls, cancelled calls), `progress` (progress notifications of a given count and size), `meta` (the request's `_meta`), `addtool` (a list change), `badblob` (a result redaction must withhold) and `writefile` (a download tool that writes a file and reports its path). Options narrow the protocol versions, leave `server/discover` unanswered (a legacy server), reject `subscriptions/listen`, handle one request at a time, stop answering after a while, refuse probes with an error reply, serve a prompt, resources and templates, and for stdio exit at start, ignore SIGTERM, start a grandchild in the process group, or write to stderr and stdout.
 
 `internal/downstream` runs the downstream half of the version matrix with them: every protocol version the SDK supports, over stdio, HTTP with event streams and HTTP with JSON. `internal/gate` runs the whole matrix through a running gate: clients of each version against servers of each version, over stdio and HTTP. Its tests start a gate on a loopback port with stdio and HTTP fakes behind it, and `TestCompareWithHub` checks with `compare` that the gate serves the catalog of a fake hub unchanged. `internal/procutil` re-executes its test binary the same way, with its own helper modes.
+
+## Escrow contract
+
+[`testkit.CheckEscrowContract`](../../internal/testkit/escrow.go) checks the escrow HTTP contract against a base URL holding one live entry: the auth scheme, the paths, methods, status codes, bodies and headers, and the meta document's members in order. `internal/escrow` runs it against the bare handler and `internal/gate` against a running gate, with the entry planted by a tool call.
 
 ## Goroutine leaks
 

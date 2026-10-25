@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
 
@@ -38,6 +41,7 @@ type call struct {
 	attrs     []any
 	outcome   string
 	count     *counter
+	req       Request
 }
 
 func (m *Mirror) begin(ctx context.Context, method string, extra *mcp.RequestExtra, attrs ...any) *call {
@@ -91,7 +95,32 @@ func (c *call) downstreamError(ctx context.Context, err error) error {
 }
 
 func (c *call) replacer() *countingReplacer {
-	return &countingReplacer{next: c.m.opts.Redaction.replacer, n: c.count}
+	return &countingReplacer{next: c.m.opts.Redaction.replacer(c.req), n: c.count}
+}
+
+// toolArguments decodes a tool call's arguments once, when first asked for.
+func toolArguments(raw json.RawMessage) func() map[string]any {
+	return sync.OnceValue(func() map[string]any {
+		var args map[string]any
+		if len(raw) == 0 || json.Unmarshal(raw, &args) != nil {
+			return nil
+		}
+		return args
+	})
+}
+
+// promptArguments returns a prompt get's arguments.
+func promptArguments(in map[string]string) func() map[string]any {
+	return sync.OnceValue(func() map[string]any {
+		if len(in) == 0 {
+			return nil
+		}
+		out := make(map[string]any, len(in))
+		for k, v := range in {
+			out[k] = v
+		}
+		return out
+	})
 }
 
 // withheld reports a result that could not be redacted.
@@ -105,6 +134,7 @@ func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.C
 	name := req.Params.Name
 	c := m.begin(ctx, "tools/call", req.Extra, "tool", m.logText(name))
 	defer c.end()
+	c.req = Request{Method: "tools/call", Name: name, Arguments: toolArguments(req.Params.Arguments)}
 	if !m.opts.Policy.Tools.Allows(name) {
 		c.outcome = outcomeDenied
 		return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", name)}
@@ -114,6 +144,7 @@ func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.C
 		params.Arguments = req.Params.Arguments
 	}
 	var res *mcp.CallToolResult
+	start := time.Now()
 	err := m.forward(ctx, req.Session, req.Params.Meta, func(meta mcp.Meta) { params.Meta = meta },
 		func(ctx context.Context, cs *mcp.ClientSession) (err error) {
 			res, err = cs.CallTool(ctx, params)
@@ -137,6 +168,13 @@ func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.C
 		if res, err = r.results.CallToolResult(res, c.replacer()); err != nil {
 			return nil, c.withheld(err)
 		}
+		if f := m.opts.Files; f != nil {
+			var n int
+			if res, n, err = f.Scan(ctx, name, c.req.Arguments, res, start); err != nil {
+				return nil, c.withheld(err)
+			}
+			c.count.n.Add(int64(n))
+		}
 	}
 	if res.IsError {
 		c.outcome = outcomeToolError
@@ -148,6 +186,7 @@ func (m *Mirror) getPrompt(ctx context.Context, req *mcp.GetPromptRequest) (*mcp
 	name := req.Params.Name
 	c := m.begin(ctx, "prompts/get", req.Extra, "prompt", m.logText(name))
 	defer c.end()
+	c.req = Request{Method: "prompts/get", Name: name, Arguments: promptArguments(req.Params.Arguments)}
 	if !m.opts.Policy.Prompts.Allows(name) {
 		c.outcome = outcomeDenied
 		return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown prompt %q", name)}
@@ -174,6 +213,7 @@ func (m *Mirror) readResource(ctx context.Context, req *mcp.ReadResourceRequest)
 	uri := req.Params.URI
 	c := m.begin(ctx, "resources/read", req.Extra, "uri", m.logText(uri))
 	defer c.end()
+	c.req = Request{Method: "resources/read", Name: uri}
 	if !m.opts.Policy.ReadAllowed(uri) {
 		c.outcome = outcomeDenied
 		return nil, mcp.ResourceNotFoundError(uri)
@@ -219,7 +259,7 @@ func (c *call) result(ctx context.Context, err error, empty, needsInput bool) er
 // progress message, even when the server's results are not redacted.
 func (m *Mirror) scrub(s string) string {
 	if r := m.opts.Redaction; r != nil {
-		return r.engine.RedactText(s, r.replacer)
+		return r.engine.RedactText(s, redact.Marker{})
 	}
 	return m.down.ErrorText(errors.New(s))
 }

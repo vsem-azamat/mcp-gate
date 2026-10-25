@@ -3,6 +3,7 @@ package importer
 import (
 	"bytes"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -51,6 +52,16 @@ func (d *document) render(unimplemented []string) ([]byte, error) {
 		a := mapping()
 		add(a, "tokens", d.tokenMap(d.tokens), "")
 		add(root, "auth", a, "")
+	}
+	if d.escrowTTL != nil || d.maxEntries > 0 {
+		e := mapping()
+		if d.escrowTTL != nil {
+			add(e, "ttl", str(config.FormatDuration(*d.escrowTTL)), "mcp-proxy mcpProxy.options.redact.escrowTTL")
+		}
+		if d.maxEntries > 0 {
+			add(e, "maxEntries", scalar(strconv.FormatInt(d.maxEntries, 10), "!!int"), "")
+		}
+		add(root, "escrow", e, "")
 	}
 	servers := mapping()
 	for _, s := range d.servers {
@@ -164,6 +175,20 @@ func (s *server) node(d *document) *yaml.Node {
 		}
 		if len(s.redact.disableRules) > 0 {
 			add(r, "disableRules", strList(s.redact.disableRules), "")
+		}
+		if s.redact.escrowTTL != nil {
+			add(r, "escrowTTL", str(config.FormatDuration(*s.redact.escrowTTL)), "")
+		}
+		if f := s.redact.files; f != nil {
+			m := mapping()
+			tools, roots := strList(f.Tools), strList(f.Roots)
+			tools.Style, roots.Style = yaml.FlowStyle, yaml.FlowStyle
+			add(m, "tools", tools, "")
+			add(m, "roots", roots, "")
+			if f.MaxBytes != nil {
+				add(m, "maxBytes", str(f.MaxBytes.String()), "")
+			}
+			add(r, "files", m, "")
 		}
 	}
 	add(n, "redact", r, "")
