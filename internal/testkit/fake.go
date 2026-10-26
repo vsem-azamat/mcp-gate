@@ -63,7 +63,9 @@ type Fake struct {
 	// Serial handles one request at a time, like a single-threaded server: a ping waits for a
 	// running call.
 	Serial bool `json:"serial,omitempty"`
-	// FreezeAfter, if set, stops answering any request once the server has run that long.
+	// FreezeAfter, if set, stops answering every request but the handshake (initialize and
+	// server/discover) once that long has passed since the server first answered one, so that
+	// each connect completes however slow the machine and what follows goes unanswered.
 	FreezeAfter time.Duration `json:"freezeAfter,omitempty"`
 	// RefuseProbes answers ping and tools/list with a JSON-RPC error.
 	RefuseProbes bool `json:"refuseProbes,omitempty"`
@@ -403,14 +405,21 @@ type fakeStats struct {
 type requestKey struct{}
 
 func behaviour(f Fake, stop <-chan struct{}, st *fakeStats) mcp.Middleware {
-	start := time.Now()
+	var handshake atomic.Int64 // when the handshake was first answered, in Unix nanoseconds
+	frozen := func(method string) bool {
+		if f.FreezeAfter == 0 || method == "initialize" || method == "server/discover" {
+			return false
+		}
+		at := handshake.Load()
+		return at != 0 && time.Since(time.Unix(0, at)) > f.FreezeAfter
+	}
 	var serial sync.Mutex
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if strings.HasPrefix(method, "notifications/") {
 				return next(ctx, method, req)
 			}
-			if (f.SilentDiscover && method == "server/discover") || (f.FreezeAfter > 0 && time.Since(start) > f.FreezeAfter) {
+			if (f.SilentDiscover && method == "server/discover") || frozen(method) {
 				return nil, unanswered(ctx, stop)
 			}
 			switch {
@@ -434,6 +443,9 @@ func behaviour(f Fake, stop <-chan struct{}, st *fakeStats) mcp.Middleware {
 			if f.Serial {
 				serial.Lock()
 				defer serial.Unlock()
+			}
+			if method == "initialize" || method == "server/discover" {
+				defer func() { handshake.CompareAndSwap(0, time.Now().UnixNano()) }()
 			}
 			return next(ctx, method, req)
 		}
