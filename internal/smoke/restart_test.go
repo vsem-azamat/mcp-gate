@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -332,7 +333,7 @@ servers:
 		t.Errorf("pids: %v", err)
 	case pids.Sockets < 0:
 		t.Error("the stdio server cannot list its descriptors")
-	case pids.Sockets > 0:
+	case pids.Sockets > 0 && runtime.GOOS == "linux": // elsewhere the child's stdio may be socket pairs
 		t.Errorf("the stdio server has %d sockets open", pids.Sockets)
 	}
 	env := callText(t, slowSession, "env", nil)
