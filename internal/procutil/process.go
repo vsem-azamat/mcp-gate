@@ -177,7 +177,17 @@ func (p *Process) stop(grace time.Duration) error {
 	return nil
 }
 
+// signal sends sig to the process group. Once the leader is reaped, its PID stays reserved only
+// while a member of its group is left; when none is, the PID may already belong to an unrelated
+// process, so nothing is sent.
 func (p *Process) signal(sig syscall.Signal) {
+	select {
+	case <-p.done:
+		if groupGone(p.pid) {
+			return
+		}
+	default:
+	}
 	_ = syscall.Kill(-p.pid, sig)
 }
 
