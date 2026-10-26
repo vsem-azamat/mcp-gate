@@ -73,6 +73,11 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 		_, _ = fmt.Fprintln(stderr, "mcp-gate serve: name one config file")
 		return exitUsage
 	}
+	// Before anything else: SIGHUP would otherwise end the process. One that arrives before the
+	// servers are started is applied once they are.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	cfg, err := config.Load(fs.Arg(0), config.LookupFunc(env))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcp-gate serve: %s:\n  %s\n", fs.Arg(0), strings.ReplaceAll(err.Error(), "\n", "\n  "))
@@ -83,10 +88,6 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 	levelVar := new(slog.LevelVar)
 	levelVar.Set(level)
 	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: levelVar}))
-	// Taken from the start: SIGHUP would otherwise end the process.
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
 	if err := procutil.SetNonDumpable(); err != nil {
 		logger.Warn("cannot make the process non-dumpable", "error", err.Error())
 	}
@@ -112,7 +113,7 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 	}
 	notify := func(state string) {
 		if err := notifier.Notify(state); err != nil {
-			logger.Warn("cannot notify systemd", "error", err.Error())
+			logger.Warn("cannot notify systemd", "state", state, "error", err.Error())
 		}
 	}
 	g, err := gate.New(gate.Options{
@@ -160,6 +161,10 @@ func reload(ctx context.Context, g *gate.Gate, path string, env lookupEnv, logge
 		called = true
 		logger.Info("reloading the config", "path", path)
 		cfg, err := config.Load(path, config.LookupFunc(env))
+		if err == nil {
+			// As at the start and in check: a key hash that cannot be resolved fails the config.
+			_, err = escrowKey(cfg, env)
+		}
 		loaded = err == nil
 		return cfg, err
 	})

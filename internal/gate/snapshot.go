@@ -1,13 +1,17 @@
 package gate
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -59,13 +63,26 @@ type serverRuntime struct {
 	key map[string]any // what the supervisor was built from
 	sup *downstream.Supervisor
 	src *proxy.Source
+	// restarting is set for a runtime that replaces one a reload changed, until it has
+	// connected or the hold limit has passed; its route holds requests meanwhile.
+	restarting atomic.Bool
 }
 
 // start starts the source and the supervisor. The source outlives ctx: calls finishing during
-// the shutdown grace still get their progress.
-func (rt *serverRuntime) start(ctx context.Context) {
+// the shutdown grace still get their progress. A restarting runtime stops holding requests once
+// the server has connected, needs a login or stopped, or after hold.
+func (rt *serverRuntime) start(ctx context.Context, hold time.Duration) {
 	rt.src.Start(context.WithoutCancel(ctx))
 	rt.sup.Start(ctx)
+	if rt.restarting.Load() {
+		go func() {
+			defer rt.restarting.Store(false)
+			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hold)
+			defer cancel()
+			settled := []downstream.State{downstream.Ready, downstream.Degraded, downstream.NeedsLogin, downstream.Stopped}
+			_ = rt.sup.Wait(wctx, func(st downstream.Status) bool { return slices.Contains(settled, st.State) })
+		}()
+	}
 }
 
 // route is the handler of one pattern of a snapshot. A reload keeps a route whose inputs are
@@ -270,6 +287,7 @@ func (g *Gate) newServer(cfg *config.Config, name string, s *config.Server, old 
 		}
 		if old != nil {
 			rt.src.Inherit(old.rt.src)
+			rt.restarting.Store(true)
 		}
 	}
 	mirror := proxy.New(proxy.Options{
@@ -307,7 +325,7 @@ func (g *Gate) newRuntime(cfg *config.Config, name string, s *config.Server, key
 // replaced, when its inputs are unchanged, else a new one (see chain).
 func (g *Gate) serverRoute(sn *snapshot, s *server, prev *route, again http.Handler) *route {
 	tokens := sn.cfg.EffectiveTokens(s.name)
-	key := map[string]any{"tokens": tokens, "log": s.cfg.Log, "listen": listenKey(sn.cfg)}
+	key := routeKey(sn.cfg, s.cfg)
 	mirrors := []*proxy.Mirror{s.mirror}
 	if prev.keeps(key, mirrors) {
 		return prev
@@ -322,8 +340,11 @@ func (g *Gate) serverRoute(sn *snapshot, s *server, prev *route, again http.Hand
 	}
 	rt.handler = g.chain(sn, rt, s.name, s.cfg.Log.Requests, authorize,
 		func(*http.Request) (bool, bool) {
-			// A server waiting for a login does not connect without someone.
-			return mirror.Ready(), s.sup.Status().State != downstream.NeedsLogin
+			// Held while the gate starts or the server restarts after a reload; a server waiting
+			// for a login does not connect without someone.
+			restarting := s.rt.restarting.Load()
+			return mirror.Ready() && !restarting,
+				(!g.started.Load() || restarting) && s.sup.Status().State != downstream.NeedsLogin
 		},
 		func(r *http.Request) *mcp.Server {
 			return mirror.ServerFor(upstream.Principal(auth.TokenInfoFromContext(r.Context())))
@@ -349,7 +370,22 @@ func (g *Gate) chain(sn *snapshot, rt *route, name string, logRequests bool, aut
 	plainOpts.JSONResponse = true
 	stream := mcp.NewStreamableHTTPHandler(getServer, &opts)
 	plain := mcp.NewStreamableHTTPHandler(getServer, &plainOpts)
-	h := upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, g.respond(stream, plain, rt.ended))
+	served := g.respond(stream, plain, rt.ended)
+	h := upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The token was checked when the headers arrived. A request whose body was still arriving,
+		// or that was held during startup, when a reload replaced the route is served by the
+		// current snapshot, which checks it again: a token the reload revoked runs nothing.
+		select {
+		case <-rt.ended:
+			if body, ok := upstream.BodyBytes(r); ok {
+				r.Body = io.NopCloser(bytes.NewReader(body))
+			}
+			rt.again.ServeHTTP(w, r)
+			return
+		default:
+		}
+		served.ServeHTTP(w, r)
+	}))
 	inner := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !g.awaitReady(r, ready) {

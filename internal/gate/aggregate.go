@@ -80,13 +80,14 @@ func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*r
 	members := sn.cfg.AggregateMembers()
 	mirrors := make([]*proxy.Mirror, 0, len(members))
 	tokens := map[string]map[string]string{}
+	configs := make([]*config.Server, 0, len(members))
 	for _, name := range members {
 		mirrors = append(mirrors, sn.servers[name].mirror)
 		tokens[name] = sn.cfg.EffectiveTokens(name)
+		configs = append(configs, sn.servers[name].cfg)
 	}
-	key := map[string]any{
-		"members": members, "tokens": tokens, "name": sn.cfg.Name, "aggregate": *sn.cfg.Aggregate, "listen": listenKey(sn.cfg),
-	}
+	key := routeKey(sn.cfg, configs...)
+	key["members"] = members
 	if prev.keeps(key, mirrors) {
 		return prev, nil
 	}
@@ -125,12 +126,18 @@ func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*r
 	// awaitReady), so that a client that connects early does not take an empty catalog for the
 	// whole one.
 	ready := func(r *http.Request) (ok, pending bool) {
-		if g.started.Load() {
-			return true, false
-		}
 		gr, _ := r.Context().Value(grantKey{}).(*grant)
 		if gr == nil {
-			return false, false
+			return g.started.Load(), false
+		}
+		// A member that a reload restarts holds the request, as on its own route.
+		for name := range gr.access {
+			if sn.servers[name].rt.restarting.Load() && sn.servers[name].sup.Status().State != downstream.NeedsLogin {
+				return false, true
+			}
+		}
+		if g.started.Load() {
+			return true, false
 		}
 		for name := range gr.access {
 			s := sn.servers[name]

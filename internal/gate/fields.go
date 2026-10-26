@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -20,8 +21,9 @@ const (
 	// its routes; the server keeps running.
 	mirrorField
 	// routeField is a setting of the routes (tokens, request logging, Host and proxy checks, the
-	// aggregate endpoint): a change replaces the routes it touches, which ends their listen
-	// streams.
+	// aggregate endpoint): a change of a config-wide one replaces every route, of a server's one
+	// the routes that serve the server, which ends their listen streams. The route keys are read
+	// from this table (routeKey), so classifying a field here is all a route needs.
 	routeField
 	// snapshotField is applied in place without touching a route: the log level, the health
 	// endpoints, /_status.
@@ -139,12 +141,16 @@ func bootChanges(a, b *config.Config) []string {
 	return out
 }
 
-// listenKey is the part of the listen settings the routes are built from.
-func listenKey(cfg *config.Config) map[string]any {
+// routeKey is what a route is built from besides its mirrors: every route setting of the config
+// and of the servers it serves. A route whose key and mirrors are unchanged is kept.
+func routeKey(cfg *config.Config, servers ...*config.Server) map[string]any {
 	k := map[string]any{}
 	for path, v := range pick(cfg, configFields, routeField) {
-		if strings.HasPrefix(path, "Listen.") {
-			k[path] = v
+		k["config."+path] = v
+	}
+	for i, s := range servers {
+		for path, v := range pick(s, serverFields, routeField) {
+			k[fmt.Sprintf("server%d.%s", i, path)] = v
 		}
 	}
 	return k

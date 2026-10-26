@@ -59,7 +59,14 @@ func (g *Gate) apply(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if keys := bootChanges(g.boot, cfg); len(keys) > 0 {
+	keys := bootChanges(g.boot, cfg)
+	if slices.Contains(keys, "Listen.Addr") && g.served != g.boot.Listen.Addr {
+		// The gate serves another address than listen.addr, a socket systemd passed: the
+		// socket unit decides what it serves, not listen.addr.
+		keys = slices.DeleteFunc(keys, func(k string) bool { return k == "Listen.Addr" })
+		g.logger.Info("listen.addr changed; the gate serves the address of the socket it was given, which a restart keeps", "served", g.served)
+	}
+	if len(keys) > 0 {
 		slices.Sort(keys)
 		g.logger.Warn("these settings changed but take effect only at the next restart", "keys", keys)
 	}
@@ -119,29 +126,46 @@ func (g *Gate) apply(ctx context.Context, cfg *config.Config) error {
 	g.retired = append(slices.DeleteFunc(g.retired, (*route).isIdle), replaced...)
 	g.logger.Info("config reloaded", "added", added, "restarted", restarted, "removed", removed, "kept", kept)
 
+	// The swap is done: whatever ctx says now, the stale servers get the grace for their calls,
+	// and the new ones must run. Only the shutdown changes that; it stops what is left.
+	ctx = context.WithoutCancel(ctx)
+	shutdown := false
 	if len(stale) > 0 {
-		g.awaitRoutes(ctx, func(rt *route) bool {
+		shutdown = !g.awaitRoutes(func(rt *route) bool {
 			return slices.ContainsFunc(stale, func(s *server) bool { return rt.uses(s.rt.src) })
 		})
-		var wg sync.WaitGroup
-		for _, s := range stale {
-			wg.Go(func() {
-				ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
-				defer cancel()
-				if err := s.sup.Stop(ctx); err != nil {
-					g.logger.Error("server did not stop", "server", s.name, "error", err.Error())
-				}
-				s.rt.src.Close()
-			})
-		}
-		wg.Wait()
 	}
-	// Not on ctx: the snapshot is swapped, and its servers must run. Only the shutdown, which
-	// stops them, skips this.
-	if g.retireCtx.Err() == nil {
-		for _, rt := range fresh {
-			rt.start(ctx)
-		}
+	if shutdown {
+		// The shutdown stops them once its own grace for calls in flight is over.
+		g.leftover = append(g.leftover, stale...)
+		return nil
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, s := range stale {
+		wg.Go(func() {
+			sctx, cancel := context.WithTimeout(ctx, stopTimeout)
+			defer cancel()
+			if err := s.sup.Stop(sctx); err == nil {
+				s.rt.src.Close()
+				return
+			}
+			// The old process has not ended: its replacement must wait for it.
+			g.logger.Error("server did not stop; its replacement starts once it has", "server", s.name)
+			mu.Lock()
+			defer mu.Unlock()
+			g.leftover = append(g.leftover, s)
+			done := make(chan struct{})
+			g.stopping[s.name] = done
+			g.retiring.Go(func() {
+				defer close(done)
+				_ = s.sup.Stop(g.retireCtx) // ends with the shutdown, which stops it in turn
+			})
+		})
+	}
+	wg.Wait()
+	for _, rt := range fresh {
+		g.startRuntime(ctx, sn, rt)
 	}
 	// A dropped mirror goes on taking listings while the retired routes that hold it serve
 	// requests, at most ShutdownGrace; a call in flight needs only its source.
@@ -176,8 +200,8 @@ func (g *Gate) apply(ctx context.Context, cfg *config.Config) error {
 }
 
 // awaitRoutes waits until the retired routes that match have no request in flight, at most
-// ShutdownGrace, or until ctx is done or the shutdown begins.
-func (g *Gate) awaitRoutes(ctx context.Context, match func(*route) bool) {
+// ShutdownGrace, and reports false when the shutdown began first.
+func (g *Gate) awaitRoutes(match func(*route) bool) bool {
 	timer := time.NewTimer(ShutdownGrace)
 	defer timer.Stop()
 	for _, rt := range g.retired {
@@ -187,11 +211,45 @@ func (g *Gate) awaitRoutes(ctx context.Context, match func(*route) bool) {
 		select {
 		case <-rt.idle:
 		case <-timer.C:
-			return
-		case <-ctx.Done():
-			return
+			return true
+		case <-g.retireCtx.Done():
+			return false
+		}
+	}
+	return g.retireCtx.Err() == nil
+}
+
+// startRuntime starts a runtime of sn at once, or, when the old process of its server has not
+// stopped yet, once it has, as long as the runtime is still the server's and the gate is not
+// shutting down. The caller holds mu.
+func (g *Gate) startRuntime(ctx context.Context, sn *snapshot, rt *serverRuntime) {
+	hold := g.boot.StartupGracePeriod.D()
+	var name string
+	for n, s := range sn.servers {
+		if s.rt == rt {
+			name = n
+		}
+	}
+	done := g.stopping[name]
+	if done == nil {
+		rt.start(ctx, hold)
+		return
+	}
+	g.retiring.Go(func() {
+		select {
+		case <-done:
 		case <-g.retireCtx.Done():
 			return
 		}
-	}
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.stopping[name] == done {
+			delete(g.stopping, name)
+		}
+		if cur := g.snap.Load().servers[name]; g.closing || cur == nil || cur.rt != rt {
+			return
+		}
+		g.logger.Info("the server's old process has stopped; starting its replacement", "server", name)
+		rt.start(ctx, hold)
+	})
 }

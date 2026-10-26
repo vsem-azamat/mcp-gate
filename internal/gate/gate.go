@@ -91,6 +91,11 @@ type Gate struct {
 
 	snap atomic.Pointer[snapshot]
 
+	// notifyMu orders the notifications; stopSent is set once STOPPING=1 was sent.
+	notifyMu sync.Mutex
+	stopSent bool
+	// served is the address of the listener Run serves; guarded by mu.
+	served string
 	// running is closed once Run has started the servers.
 	running chan struct{}
 	// mu serializes reloads with the start and the shutdown, and guards closing and retired.
@@ -98,6 +103,12 @@ type Gate struct {
 	closing bool
 	// retired are the routes that reloads replaced and that still have requests in flight.
 	retired []*route
+	// leftover are servers that reloads replaced and did not stop: the shutdown began first, or
+	// the old process did not end in time. The shutdown stops them.
+	leftover []*server
+	// stopping holds, by server name, a channel closed once the old process of a server that a
+	// reload replaced has ended, while it has not; its replacement starts after that.
+	stopping map[string]chan struct{}
 	// retireCtx is cancelled when shutdown begins, which ends the waits of reloads for calls in
 	// flight; drained is closed once the shutdown has drained the listener, after which the
 	// mirrors of replaced routes are closed; retiring counts those not closed yet.
@@ -116,7 +127,7 @@ func New(opts Options) (*Gate, error) {
 	cfg := opts.Config
 	g := &Gate{
 		opts: opts, boot: cfg, logger: opts.Logger, drain: make(chan struct{}), startupOver: make(chan struct{}),
-		running: make(chan struct{}), drained: make(chan struct{}),
+		running: make(chan struct{}), drained: make(chan struct{}), stopping: map[string]chan struct{}{},
 	}
 	g.retireCtx, g.stopRetiring = context.WithCancel(context.Background())
 	var err error
@@ -135,10 +146,6 @@ func New(opts Options) (*Gate, error) {
 		api := upstream.Recover(g.logger, "_escrow", g.escrow.Handler())
 		if *cfg.Escrow.TCP {
 			g.escrowAPI = api
-			if !cfg.Listen.BehindProxy && loopbackListen(cfg.Listen.Addr) {
-				g.logger.Warn("the escrow API is on a loopback listener without listen.behindProxy: behind a reverse proxy " +
-					"on this host every client is 127.0.0.1 and shares one failed-auth budget; set behindProxy and trustedProxies")
-			}
 		}
 		if cfg.Escrow.Socket != nil {
 			if slices.Contains(cfg.Escrow.Socket.AllowUIDs, os.Geteuid()) {
@@ -283,9 +290,15 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 		g.logger.Info("escrow socket listening", "path", s.Path, "allowUIDs", socketUIDs(s))
 	}
 	g.mu.Lock()
+	g.served = ln.Addr().String()
 	sn := g.snap.Load()
+	// On the address served, which a socket systemd passed may set rather than listen.addr.
+	if g.escrowAPI != nil && !sn.cfg.Listen.BehindProxy && loopbackListen(g.served) {
+		g.logger.Warn("the escrow API is on a loopback listener without listen.behindProxy: behind a reverse proxy " +
+			"on this host every client is 127.0.0.1 and shares one failed-auth budget; set behindProxy and trustedProxies")
+	}
 	for _, name := range sn.names {
-		sn.servers[name].rt.start(ctx)
+		sn.servers[name].rt.start(ctx, g.boot.StartupGracePeriod.D())
 	}
 	close(g.running)
 	g.mu.Unlock()
@@ -368,34 +381,47 @@ func (g *Gate) markStarted() {
 }
 
 // notify passes a state notification to Options.Notify.
+// Once STOPPING=1 is sent, nothing else is: a reload that ends during the shutdown does not
+// report READY=1.
 func (g *Gate) notify(state string) {
-	if g.opts.Notify != nil {
-		g.opts.Notify(state)
+	if g.opts.Notify == nil {
+		return
 	}
+	g.notifyMu.Lock()
+	defer g.notifyMu.Unlock()
+	if g.stopSent {
+		return
+	}
+	g.stopSent = state == systemd.Stopping
+	g.opts.Notify(state)
 }
 
-// awaitReady holds a request that ready refuses while the gate is starting, until ready takes it,
-// says it is no longer pending (it will not connect on its own), or the startup is over, and
-// reports whether ready took it. A gate that was just restarted thus answers calls once their
-// server is back instead of refusing them while it reconnects.
+// awaitReady holds a request that ready refuses while ready says it is pending (the gate is
+// starting, or the server restarts after a reload), until ready takes it or no longer says it is
+// pending, at most startupGracePeriod, and reports whether ready took it. A gate that was just
+// restarted, or a server a reload restarts, thus answers calls once the server is back instead of
+// refusing them while it reconnects.
 func (g *Gate) awaitReady(r *http.Request, ready func(*http.Request) (ok, pending bool)) bool {
 	ok, pending := ready(r)
 	if ok || !pending {
 		return ok
 	}
+	limit := time.NewTimer(g.boot.StartupGracePeriod.D())
+	defer limit.Stop()
 	t := time.NewTicker(readyPoll)
 	defer t.Stop()
 	for {
 		select {
-		case <-g.startupOver:
+		case <-limit.C:
 			ok, _ = ready(r)
 			return ok
 		case <-r.Context().Done():
 			return false
+		case <-g.startupOver:
 		case <-t.C:
-			if ok, pending = ready(r); ok || !pending {
-				return ok
-			}
+		}
+		if ok, pending = ready(r); ok || !pending {
+			return ok
 		}
 	}
 }
@@ -431,12 +457,16 @@ func (g *Gate) shutdown(parent context.Context) error {
 	g.mu.Lock()
 	g.closing = true
 	sn := g.snap.Load()
+	servers := make([]*server, 0, len(sn.names)+len(g.leftover))
+	for _, name := range sn.names {
+		servers = append(servers, sn.servers[name])
+	}
+	servers = append(servers, g.leftover...)
 	g.mu.Unlock()
 	// A server that does not stop in time is logged; it does not fail the shutdown, which the
 	// signal asked for.
 	var wg sync.WaitGroup
-	for _, name := range sn.names {
-		s := sn.servers[name]
+	for _, s := range servers {
 		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(parent, stopTimeout)
 			defer cancel()

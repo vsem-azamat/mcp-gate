@@ -96,3 +96,68 @@ func TestPolicyKey(t *testing.T) {
 		t.Error("a policy on another server changed the mirror key")
 	}
 }
+
+// TestRouteKey checks that a change of any route field changes the route key.
+func TestRouteKey(t *testing.T) {
+	cfg := &config.Config{}
+	s := &config.Server{}
+	base := routeKey(cfg, s)
+	for path, c := range configFields {
+		if c&routeField == 0 {
+			continue
+		}
+		changed := *cfg
+		f := reflect.ValueOf(&changed).Elem()
+		for name := range strings.SplitSeq(path, ".") {
+			f = f.FieldByName(name)
+		}
+		f.Set(nonZero(t, f.Type()))
+		if reflect.DeepEqual(base, routeKey(&changed, s)) {
+			t.Errorf("a change of %s leaves the route key as it is", path)
+		}
+	}
+	for path, c := range serverFields {
+		if c&routeField == 0 {
+			continue
+		}
+		changed := *s
+		f := reflect.ValueOf(&changed).Elem().FieldByName(path)
+		f.Set(nonZero(t, f.Type()))
+		if reflect.DeepEqual(base, routeKey(cfg, &changed)) {
+			t.Errorf("a change of the server's %s leaves the route key as it is", path)
+		}
+	}
+}
+
+// nonZero returns a value of typ that is not its zero value.
+func nonZero(t *testing.T, typ reflect.Type) reflect.Value {
+	t.Helper()
+	v := reflect.New(typ).Elem()
+	k := typ.Kind()
+	if k == reflect.Struct {
+		for i := range typ.NumField() {
+			if typ.Field(i).IsExported() {
+				v.Field(i).Set(nonZero(t, typ.Field(i).Type))
+				return v
+			}
+		}
+		t.Fatalf("no exported field in %s", typ)
+	}
+	set := map[reflect.Kind]func(){
+		reflect.Bool:    func() { v.SetBool(true) },
+		reflect.String:  func() { v.SetString("x") },
+		reflect.Int:     func() { v.SetInt(1) },
+		reflect.Int64:   func() { v.SetInt(1) },
+		reflect.Slice:   func() { v.Set(reflect.MakeSlice(typ, 1, 1)) },
+		reflect.Pointer: func() { v.Set(reflect.New(typ.Elem())) },
+		reflect.Map: func() {
+			v.Set(reflect.MakeMap(typ))
+			v.SetMapIndex(reflect.New(typ.Key()).Elem(), reflect.New(typ.Elem()).Elem())
+		},
+	}[k]
+	if set == nil {
+		t.Fatalf("cannot make a %s", typ)
+	}
+	set()
+	return v
+}
