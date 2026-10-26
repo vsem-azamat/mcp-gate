@@ -249,16 +249,27 @@ func TestSlowReader(t *testing.T) {
 
 	var got atomic.Int32
 	cs := r.connect(t, "s", clientOpts{version: "2026-07-28", progress: func(*mcp.ProgressNotificationClientRequest) { got.Add(1) }})
-	params := &mcp.CallToolParams{Name: "progress", Arguments: map[string]any{"steps": 3, "ms": 20}}
-	params.SetProgressToken("fast")
-	start := time.Now()
-	if _, err := cs.CallTool(t.Context(), params); err != nil {
-		t.Fatal(err)
+	// The SDK hands a downstream session's notifications to the gate one at a time, behind the
+	// slow call's backlog, while results come at once: a short call can end before its progress
+	// reaches the gate, which then drops it. Calls are repeated until one gets its progress;
+	// each must be quick, and the slow stream stays blocked throughout.
+	for deadline := time.Now().Add(30 * time.Second); got.Load() == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("no call next to the slow reader got its progress")
+		}
+		params := &mcp.CallToolParams{Name: "progress", Arguments: map[string]any{"steps": 3, "ms": 20}}
+		params.SetProgressToken("fast")
+		start := time.Now()
+		if _, err := cs.CallTool(t.Context(), params); err != nil {
+			t.Fatal(err)
+		}
+		if d := time.Since(start); d > 3*time.Second {
+			t.Fatalf("a call next to the slow reader took %s", d)
+		}
+		// the client runs notification handlers apart from the call, so the result can come first
+		for wait := time.Now().Add(time.Second); got.Load() == 0 && time.Now().Before(wait); {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
-	if d := time.Since(start); d > 3*time.Second {
-		t.Errorf("the second call took %s", d)
-	}
-	// the client runs notification handlers apart from the call, so the result can come first
-	waitFor(t, "a progress notification on the second call", func() bool { return got.Load() > 0 })
 	_, _ = io.CopyN(io.Discard, res.Body, 1)
 }

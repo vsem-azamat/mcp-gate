@@ -162,9 +162,11 @@ func TestShutdown(t *testing.T) {
 		_, err := cs.CallTool(context.Background(), params)
 		done <- err
 	}()
-	time.Sleep(300 * time.Millisecond)
+	waitFor(t, "the call's first progress", func() bool { return progress.Load() > 0 })
 	start := time.Now()
 	r.stop()
+	// The call has under a second left. A listen stream would hold the shutdown for its whole
+	// 10 second grace, and an unused spare connection for 5 seconds.
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("shutdown took %s", d)
 	}

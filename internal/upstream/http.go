@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,15 +31,58 @@ const (
 // NewServer returns the HTTP server for handler with mcp-gate's limits. It has no ReadTimeout:
 // net/http cancels a request's context when the read deadline passes, even after the body has
 // been read, which would cancel long calls. MCP routes bound their body with ReadBody instead.
+// Its Shutdown closes the connections on which no request has arrived. It serves HTTP/1 only:
+// net/http does not report an HTTP/2 connection becoming active, which the tracking relies on.
 func NewServer(addr string, handler http.Handler, logger *slog.Logger) *http.Server {
-	return &http.Server{
+	unused := &unusedConns{conns: map[net.Conn]struct{}{}}
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	srv := &http.Server{
+		Protocols:         &protocols,
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: ReadHeaderTimeout,
 		IdleTimeout:       IdleTimeout,
 		MaxHeaderBytes:    MaxHeaderBytes,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		ConnState:         unused.track,
 	}
+	srv.RegisterOnShutdown(unused.closeAll)
+	return srv
+}
+
+// unusedConns holds the connections on which no request has arrived. http.Server.Shutdown
+// waits until such a connection is 5 seconds old, and HTTP clients open spare ones that they
+// may never use, so a shutdown closes them instead: they carry no call. A request whose headers
+// are still arriving when the shutdown begins is refused with them.
+type unusedConns struct {
+	mu      sync.Mutex
+	closing bool
+	conns   map[net.Conn]struct{}
+}
+
+func (u *unusedConns) track(c net.Conn, st http.ConnState) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if st != http.StateNew {
+		delete(u.conns, c)
+		return
+	}
+	if u.closing {
+		_ = c.Close()
+		return
+	}
+	u.conns[c] = struct{}{}
+}
+
+func (u *unusedConns) closeAll() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.closing = true
+	for c := range u.conns {
+		_ = c.Close()
+	}
+	clear(u.conns)
 }
 
 // ReadBody reads the request body, up to maxBytes within timeout, before next runs, and then

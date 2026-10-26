@@ -2,8 +2,11 @@ package upstream
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -261,5 +264,54 @@ func TestSDKLogger(t *testing.T) {
 	logger.Info("session connected")
 	if !strings.Contains(logs.String(), `"level":"DEBUG","msg":"session connected"`) {
 		t.Errorf("at debug level: %q", logs.String())
+	}
+}
+
+// acceptSignal reports each connection its listener accepts.
+type acceptSignal struct {
+	net.Listener
+	accepted chan struct{}
+}
+
+func (l acceptSignal) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.accepted <- struct{}{}
+	}
+	return c, err
+}
+
+// TestShutdownClosesUnusedConns checks that a connection that has not sent a request does not
+// hold the shutdown: http.Server.Shutdown alone waits 5 seconds for one, and HTTP clients open
+// spare connections.
+func TestShutdownClosesUnusedConns(t *testing.T) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer("", http.NotFoundHandler(), slog.New(slog.DiscardHandler))
+	served := make(chan error, 1)
+	accepted := make(chan struct{}, 1)
+	go func() { served <- srv.Serve(acceptSignal{ln, accepted}) }()
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	<-accepted
+	// Well under the 5 seconds net/http gives a new connection, well over a loaded runner's delays.
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Errorf("shutdown with an unused connection: %v", err)
+	}
+	if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("serve: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Errorf("the unused connection was not closed: %v", err)
 	}
 }
