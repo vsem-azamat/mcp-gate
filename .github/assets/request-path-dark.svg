@@ -31,19 +31,19 @@
 <text x="600.0" y="189.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">allowed tools only</text>
 <rect x="706.0" y="133.0" width="168" height="74" rx="10" fill="#151b23" stroke="#4493f8" stroke-width="2"/>
 <text x="790.0" y="167.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Forward</text>
-<text x="790.0" y="189.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">to that one server</text>
+<text x="790.0" y="189.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">/notes/mcp → notes</text>
 <path d="M262 170 H322.0" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
 <path d="M494.0 170 H512.0" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
 <path d="M684.0 170 H702.0" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
-<path d="M570 207.0 V260 H268" fill="none" stroke="#f85149" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#a-deny)"/>
-<text x="410" y="250" font-size="14.5" font-weight="600" fill="#f85149" text-anchor="middle">denied</text>
+<path d="M570 207.0 V219.0 H268" fill="none" stroke="#f85149" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#a-deny)"/>
+<text x="410" y="240.0" font-size="14.5" font-weight="600" fill="#f85149" text-anchor="middle">denied</text>
 <text x="325" y="300" font-size="15" font-weight="600" fill="#3fb950" text-anchor="start">← result</text>
 <rect x="706.0" y="313.0" width="168" height="74" rx="10" fill="#151b23" stroke="#3fb950" stroke-width="2"/>
 <text x="790.0" y="347.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Redact</text>
 <text x="790.0" y="369.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">strip secrets</text>
 <rect x="516.0" y="313.0" width="168" height="74" rx="10" fill="#151b23" stroke="#3fb950" stroke-width="2"/>
 <text x="600.0" y="347.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Scan files</text>
-<text x="600.0" y="369.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">downloads too</text>
+<text x="600.0" y="369.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">secrets in downloads</text>
 <rect x="326.0" y="313.0" width="168" height="74" rx="10" fill="#151b23" stroke="#3fb950" stroke-width="2"/>
 <text x="410.0" y="347.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Audit log</text>
 <text x="410.0" y="369.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">who did what</text>
