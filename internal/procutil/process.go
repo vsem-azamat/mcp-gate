@@ -153,6 +153,8 @@ func (p *Process) ExitErr() error {
 // grace for the leader and every other member to exit, then sends SIGKILL to the group and waits
 // again. It returns once the group is gone and stderr is drained, or with an error if the group
 // survived SIGKILL. Stop may be called more than once; later calls return the first result.
+// Since it waits for the stderr reader, which runs the LineLog's onLine, it must not be called
+// with a lock that onLine takes.
 func (p *Process) Stop(grace time.Duration) error {
 	p.stopOnce.Do(func() { p.stopErr = p.stop(grace) })
 	return p.stopErr
@@ -228,7 +230,9 @@ func reapGroup(pgid int) {
 }
 
 // groupGone reports whether no process is left in the process group pgid. A group whose
-// members cannot be signalled (EPERM) counts as gone: the gate cannot end them anyway.
+// members cannot be signalled (EPERM) counts as gone: the gate cannot end them anyway. Zombies
+// count as left on Linux but not on darwin, where kill(2) of a group whose only members are
+// zombies fails with EPERM.
 func groupGone(pgid int) bool {
 	err := syscall.Kill(-pgid, 0)
 	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)

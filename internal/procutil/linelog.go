@@ -14,6 +14,7 @@ import (
 type LineLog struct {
 	logger *slog.Logger
 	filter func(string) string
+	onLine func()
 
 	mu       sync.Mutex
 	ring     []string
@@ -41,15 +42,16 @@ const (
 
 // NewLineLog returns a LineLog that writes to logger. filter, if not nil, rewrites every line
 // before it is logged or kept (for redaction). tailBytes bounds the ring buffer; 0 means
-// DefaultTailBytes.
-func NewLineLog(logger *slog.Logger, filter func(string) string, tailBytes int) *LineLog {
+// DefaultTailBytes. onLine, if not nil, is called after each line is kept, without the
+// LineLog's lock held, so that a status that shows Tail can be watched.
+func NewLineLog(logger *slog.Logger, filter func(string) string, tailBytes int, onLine func()) *LineLog {
 	if tailBytes <= 0 {
 		tailBytes = DefaultTailBytes
 	}
 	if filter == nil {
 		filter = func(s string) string { return s }
 	}
-	return &LineLog{logger: logger, filter: filter, ringMax: tailBytes, tokens: lineBurst}
+	return &LineLog{logger: logger, filter: filter, onLine: onLine, ringMax: tailBytes, tokens: lineBurst}
 }
 
 // Consume reads r to its end, one line at a time.
@@ -109,6 +111,9 @@ func (l *LineLog) add(line string, truncated bool) {
 		l.dropped++
 	}
 	l.mu.Unlock()
+	if l.onLine != nil {
+		l.onLine()
+	}
 	if !allowed {
 		return
 	}
