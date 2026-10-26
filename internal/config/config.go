@@ -78,10 +78,92 @@ type Config struct {
 	// Escrow configures the secret escrow, which is on when its key hash is in the config or the
 	// environment.
 	Escrow Escrow `yaml:"escrow,omitempty"`
+	// Warnings are set by Parse: problems that do not stop the config from loading, each
+	// naming its field.
+	Warnings []string `yaml:"-"`
 	// Aggregate, if set, serves the tools, prompts and resources of several servers at
 	// AggregatePath.
-	Aggregate *Aggregate         `yaml:"aggregate,omitempty"`
-	Servers   map[string]*Server `yaml:"servers"`
+	Aggregate *Aggregate `yaml:"aggregate,omitempty"`
+	// Policies narrows what a token may reach, by token name.
+	Policies map[string]*TokenPolicy `yaml:"policies,omitempty"`
+	Servers  map[string]*Server      `yaml:"servers"`
+}
+
+// TokenPolicy narrows what one token sees and may call, server by server, on top of each
+// server's own filters.
+type TokenPolicy struct {
+	// Servers maps a server's name to the token's filters there; a server left out is not
+	// narrowed.
+	Servers map[string]*ServerPolicy `yaml:"servers"`
+}
+
+// ServerPolicy is a token's filters on one server, each matched as a server's filter of the same
+// kind. A nil filter narrows nothing.
+type ServerPolicy struct {
+	Tools     *PolicyFilter `yaml:"tools,omitempty"`
+	Prompts   *PolicyFilter `yaml:"prompts,omitempty"`
+	Resources *PolicyFilter `yaml:"resources,omitempty"`
+}
+
+// PolicyNone is the value of a policy filter that hides every entry of its kind.
+const PolicyNone = "none"
+
+// PolicyFilter is one filter of a token policy: an allow list, a deny list, or PolicyNone,
+// written as a plain value. Validation keeps the lists from being empty, so that no filter
+// reads differently from a server's filter of the same form.
+type PolicyFilter struct {
+	// None hides every entry of the filter's kind.
+	None  bool     `yaml:"-"`
+	Allow []string `yaml:"allow"`
+	Deny  []string `yaml:"deny"`
+}
+
+// UnmarshalYAML decodes PolicyNone or a mapping with the keys allow and deny, strictly. Parse
+// checks the form first, naming the field; these errors are a fallback with the line only.
+func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
+	n = resolveAlias(n)
+	switch n.Kind {
+	case yaml.ScalarNode:
+		if n.Tag == "!!str" && n.Value == PolicyNone {
+			f.None = true
+			return nil
+		}
+	case yaml.MappingNode:
+		seen := map[string]bool{}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			var list *[]string
+			switch k.Value {
+			case "allow":
+				list = &f.Allow
+			case "deny":
+				list = &f.Deny
+			default:
+				return fmt.Errorf("line %d: field %s not found in a policy filter", k.Line, k.Value)
+			}
+			if seen[k.Value] {
+				return fmt.Errorf("line %d: %s is set twice", k.Line, k.Value)
+			}
+			seen[k.Value] = true
+			if err := v.Decode(list); err != nil {
+				return err
+			}
+			if *list == nil {
+				*list = []string{} // written without a value: an empty list
+			}
+		}
+		return nil
+	case yaml.DocumentNode, yaml.SequenceNode, yaml.AliasNode:
+	}
+	return fmt.Errorf("line %d: a policy filter is %q or a mapping with allow or deny", n.Line, PolicyNone)
+}
+
+// ServerPolicy returns the policy of the token named token on server; nil when it has none.
+func (c *Config) ServerPolicy(token, server string) *ServerPolicy {
+	if p := c.Policies[token]; p != nil {
+		return p.Servers[server]
+	}
+	return nil
 }
 
 // AggregatePath is the route of the aggregate endpoint. It has one segment, so it never
@@ -349,6 +431,9 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	if err := rejectNullAggregate(data); err != nil {
 		return nil, err
 	}
+	if err := checkPolicyFilters(data); err != nil {
+		return nil, err
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var c Config
@@ -400,6 +485,99 @@ func rejectPartial(data []byte) error {
 			"remove those keys and their comments once you accept dropping them", PartialMarker)
 	}
 	return nil
+}
+
+// policyKinds are the filters of a token policy on a server, and the entries each hides.
+var policyKinds = map[string]string{"tools": "tool", "prompts": "prompt", "resources": "resource"}
+
+// checkPolicyFilters checks the form of every token policy filter before the file is decoded,
+// so that each problem names its field: a filter written without a value, which would decode
+// to no filter and narrow nothing, a value other than PolicyNone or a mapping, and a mapping
+// with keys other than allow and deny, or one of them twice. Anything else malformed is left to
+// the decoder.
+func checkPolicyFilters(data []byte) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil || len(doc.Content) == 0 {
+		return nil //nolint:nilerr // the decoder reports a malformed file with its own error
+	}
+	var errs []error
+	add := func(path, format string, args ...any) {
+		errs = append(errs, fmt.Errorf("%s: %s", path, fmt.Sprintf(format, args...)))
+	}
+	policies := mappingValue(doc.Content[0], "policies")
+	for token, p := range mappingEntries(policies) {
+		for server, sp := range mappingEntries(mappingValue(p, "servers")) {
+			for kind, f := range mappingEntries(sp) {
+				noun, ok := policyKinds[kind]
+				if !ok {
+					continue
+				}
+				path := "policies." + token + ".servers." + server + "." + kind
+				f = resolveAlias(f)
+				switch {
+				case f.Tag == "!!null":
+					add(path, "has no value; write `%s: %s` to hide every %s, or remove the key", kind, PolicyNone, noun)
+				case f.Kind == yaml.ScalarNode && (f.Tag != "!!str" || f.Value != PolicyNone):
+					add(path, "must be %s or a mapping with allow or deny", PolicyNone)
+				case f.Kind == yaml.MappingNode:
+					seen := map[string]bool{}
+					for i := 0; i+1 < len(f.Content); i += 2 {
+						k := f.Content[i].Value
+						switch {
+						case k != "allow" && k != "deny":
+							add(path, "has the key %s; only allow and deny are known", k)
+						case seen[k]:
+							add(path+"."+k, "is set twice")
+						}
+						seen[k] = true
+					}
+				case f.Kind != yaml.ScalarNode:
+					add(path, "must be %s or a mapping with allow or deny", PolicyNone)
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// resolveAlias returns the node an alias names, or n itself.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for i := 0; n != nil && n.Kind == yaml.AliasNode && i < maxAliasDepth; i++ {
+		n = n.Alias
+	}
+	return n
+}
+
+// maxAliasDepth bounds the aliases followed to reach a node.
+const maxAliasDepth = 16
+
+// mappingValue returns the value of key in a mapping node, or nil.
+func mappingValue(n *yaml.Node, key string) *yaml.Node {
+	n = resolveAlias(n)
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == key {
+			return n.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// mappingEntries yields the keys and values of a mapping node; nothing for any other node.
+func mappingEntries(n *yaml.Node) func(func(string, *yaml.Node) bool) {
+	return func(yield func(string, *yaml.Node) bool) {
+		n := resolveAlias(n)
+		if n == nil || n.Kind != yaml.MappingNode {
+			return
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if !yield(n.Content[i].Value, n.Content[i+1]) {
+				return
+			}
+		}
+	}
 }
 
 // rejectNullAggregate fails when the top-level aggregate key has no value, which would decode to

@@ -71,6 +71,27 @@ func TestCheckInvalid(t *testing.T) {
 	}
 }
 
+func TestCheckWarnings(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, "gate.yaml", "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n    tools: {allow: []}\n")
+	r := runCmd(t, noEnv, "check", path)
+	if r.code != exitOK || !strings.Contains(r.stderr, "warning: servers.a.tools: an empty allow list exposes every tool") {
+		t.Errorf("check = %+v", r)
+	}
+}
+
+func TestCheckPolicies(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, "gate.yaml", "version: 1\nauth: {tokens: {t: secret}}\n"+
+		"policies: {t: {servers: {a: {tools: {allow: [x]}}, nope: {tools: {deny: [y]}}}}, ghost: {servers: {a: {prompts: {allow: []}}}}}\n"+
+		"servers:\n  a:\n    stdio: {command: srv}\n")
+	r := runCmd(t, noEnv, "check", path)
+	if r.code != exitUsage || !strings.Contains(r.stderr, "policies.t.servers.nope: is not a server in servers") ||
+		!strings.Contains(r.stderr, "policies.ghost: is not a token in auth.tokens") {
+		t.Errorf("check = %+v", r)
+	}
+}
+
 func TestCheckConnect(t *testing.T) {
 	t.Parallel()
 	h := testkit.NewFakeHTTP(t, testkit.Fake{}, testkit.FakeHTTPOptions{})

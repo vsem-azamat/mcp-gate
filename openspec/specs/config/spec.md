@@ -78,6 +78,8 @@ The config MAY set `escrow.ttl` (positive, default `24h`), `escrow.maxEntries` (
 
 The config MAY set `aggregate`, which turns on the aggregate endpoint (see the serving spec), with `servers`, a list of distinct names of servers in `servers` that SHALL NOT be empty (default: every enabled server), and `log.requests`. A disabled server listed SHALL be left out of it. The name of a server the aggregate endpoint serves SHALL NOT contain `__` or end in `_`, so that a prefixed name splits one way only, and SHALL be at most 61 characters, so that a prefixed name fits in 64. `aggregate` written without a value SHALL fail loading, with a hint to write `aggregate: {}`.
 
+The config MAY set `policies`, a map from a token name to a policy with `servers`, a map from a server name to that token's `tools`, `prompts` and `resources` filters there (see the serving spec). Each filter SHALL be `none` or have exactly one of `allow` and `deny`, a non-empty list of distinct entries that are not empty, have no surrounding space and, for tools and prompts, do not start with the server's name and `__`; an empty list SHALL fail loading, an empty `allow` list with a hint to write `none`, since a server's empty tool allow list exposes every tool, and so SHALL a filter written without a value, which would otherwise narrow nothing; these errors SHALL name the filter's field. A policy's token SHALL be one in `auth.tokens` or in some server's `auth.tokens`, and on each server it names the token that server accepts under that name; its `servers` SHALL name at least one server; each server named SHALL be in `servers`, SHALL NOT be `public` and SHALL accept the token; and each entry SHALL set at least one filter. A policy on a disabled server, and a server's `tools: {allow: []}`, SHALL load with a warning naming the field, which `check` prints and `serve` logs.
+
 Tokens SHALL be maps from a name matching `[a-z0-9][a-z0-9._-]{0,62}` to a non-empty value without spaces or control characters. Every server that is not `public` SHALL accept at least one token, from `auth.tokens` (unless `inherit` is `false`) or its own; `public` SHALL exclude `tokens` and `inherit`. With `inherit`, a server's own token names SHALL differ from the global ones, and no two tokens a server accepts SHALL have the same value.
 
 #### Scenario: Server without a token
@@ -104,6 +106,26 @@ Tokens SHALL be maps from a name matching `[a-z0-9][a-z0-9._-]{0,62}` to a non-e
 
 - **WHEN** `aggregate: {}` is set and a server is named `a__b`
 - **THEN** loading fails naming `servers.a__b`, and with `aggregate: {servers: [c]}` it loads
+
+#### Scenario: Token policy naming an unknown server or token
+
+- **WHEN** `policies.phone.servers` names `nope`, which is not in `servers`, or `policies` names a token that no `auth.tokens` holds
+- **THEN** loading fails naming `policies.phone.servers.nope`, or `policies.<token>`
+
+#### Scenario: Policy key on a server with its own token of that name
+
+- **WHEN** `auth.tokens` holds `agent`, a server with `auth.inherit: false` has its own token `agent` with another value, and `policies.agent.servers` names both that server and one that inherits the global tokens
+- **THEN** it loads, and on each server the policy applies to the token that server accepts as `agent`
+
+#### Scenario: Empty list in a token policy
+
+- **WHEN** a policy sets `tools: {allow: []}` or `prompts: {deny: []}`
+- **THEN** loading fails naming `policies.<token>.servers.<server>.tools.allow`, with a hint to write `tools: none`, or `….prompts.deny`, and `tools: none` loads
+
+#### Scenario: Token policy on a server that does not take the token
+
+- **WHEN** `policies.phone.servers` names a public server, or one with `auth.inherit: false` that does not hold `phone` itself
+- **THEN** loading fails naming `policies.phone.servers.<name>`
 
 #### Scenario: Shared token value
 

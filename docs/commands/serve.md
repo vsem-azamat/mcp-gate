@@ -54,9 +54,15 @@ A route answers 503 with `Retry-After: 5` until its server has connected once. A
 - **Names.** Tools and prompts are named `<server>__<name>`, such as `notes__search`. A tool or prompt name that would be longer than 64 characters, or hold characters other than letters, digits, `_`, `.` and `-`, is left out, with a warning in the log; it is still on its server's own route. A server on the endpoint cannot have `__` in its name or end in `_`, so a name splits one way only, and its name is at most 61 characters, so that a prefixed name fits.
 - **Resources** keep their URIs. A read goes to the server that lists the URI, or else to the one whose template matches it. A URI or template that two of the caller's servers both list is left out, with a warning in the log, and a read no single server claims fails; read those on the server's own route.
 - **Tokens.** A token sees and calls only the servers whose own routes accept it, plus the public ones; without a token, only the public ones. A token that no server on the endpoint accepts gets 401, even when some are public. If every server listed in `aggregate.servers` is disabled, `/mcp` answers every request with 401 and the gate logs a warning at start. Each call is checked again against its server before it is forwarded.
-- **The same handling.** A call runs through its server exactly as on `/<server>/mcp`: filters, `callTimeout`, progress, cancellation, redaction, file scanning, escrow, and the `call` log line, which names the real server and the token name that server knows.
+- **The same handling.** A call runs through its server exactly as on `/<server>/mcp`: filters, token policies, `callTimeout`, progress, cancellation, redaction, file scanning, escrow, and the `call` log line, which names the real server and the token name that server knows.
 - **Changes.** A server's new or removed tools reach the endpoint, and clients listening for changes are told. A server that is down keeps its tools there, as on its own route; one that never connected, or waits for a login, has none until it does.
 - `/mcp` answers 503 until startup is over or every server the caller reaches has listed its catalog or waits for a login. `/_readyz` and `/_status` report servers, not the endpoint.
+
+## Token policies
+
+`policies` gives a token its own allow or deny lists on some servers, on top of the servers' own (see [Configuration](../configuration/README.md#token-policies)). The token's lists show only what its lists pass, and a call, prompt get or resource read of something they hide fails exactly as one of a name the server does not have, so a token cannot tell a hidden tool or prompt from a missing one. The `call` line records the decision in `tokenPolicy`; a name the server does not have, or one its own filter hides, is `none`, since no policy decided it. On a server where any token has a policy, results carry the cache scope `private`, since the lists depend on the token. The capabilities a server advertises do not depend on the token: a policy that hides every prompt leaves the prompt list empty.
+
+A resource read passes when the resource listed under its URI passes, or, when none is, a template that matches it does; a read in another spelling of a listed resource the policy hides is refused too. Resources are not hidden as well as tools: when a policy allows a template that also matches the URI of a listed resource it hides, a read of that URI fails while other URIs through the template succeed, so a token can find hidden URIs by guessing. Under an allow list, a read through an allowed template reaches whatever the server serves for that URI, as with a server's allow list, so allow templates only when every URI they match may be read. The comparison of spellings lower-cases the scheme and the authority, which for URIs such as `fake://hidden` is the resource's own name, so on a server where that part is case-sensitive it refuses more than the one resource. Under a deny list the comparison ignores the query, so every query of a hidden URI is refused. Under an allow list, a hidden URI without a query refuses every query of it, and a hidden URI with a query refuses the reads whose query holds all of its parameters, however written (in another order, with other parameters, repeated, in other letter case, with `;` or `+`, or with leading zeros), so that hiding `db://t?id=1` does not refuse `db://t?id=2` read through an allowed template.
 
 ## Health and status
 
@@ -120,10 +126,12 @@ The access log names a socket client `unix:uid=<n>`, and the failed-auth limit c
 
 ## Logs
 
-Every forwarded call writes one `call` line with the server, the token name (`principal`), the method, the tool or prompt or resource URI, the duration, the outcome and the number of redactions; arguments and results are never logged:
+Every forwarded call writes one `call` line with the server, the token name (`principal`), the method, the tool or prompt or resource URI, the duration, the outcome, what the token's policy decided (`tokenPolicy`: `none` without a policy on the server, `allow` or `deny`) and the number of redactions; arguments and results are never logged:
 
 ```json
-{"time":"…","level":"INFO","msg":"call","server":"notes","principal":"laptop","method":"tools/call","tool":"search","durMs":412,"outcome":"ok","redactions":0}
+{"time":"…","level":"INFO","msg":"call","server":"notes","principal":"laptop","method":"tools/call","tool":"search","durMs":412,"outcome":"ok","tokenPolicy":"none","redactions":0}
 ```
+
+A call a token's policy hides is a line with outcome `denied` and `tokenPolicy` `deny`.
 
 With `log.requests`, each HTTP request to the route also writes a `request` line with its method, status, duration and remote address; `aggregate.log.requests` does the same for `/mcp`, with `server` `/mcp`. A call the aggregate endpoint refuses before any server sees it (a name of a server the token does not reach, say) is a `call` line with outcome `denied` and an empty `server`.

@@ -28,6 +28,11 @@ escrow:
   socket: {path: /run/mcp-gate/escrow.sock, allowUIDs: [1001]}   # user 1001 needs no key
 aggregate:
   servers: [notes, mail]   # leave out to serve every enabled server
+policies:
+  phone:                   # a token name
+    servers:
+      notes: {tools: {allow: [search]}, resources: none}
+      mail: {tools: {deny: [send_message, delete_message]}}
 servers:
   notes:
     stdio:
@@ -97,6 +102,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `aggregate` | none | Serve servers together at `/mcp`, tools and prompts named `<server>__<name>` (see [serve](../commands/serve.md#aggregate-endpoint)). `aggregate: {}` serves every enabled server; `aggregate:` without a value is an error |
 | `aggregate.servers` | every server | The servers served at `/mcp`; not empty, no name twice. A disabled server is left out. A server served there cannot have `__` in its name or end in `_`, and its name is at most 61 characters |
 | `aggregate.log.requests` | `false` | Log each HTTP request to `/mcp`, as `log.requests` does for a server |
+| `policies.<token>.servers.<server>` | none | The token's own filters on that server, applied after the server's (see [Token policies](#token-policies)): `tools`, `prompts` and `resources`, at least one, each a non-empty `allow` or `deny` list or `none` |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |
@@ -119,7 +125,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `disabled` | `false` | Never start the server |
 | `tools` | all | `{allow: [names]}` or `{deny: [names]}`. An empty allow list exposes every tool, as mcp-proxy's `toolFilter` did |
 | `prompts` | all | `{allow: [...]}` or `{deny: [...]}` by prompt name. An empty allow list exposes none and the capability is not advertised |
-| `resources` | all | The same, matching a resource's URI or name and a template's URI template or name. Under a deny list, a read of a denied URI through a template is refused too, in any spelling the gate can tell is the same; an allow list is the safer choice |
+| `resources` | all | The same, matching a resource's URI or name and a template's URI template or name. Under a deny list, a read of a denied URI is refused in any spelling the gate can tell is the same, and so is any read whose URI a denied template matches, even when a narrower or wider visible template matches it too. Under an allow list, a read reaches only an allowed resource or goes through an allowed template, and another spelling of a listed resource the list hides is refused; an allow list is the safer choice |
 | `auth.inherit` | `true` | Accept the global `auth.tokens` too |
 | `auth.tokens` | none | Tokens this server accepts in addition; with `inherit`, their names differ from the global ones |
 | `auth.public` | `false` | Serve without a token. Excludes `tokens` and `inherit` |
@@ -136,6 +142,12 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `forwardMeta` | none | `_meta` keys of a client request passed to the server, by exact name, such as `example.com/trace`. Others are dropped: they describe the client. `progressToken` and `mcp`/`modelcontextprotocol`-prefixed keys are the gate's and cannot be listed |
 
 Each server has exactly one of `stdio` and `http`. Every server that is not `public` must accept at least one token, and no two tokens a server accepts may have the same value. Token names are lower-case letters, digits, `.`, `_` and `-`; values may not contain spaces or control characters.
+
+## Token policies
+
+`policies.<token>.servers.<server>` narrows what one token sees and may call on one server. Its `tools`, `prompts` and `resources` are matched like a server's filters of the same name, by the same keys, and apply after them: an entry reaches the token only when both pass it. Each is a non-empty `allow` list, a non-empty `deny` list, or `none`, which hides every entry of its kind (`tools: none`). Empty lists, and a filter written without a value (`tools:` or `tools: ~`), are rejected, since a server's empty tool allow list exposes every tool and a snippet moved from one to the other would then fail open; `mcp-gate check` names `none` in its error. Entries are the server's own names, without the `<server>__` prefix of `/mcp`, and have no surrounding space. A filter left out, and a server the policy does not name, narrow nothing. The policy holds on the server's own route and on `/mcp` alike (see [serve](../commands/serve.md#token-policies)).
+
+The key under `policies` is a token name as each server knows it: a token from `auth.tokens` on the servers that inherit them, and a server's own `auth.tokens` entry on that server. Two servers with `inherit: false` may each have their own token of the same name, with different values; a policy under that name applies on each server to that server's token. Each server named must exist and accept the token; a public server takes no token, so it cannot be named. `mcp-gate check` reports a policy that breaks these rules, such as `policies.phone.servers.nope: is not a server in servers`, and warns about a policy on a disabled server, which has no effect until the server is enabled. It also warns about a server's `tools: {allow: []}`, which exposes every tool.
 
 ## Values
 

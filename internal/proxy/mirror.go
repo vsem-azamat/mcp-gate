@@ -6,7 +6,9 @@
 // and on list-changed notifications, and changes only the entries that differ. Calls go through
 // the server's supervisor with a downstream _meta holding only the keys in the server's
 // forwardMeta, progress remapped to the upstream request, and results redacted, failing closed.
-// Every call is logged as one audit line.
+// A token with a policy on the server is served an *mcp.Server of its own that holds only what
+// the policy passes, so an entry it hides is unknown there. Every call is logged as one audit
+// line.
 package proxy
 
 import (
@@ -17,12 +19,15 @@ import (
 	"log/slog"
 	"maps"
 	"net/url"
+	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/yosida95/uritemplate/v3"
 
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
@@ -55,6 +60,8 @@ type Options struct {
 	// Version is reported as the server version to clients.
 	Version string
 	Policy  *policy.Policy
+	// Tokens are the token policies on the server, applied on top of Policy.
+	Tokens policy.Tokens
 	// ForwardMeta are the _meta keys of a request passed downstream.
 	ForwardMeta []string
 	// Redaction redacts results; nil passes them unchanged.
@@ -98,6 +105,32 @@ type Mirror struct {
 	wg     sync.WaitGroup
 
 	watchers []func() // told after the catalog changed; set before Start
+
+	served served // what reads reach; guarded by mu
+
+	// The token policies and the server of each token that has one; fixed by New.
+	tokens policy.Tokens
+	views  map[string]*tokenView // by token name
+}
+
+// served is what the mirrored catalog serves to reads, compiled once per listing: the listed
+// URIs, their comparison keys, and the templates' patterns.
+type served struct {
+	uris      map[string]bool
+	keys      map[string]bool
+	templates []*regexp.Regexp
+}
+
+// tokenView is the upstream server of a token with a policy on the server: the mirrored catalog
+// without what the policy hides. Its maps are guarded by the mirror's mu.
+type tokenView struct {
+	policy    *policy.Token
+	server    *mcp.Server
+	reads     *policy.Reads // what the policy lets the token read of the mirrored catalog
+	tools     map[string]*mcp.Tool
+	prompts   map[string]*mcp.Prompt
+	resources map[string]*mcp.Resource
+	templates map[string]*mcp.ResourceTemplate
 }
 
 type stats struct {
@@ -118,13 +151,36 @@ func New(opts Options) *Mirror {
 		progress: newProgressTable(),
 		events:   make(chan event, eventQueue),
 	}
-	m.server = mcp.NewServer(&mcp.Implementation{Name: opts.Name, Version: opts.Version}, &mcp.ServerOptions{
-		Logger:       upstream.SDKLogger(logger),
-		Capabilities: Capabilities(opts.Policy),
-	})
-	m.server.AddReceivingMiddleware(m.receive)
+	// The mirror's own server serves tokens without a policy; while any token has one, the
+	// lists depend on the token, so its results are private too.
+	var setCacheable func(context.Context, mcp.Request, *mcp.Cacheable)
+	if len(opts.Tokens) > 0 {
+		setCacheable = privateCache
+	}
+	m.server = m.newServer(setCacheable)
+	m.tokens = opts.Tokens
+	m.views = make(map[string]*tokenView, len(opts.Tokens))
+	for name, p := range opts.Tokens {
+		m.views[name] = &tokenView{
+			policy: p, server: m.newServer(privateCache), reads: p.Reads(nil, nil),
+			tools: map[string]*mcp.Tool{}, prompts: map[string]*mcp.Prompt{},
+			resources: map[string]*mcp.Resource{}, templates: map[string]*mcp.ResourceTemplate{},
+		}
+	}
 	return m
 }
+
+// newServer returns an upstream server for the mirror, whose results setCacheable marks.
+func (m *Mirror) newServer(setCacheable func(context.Context, mcp.Request, *mcp.Cacheable)) *mcp.Server {
+	s := mcp.NewServer(&mcp.Implementation{Name: m.opts.Name, Version: m.opts.Version}, &mcp.ServerOptions{
+		Logger: upstream.SDKLogger(m.logger), Capabilities: Capabilities(m.opts.Policy), SetCacheable: setCacheable,
+	})
+	s.AddReceivingMiddleware(m.receive)
+	return s
+}
+
+// privateCache marks a result for the caller's own client only.
+func privateCache(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.CacheScope = cachePrivate }
 
 // Capabilities are what a mirror advertises: tools always, prompts and resources unless the
 // policy exposes none of them, all with list-changed notifications, and nothing else. They do
@@ -140,8 +196,24 @@ func Capabilities(p *policy.Policy) *mcp.ServerCapabilities {
 	return caps
 }
 
-// Server is the upstream-facing MCP server.
-func (m *Mirror) Server() *mcp.Server { return m.server }
+// cachePrivate is the cache scope of a result that depends on the caller's token, which only
+// the caller's own client may cache.
+const cachePrivate = "private"
+
+// TokenPolicy returns the policy of the token named token on the server; nil when it has none.
+func (m *Mirror) TokenPolicy(token string) *policy.Token { return m.tokens.For(token) }
+
+// HasTokenPolicies reports whether any token has a policy on the server.
+func (m *Mirror) HasTokenPolicies() bool { return len(m.tokens) > 0 }
+
+// ServerFor returns the upstream server for the token named token: its own when it has a
+// policy on the server, else the mirror's.
+func (m *Mirror) ServerFor(token string) *mcp.Server {
+	if v := m.views[token]; v != nil && token != "" {
+		return v.server
+	}
+	return m.server
+}
 
 // Ready reports whether the catalog was listed once, so the route can serve.
 func (m *Mirror) Ready() bool { return m.ready.Load() }
@@ -282,11 +354,17 @@ type Catalog struct {
 	Templates map[string]*mcp.ResourceTemplate
 }
 
-// Catalog returns the entries the mirror serves now.
-func (m *Mirror) Catalog() Catalog {
+// Catalogs returns the entries the mirror serves now: all of them, as tokens without a policy
+// see them, and those each token with a policy sees, by token name.
+func (m *Mirror) Catalogs() (all Catalog, byToken map[string]Catalog) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Catalog{Tools: maps.Clone(m.tools), Prompts: maps.Clone(m.prompts), Resources: maps.Clone(m.resources), Templates: maps.Clone(m.templates)}
+	byToken = make(map[string]Catalog, len(m.views))
+	for name, v := range m.views {
+		byToken[name] = Catalog{Tools: maps.Clone(v.tools), Prompts: maps.Clone(v.prompts), Resources: maps.Clone(v.resources), Templates: maps.Clone(v.templates)}
+	}
+	all = Catalog{Tools: maps.Clone(m.tools), Prompts: maps.Clone(m.prompts), Resources: maps.Clone(m.resources), Templates: maps.Clone(m.templates)}
+	return all, byToken
 }
 
 // Name is the server's name in the config.
@@ -355,15 +433,97 @@ func (m *Mirror) apply(kinds int, l *listing) {
 		m.prompts = m.applyPrompts(l.prompts)
 	}
 	if kinds&kindResources != 0 {
-		var hidden []string
-		m.resources, hidden = m.applyResources(l.resources)
-		// Before the templates, so that no new template reaches a newly hidden resource.
-		m.opts.Policy.SetHiddenResources(hidden)
+		// Before the entries are registered, so that no new template reaches a newly hidden
+		// resource.
+		m.opts.Policy.SetCatalog(entries(l.resources, resourceEntry), entries(l.templates, templateEntry))
+		m.resources = m.applyResources(l.resources)
 		m.templates = m.applyTemplates(l.templates)
+		m.served = newServed(m.resources, m.templates)
 	}
 	if kinds != 0 {
 		m.lastSync = time.Now()
 	}
+	for _, v := range m.views {
+		m.syncView(v, kinds)
+	}
+}
+
+func resourceEntry(r *mcp.Resource) policy.Entry { return policy.Entry{Key: r.URI, Name: r.Name} }
+
+func templateEntry(t *mcp.ResourceTemplate) policy.Entry {
+	return policy.Entry{Key: t.URITemplate, Name: t.Name}
+}
+
+// entries returns the policy entries of resources or templates.
+func entries[T any](in []*T, entry func(*T) policy.Entry) []policy.Entry {
+	out := make([]policy.Entry, 0, len(in))
+	for _, e := range in {
+		if e != nil {
+			out = append(out, entry(e))
+		}
+	}
+	return out
+}
+
+// newServed compiles what the mirrored resources and templates serve.
+func newServed(resources map[string]*mcp.Resource, templates map[string]*mcp.ResourceTemplate) served {
+	s := served{uris: make(map[string]bool, len(resources)), keys: make(map[string]bool, len(resources))}
+	for uri := range resources {
+		s.uris[uri] = true
+		s.keys[policy.NormalizeURI(uri)] = true
+	}
+	for ut := range templates {
+		if t, err := uritemplate.New(ut); err == nil {
+			s.templates = append(s.templates, t.Regexp())
+		}
+	}
+	return s
+}
+
+// syncView registers on a token's server the mirrored entries of the given kinds that its policy
+// passes. Every token's server holds its own registrations of the shared, read-only entries,
+// changed only where they differ, under m.mu like the mirror's own, so that a view never lags
+// the catalog its handlers check against. An entry the SDK rejects was logged when the mirror's
+// own server rejected it, so it is not logged again here. The caller holds m.mu.
+func (m *Mirror) syncView(v *tokenView, kinds int) {
+	quiet := slog.New(slog.DiscardHandler)
+	if kinds&kindTools != 0 {
+		want := passed(m.tools, func(t *mcp.Tool) bool { return v.policy.Tools.Allows(t.Name) })
+		v.tools = syncSet(quiet, m.logText, entryTool, v.tools, want, func(t *mcp.Tool) error {
+			return guard(func() { v.server.AddTool(t, m.callTool) })
+		}, v.server.RemoveTools)
+	}
+	if kinds&kindPrompts != 0 {
+		want := passed(m.prompts, func(p *mcp.Prompt) bool { return v.policy.Prompts.Allows(p.Name) })
+		v.prompts = syncSet(quiet, m.logText, entryPrompt, v.prompts, want, func(p *mcp.Prompt) error {
+			return guard(func() { v.server.AddPrompt(p, m.getPrompt) })
+		}, v.server.RemovePrompts)
+	}
+	if kinds&kindResources != 0 {
+		v.reads = v.policy.Reads(entries(slices.Collect(maps.Values(m.resources)), resourceEntry),
+			entries(slices.Collect(maps.Values(m.templates)), templateEntry))
+		want := passed(m.resources, func(r *mcp.Resource) bool { return v.policy.Resources.Allows(r.URI, r.Name) })
+		v.resources = syncSet(quiet, m.logText, entryResource, v.resources, want, func(r *mcp.Resource) error {
+			return guard(func() { v.server.AddResource(r, m.readResource) })
+		}, v.server.RemoveResources)
+		wantT := passed(m.templates, func(t *mcp.ResourceTemplate) bool {
+			return v.policy.Resources.Allows(t.URITemplate, t.Name)
+		})
+		v.templates = syncSet(quiet, m.logText, entryTemplate, v.templates, wantT, func(t *mcp.ResourceTemplate) error {
+			return guard(func() { v.server.AddResourceTemplate(t, m.readResource) })
+		}, v.server.RemoveResourceTemplates)
+	}
+}
+
+// passed returns the entries of in that ok passes.
+func passed[T any](in map[string]*T, ok func(*T) bool) map[string]*T {
+	out := make(map[string]*T, len(in))
+	for k, e := range in {
+		if ok(e) {
+			out[k] = e
+		}
+	}
+	return out
 }
 
 // guard runs an SDK registration, which panics on data it rejects, and reports the panic as
@@ -389,7 +549,7 @@ func same(a, b any) bool {
 // registers one entry and reports an error for an entry the SDK rejects; remove drops keys.
 // It returns the entries now registered: an entry that fails keeps its previous version. A
 // rejection is logged with its key and error made fit for the log by logText.
-func syncSet[T any](logger *slog.Logger, logText func(string) string, what string, have, want map[string]*T, add func(*T) error, remove func(...string)) map[string]*T {
+func syncSet[T any](logger *slog.Logger, logText func(string) string, what entryKind, have, want map[string]*T, add func(*T) error, remove func(...string)) map[string]*T {
 	var gone []string
 	for k := range have {
 		if _, ok := want[k]; !ok {
@@ -406,7 +566,7 @@ func syncSet[T any](logger *slog.Logger, logText func(string) string, what strin
 			continue
 		}
 		if err := add(v); err != nil {
-			logger.Warn("skipping a catalog entry the SDK rejects", "kind", what, "key", logText(k), "error", logText(err.Error()))
+			logger.Warn("skipping a catalog entry the SDK rejects", "kind", string(what), "key", logText(k), "error", logText(err.Error()))
 			if old, ok := have[k]; ok {
 				out[k] = old
 			}
@@ -432,7 +592,7 @@ func (m *Mirror) applyTools(list []*mcp.Tool) map[string]*mcp.Tool {
 		}
 		want[t.Name] = t
 	}
-	return syncSet(m.logger, m.logText, "tool", m.tools, want, func(t *mcp.Tool) error {
+	return syncSet(m.logger, m.logText, entryTool, m.tools, want, func(t *mcp.Tool) error {
 		return guard(func() { m.server.AddTool(t, m.callTool) })
 	}, m.server.RemoveTools)
 }
@@ -460,21 +620,15 @@ func (m *Mirror) applyPrompts(list []*mcp.Prompt) map[string]*mcp.Prompt {
 			want[p.Name] = p
 		}
 	}
-	return syncSet(m.logger, m.logText, "prompt", m.prompts, want, func(p *mcp.Prompt) error {
+	return syncSet(m.logger, m.logText, entryPrompt, m.prompts, want, func(p *mcp.Prompt) error {
 		return guard(func() { m.server.AddPrompt(p, m.getPrompt) })
 	}, m.server.RemovePrompts)
 }
 
-// applyResources also returns the URIs the policy hides.
-func (m *Mirror) applyResources(list []*mcp.Resource) (map[string]*mcp.Resource, []string) {
+func (m *Mirror) applyResources(list []*mcp.Resource) map[string]*mcp.Resource {
 	want := map[string]*mcp.Resource{}
-	var hidden []string
 	for _, r := range list {
-		if r == nil || r.URI == "" {
-			continue
-		}
-		if !m.opts.Policy.Resources.Allows(r.URI, r.Name) {
-			hidden = append(hidden, r.URI)
+		if r == nil || r.URI == "" || !m.opts.Policy.Resources.Allows(r.URI, r.Name) {
 			continue
 		}
 		if _, err := url.Parse(r.URI); err != nil {
@@ -483,9 +637,9 @@ func (m *Mirror) applyResources(list []*mcp.Resource) (map[string]*mcp.Resource,
 		}
 		want[r.URI] = r
 	}
-	return syncSet(m.logger, m.logText, "resource", m.resources, want, func(r *mcp.Resource) error {
+	return syncSet(m.logger, m.logText, entryResource, m.resources, want, func(r *mcp.Resource) error {
 		return guard(func() { m.server.AddResource(r, m.readResource) })
-	}, m.server.RemoveResources), hidden
+	}, m.server.RemoveResources)
 }
 
 func (m *Mirror) applyTemplates(list []*mcp.ResourceTemplate) map[string]*mcp.ResourceTemplate {
@@ -498,7 +652,7 @@ func (m *Mirror) applyTemplates(list []*mcp.ResourceTemplate) map[string]*mcp.Re
 			want[t.URITemplate] = t
 		}
 	}
-	return syncSet(m.logger, m.logText, "resource template", m.templates, want, func(t *mcp.ResourceTemplate) error {
+	return syncSet(m.logger, m.logText, entryTemplate, m.templates, want, func(t *mcp.ResourceTemplate) error {
 		return guard(func() { m.server.AddResourceTemplate(t, m.readResource) })
 	}, m.server.RemoveResourceTemplates)
 }

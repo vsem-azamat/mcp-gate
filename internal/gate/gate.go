@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
@@ -108,6 +109,9 @@ func New(opts Options) (*Gate, error) {
 	remote := upstream.NewRemote(cfg.Listen.BehindProxy, trusted)
 	if cfg.Listen.BehindProxy && len(cfg.Listen.AllowedHosts) == 0 {
 		g.logger.Warn("listen.behindProxy is set without listen.allowedHosts: no Host is checked, so the proxy must check it")
+	}
+	for _, w := range cfg.Warnings {
+		g.logger.Warn("config: " + w)
 	}
 	if cfg.FileRootsUnchecked {
 		g.logger.Warn("$HOME is unset or relative, so redact.files.roots were not checked against the home directory")
@@ -216,7 +220,7 @@ func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
 		files = sc
 	}
 	mirror := proxy.New(proxy.Options{
-		Name: name, Version: g.opts.Version, Policy: policy.New(s), ForwardMeta: s.ForwardMeta,
+		Name: name, Version: g.opts.Version, Policy: policy.New(s), Tokens: policy.NewTokens(g.cfg, name), ForwardMeta: s.ForwardMeta,
 		Redaction: redaction, Files: files, Logger: g.logger,
 	})
 	o := DownstreamOptions(g.cfg, name, s, g.opts.Environ, g.opts.Version, oauth.NewStore(g.opts.StateDir), g.logger)
@@ -307,7 +311,8 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 
 // route builds the handler chain of a server's /<name>/mcp: recover, the request log, the Host
 // check, the token check, cross-origin protection, 503 until the server has connected once, the
-// body limit, and the SDK's stateless streamable handler.
+// body limit, and the SDK's stateless streamable handler over the mirror's server for the
+// request's token.
 func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 	mirror := s.mirror
 	var authorize func(http.Handler) http.Handler
@@ -317,7 +322,9 @@ func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 	}
 	return g.chain(s.name, s.cfg.Log.Requests, remote, authorize,
 		func(*http.Request) bool { return mirror.Ready() },
-		func(*http.Request) *mcp.Server { return mirror.Server() })
+		func(r *http.Request) *mcp.Server {
+			return mirror.ServerFor(upstream.Principal(auth.TokenInfoFromContext(r.Context())))
+		})
 }
 
 // chain builds an MCP route around the SDK's stateless streamable handlers for the servers

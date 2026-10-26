@@ -86,6 +86,9 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 		return exitUsage
 	}
 	_, _ = fmt.Fprintf(stdout, "%s: valid, %d servers (%d disabled)\n", fs.Arg(0), len(names), disabled)
+	for _, w := range cfg.Warnings {
+		_, _ = fmt.Fprintf(stderr, "mcp-gate check: warning: %s\n", w)
+	}
 	_, _ = fmt.Fprintln(stdout, escrowLine(key, cfg.Escrow))
 	if !*connect {
 		return exitOK

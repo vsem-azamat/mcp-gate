@@ -42,7 +42,7 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
   Each token has a name, and the log line for every call says which token made it. A token can work for all servers or for one, and a server can be open without a token.
 
 - **Allow and deny lists**<br>
-  Choose which tools, prompts and resources each server shows to agents.
+  Choose which tools, prompts and resources each server shows to agents, and narrow them further for one token, so that each agent sees only its own tools.
 
 - **Hidden secrets**<br>
   API keys, private keys, `Authorization` headers, `.env` lines and passwords in URLs become `[REDACTED:<kind>]` in answers, error messages and server logs. If the gate cannot check an answer, the agent gets an error instead. Files a tool downloads are checked too.
@@ -68,7 +68,7 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 | OAuth to remote servers | ✅ | ✅ | ✅ | ✅ | ➖ |
 | One binary, no database | ✅ | ✅ | ❌ | ❌ | ✅ |
 | All tools behind one URL | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Different tools for different agents | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/32) | ❌ | ❌ | ✅ | ✅ |
+| Different tools for different agents | ✅ | ❌ | ❌ | ✅ | ✅ |
 | Web UI | ❌ | ❌ | ➖ | ✅ | ✅ |
 | SSO and roles | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Legacy SSE transport | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/37) | ✅ | ❔ | ✅ | ✅ |

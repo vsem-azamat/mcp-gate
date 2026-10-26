@@ -637,3 +637,111 @@ servers:
 		}
 	}
 }
+
+func TestPolicies(t *testing.T) {
+	const servers = `
+auth: {tokens: {laptop: secret-laptop, agent: secret-agent}}
+servers:
+  a: {stdio: {command: /bin/a}}
+  b: {stdio: {command: /bin/b}, auth: {inherit: false, tokens: {bot: secret-bot}}}
+  off: {stdio: {command: /bin/o}, disabled: true}
+  pub: {stdio: {command: /bin/p}, auth: {public: true}}
+`
+	c, err := Parse([]byte("version: 1\n"+servers+`
+policies:
+  agent:
+    servers:
+      a: {tools: {allow: [search]}, prompts: none}
+      off: {tools: none}
+  bot:
+    servers:
+      b: {resources: {deny: ["b://private"]}}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := c.ServerPolicy("agent", "a"); p == nil || !slices.Equal(p.Tools.Allow, []string{"search"}) || !p.Prompts.None || p.Resources != nil {
+		t.Errorf("agent on a: %+v", p)
+	}
+	// Aliases resolve to what they name.
+	aliased, err := Parse([]byte("version: 1\n"+servers+`
+policies:
+  agent:
+    servers:
+      a: {tools: &none none, prompts: &read {allow: [summary]}}
+  bot:
+    servers:
+      b: {tools: *none, prompts: *read}
+`), noEnv)
+	if err != nil {
+		t.Fatalf("aliased filters: %v", err)
+	}
+	if p := aliased.ServerPolicy("bot", "b"); !p.Tools.None || !slices.Equal(p.Prompts.Allow, []string{"summary"}) {
+		t.Errorf("aliased filters: %+v", p)
+	}
+	if c.ServerPolicy("agent", "b") != nil || c.ServerPolicy("laptop", "a") != nil || c.ServerPolicy("bot", "b") == nil {
+		t.Error("a policy applies where none is written, or is missing")
+	}
+	if !slices.Equal(c.Warnings, []string{"policies.agent.servers.off: the server is disabled, so the policy has no effect until it is enabled"}) {
+		t.Errorf("warnings %q", c.Warnings)
+	}
+	for doc, want := range map[string]string{
+		"policies: {nobody: {servers: {a: {tools: {allow: [x]}}}}}":           "policies.nobody: is not a token in auth.tokens or in a server's auth.tokens",
+		"policies: {agent: {servers: {nope: {tools: {allow: [x]}}}}}":         "policies.agent.servers.nope: is not a server in servers",
+		"policies: {agent: {servers: {b: {tools: {allow: [x]}}}}}":            "policies.agent.servers.b: the server does not accept the token agent",
+		"policies: {bot: {servers: {a: {tools: {allow: [x]}}}}}":              "policies.bot.servers.a: the server does not accept the token bot",
+		"policies: {agent: {servers: {pub: {tools: {allow: [x]}}}}}":          "policies.agent.servers.pub: the server is public",
+		"policies: {agent: {servers: {a: {}}}}":                               "policies.agent.servers.a: needs at least one of tools, prompts and resources",
+		"policies: {agent: {servers: {}}}":                                    "policies.agent.servers: must name at least one server",
+		"policies: {agent: {}}":                                               "policies.agent.servers: must name at least one server",
+		"policies: {agent: {servers: {a: {tools: {allow: [x], deny: [y]}}}}}": "policies.agent.servers.a.tools: needs exactly one of allow and deny, or none",
+		"policies: {agent: {servers: {a: {tools: {}}}}}":                      "policies.agent.servers.a.tools: needs exactly one of allow and deny, or none",
+		"policies: {agent: {servers: {a: {tools: {allow: []}}}}}":             "policies.agent.servers.a.tools.allow: is empty; a policy takes no empty list, since an empty server tool allow list exposes every tool; write `tools: none` to hide every tool",
+		"policies: {agent: {servers: {a: {resources: {allow: }}}}}":           "write `resources: none` to hide every resource",
+		"policies: {agent: {servers: {a: {prompts: {deny: []}}}}}":            "policies.agent.servers.a.prompts.deny: is empty and narrows nothing",
+		"policies: {agent: {servers: {a: {resources: {deny: [\" \"]}}}}}":     "policies.agent.servers.a.resources.deny[0]: cannot be empty",
+		"policies: {agent: {servers: {a: {tools: {allow: [\"x \"]}}}}}":       "policies.agent.servers.a.tools.allow[0]: cannot have surrounding space",
+		"policies: {agent: {servers: {a: {tools: {allow: [x, x]}}}}}":         "policies.agent.servers.a.tools.allow[1]: is listed twice",
+		"policies: {agent: {servers: {a: {tools: {deny: [a__echo]}}}}}":       `policies.agent.servers.a.tools.deny[0]: names the tool as the aggregate endpoint does; write the server's own name for it, without "a__"`,
+		"policies: {agent: {servers: {a: {tools: all}}}}":                     "policies.agent.servers.a.tools: must be none or a mapping with allow or deny",
+		"policies: {agent: {servers: {a: {tools: [x]}}}}":                     "policies.agent.servers.a.tools: must be none or a mapping with allow or deny",
+		"policies: {agent: {servers: {a: {tools: {allow: [x], other: 1}}}}}":  "policies.agent.servers.a.tools: has the key other; only allow and deny are known",
+		"policies: {agent: {servers: {a: {tools: ~, prompts: none}}}}":        "policies.agent.servers.a.tools: has no value; write `tools: none` to hide every tool, or remove the key",
+		"policies:\n  agent:\n    servers:\n      a:\n        resources:\n":   "policies.agent.servers.a.resources: has no value; write `resources: none` to hide every resource",
+		"policies: {agent: {servers: {a: {tools: {allow: [x]}, other: 1}}}}":  "field other not found",
+	} {
+		_, err := Parse([]byte("version: 1\n"+doc+"\n"+servers), noEnv)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: err = %v, want %q", doc, err, want)
+		}
+	}
+	w, err := Parse([]byte("version: 1\nauth: {tokens: {t: s}}\nservers:\n  a: {stdio: {command: /bin/a}, tools: {allow: []}}\n"), noEnv)
+	if err != nil || !slices.Equal(w.Warnings, []string{"servers.a.tools: an empty allow list exposes every tool, as mcp-proxy's toolFilter did; remove the key to say so"}) {
+		t.Errorf("a server's empty tool allow list: %v %q", err, w.Warnings)
+	}
+}
+
+// A policy's key is a token name as each server knows it: on a server with inherit: false whose
+// own token has the name of a global one, the policy applies to that server's own token.
+func TestPolicyKeyPerServer(t *testing.T) {
+	c, err := Parse([]byte(`version: 1
+auth: {tokens: {agent: secret-global}}
+policies:
+  agent:
+    servers:
+      a: {tools: {allow: [x]}}
+      own: {tools: {deny: [y]}}
+servers:
+  a: {stdio: {command: /bin/a}}
+  own: {stdio: {command: /bin/o}, auth: {inherit: false, tokens: {agent: secret-own}}}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ServerPolicy("agent", "a") == nil || c.ServerPolicy("agent", "own") == nil {
+		t.Error("the policy does not apply to both tokens named agent")
+	}
+	if c.EffectiveTokens("own")["agent"] != "secret-own" || c.EffectiveTokens("a")["agent"] != "secret-global" {
+		t.Error("the two tokens named agent")
+	}
+}
