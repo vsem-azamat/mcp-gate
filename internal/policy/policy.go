@@ -404,8 +404,8 @@ func canonicalNumber(v string) (string, bool) {
 }
 
 // dropPaddingZeros drops the leading zeros of the integer part, after any sign and base prefix,
-// and the trailing zeros of the fraction of a value written as a number. It leaves a value that
-// is not a number unparsable.
+// and the trailing zeros of the fraction of a value written as a number. A value that is not a
+// number may become one ("0-5" becomes "-5"), which only makes more values alike.
 func dropPaddingZeros(v string) string {
 	sign := ""
 	if v != "" && (v[0] == '+' || v[0] == '-') {
