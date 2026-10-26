@@ -3,9 +3,10 @@
 //
 // A server's file tools are the tools that save a file locally and report its path. After such a
 // call, the paths its result or its arguments name are looked up; a file is considered only when
-// it lies under one of the server's roots and its inode changed during the call, so that neither
-// a client (through arguments) nor a server (through its result) can make the gate read another
-// file. A file with secrets is kept in the escrow when there is one, and every mention of it is
+// it lies under one of the server's roots, so that neither a client (through arguments) nor a
+// server (through its result) can make the gate read a file outside them, and a path only the
+// arguments name only when its inode changed during the call, so that a client cannot have an
+// older file read. A file with secrets is kept in the escrow when there is one, and every mention of it is
 // replaced by a marker. A file that should be scanned but cannot be is a failure: the caller
 // withholds the whole result.
 package filescan
@@ -38,9 +39,6 @@ import (
 const DefaultMaxBytes = 20 << 20
 
 const (
-	// clockSlack tolerates clock granularity between the call's start and the file's inode
-	// change time, for paths the tool reported.
-	clockSlack = 2 * time.Second
 	// headBytes is how much of a file decides whether it is text.
 	headBytes = 8192
 	// scanSlots bounds concurrent scans, so that parallel downloads cannot pull many large
@@ -122,15 +120,17 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 		arguments = args()
 	}
 	out = res
-	cands := candidates(arguments, res)
+	cands := candidates(arguments, res, regularFile)
 	if len(cands) > maxCandidates {
 		s.o.Logger.Warn("file not scanned; withholding the result", "tool", tool, "reason", "too many paths")
 		return nil, 0, fmt.Errorf("%w (the call names more than %d paths)", ErrUnscannable, maxCandidates)
 	}
 	for _, c := range cands {
-		since := start.Add(-clockSlack)
+		// A path only the caller named must have changed after the call started, or a client
+		// could have any file under a root read. One the result names may be older: a tool that
+		// caches its downloads reports the same file again.
+		var since time.Time
 		if c.fromArguments {
-			// A path only the caller named must have changed after the call started.
 			since = start
 		}
 		f, err := s.open(c.path, since)
@@ -183,7 +183,7 @@ type opened struct {
 }
 
 // open opens path when it is a candidate: under one of the roots, a regular file with one link,
-// whose inode changed at or after since. It returns nil when path is not a candidate, and an
+// whose inode changed at or after since (any time when since is zero). It returns nil when path is not a candidate, and an
 // error when it is one but cannot be opened or checked. The file is opened through its root, so
 // no symlink can lead outside it, and every check runs on the opened file.
 func (s *Scanner) open(path string, since time.Time) (*opened, error) {
@@ -242,6 +242,12 @@ func (s *Scanner) open(path string, since time.Time) (*opened, error) {
 		return nil, nil
 	}
 	return &opened{file: f, resolved: resolved, root: root, rel: rel, name: filepath.Base(resolved), size: info.Size()}, nil
+}
+
+// regularFile reports whether path names a regular file, following symlinks.
+func regularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // lexicallyUnderRoot reports whether path, as written, lies under one of the roots, as written

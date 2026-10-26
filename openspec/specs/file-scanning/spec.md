@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Some tools download a file to the gate's host and report its local path instead of returning its content, so its secrets would never pass through result redaction. File scanning reads the files that a server's download tools write, after their results are redacted, and withholds from the result every file that holds secrets: the path is replaced by a marker, and the file is kept in the escrow when it is on. Only files the tool wrote under the configured roots during the call are read, so that neither a client nor a server can make the gate read another file.
+Some tools download a file to the gate's host and report its local path instead of returning its content, so its secrets would never pass through result redaction. File scanning reads the files that a server's download tools write, after their results are redacted, and withholds from the result every file that holds secrets: the path is replaced by a marker, and the file is kept in the escrow when it is on. Only files under the configured roots are read, and a path only the client named only when the call wrote it, so that neither a client nor a server can make the gate read a file outside them, nor a client one the call did not write.
 
 ## Requirements
 
@@ -17,19 +17,24 @@ File scanning SHALL apply to the tools listed in a server's `redact.files.tools`
 
 ### Requirement: Paths
 
-The paths of a call SHALL be the absolute paths in its result and arguments: string members named `path`, `file_path`, `filePath`, `outputPath`, `output_path`, `localPath`, `local_path`, `savedTo` or `saved_to` of the structured content, of text content that is JSON, and of the arguments, at a depth of at most 8; strings starting with `file://` (percent-decoded) among them; the URIs of resource links and embedded resources; and the path after `downloaded to`, `saved to` or `written to` in text content, quoted or starting with `/`. Trailing `.`, `,` and `;` SHALL be dropped, and relative paths ignored. A call that names more than 64 paths SHALL withhold its result (see Failing closed).
+The paths of a call SHALL be the absolute paths in its result and arguments: string members named `path`, `file_path`, `filePath`, `outputPath`, `output_path`, `localPath`, `local_path`, `savedTo` or `saved_to` of the structured content, of text content that is JSON, and of the arguments, at a depth of at most 8; strings starting with `file://` (percent-decoded) among them; the URIs of resource links and embedded resources; and the path after `downloaded to`, `saved to` or `written to` in text content, quoted or starting with `/`. An unquoted path SHALL be the longest of the first 16 space-separated words of the rest of its line (up to a quote or angle bracket) that names a regular file, or its first word when none does. Trailing `.`, `,` and `;` SHALL be dropped, and relative paths ignored. A call that names more than 64 paths SHALL withhold its result (see Failing closed).
 
-A path SHALL be read only when, with every symlink resolved, it lies strictly under one of `redact.files.roots` (also resolved) and names a regular file with one link whose inode changed at or after the call started; for a path that only the arguments name, at or after the start, and for one the result names, 2 seconds before it. The file SHALL be opened through its root without following a symlink, and every check SHALL run on the opened file. Any other path SHALL be passed over: it names no file this call wrote. A path that does not exist SHALL be passed over; one written under a root whose symlinks cannot be resolved for another reason (such as a directory it cannot enter) SHALL fail.
+A path SHALL be read only when, with every symlink resolved, it lies strictly under one of `redact.files.roots` (also resolved) and names a regular file with one link; a path that only the arguments name SHALL also have had its inode changed at or after the call started. A path the result names MAY name a file written before the call, as a tool that caches its downloads reports. The file SHALL be opened through its root without following a symlink, and every check SHALL run on the opened file. Any other path SHALL be passed over: it names no file this call wrote. A path that does not exist SHALL be passed over; one written under a root whose symlinks cannot be resolved for another reason (such as a directory it cannot enter) SHALL fail.
 
 #### Scenario: Paths a caller or server cannot use
 
-- **WHEN** a file tool names a file outside the roots, a symlink inside a root that leads out of it, a file with a second hard link, a file whose inode predates the call, a directory or a missing file
+- **WHEN** a file tool names a file outside the roots, a symlink inside a root that leads out of it, a file with a second hard link, a directory or a missing file, or only its arguments name a file whose inode predates the call
 - **THEN** none is read and the result is unchanged
 
 #### Scenario: Ways to report a path
 
-- **WHEN** a file tool reports a path as `Media downloaded to <path>.`, as a `path` member of structured content, nested in a member of an object, or as a `file://` resource link
+- **WHEN** a file tool reports a path as `Media downloaded to <path>.`, as `Downloaded to <path with spaces>` unquoted, as a `path` member of structured content, nested in a member of an object, or as a `file://` resource link
 - **THEN** each file is scanned
+
+#### Scenario: Cached download
+
+- **WHEN** a file tool reports the path of a file with secrets that it wrote before the call
+- **THEN** the file is scanned and withheld
 
 ### Requirement: Scanning
 

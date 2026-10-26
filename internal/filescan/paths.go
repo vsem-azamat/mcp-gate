@@ -17,8 +17,37 @@ const maxDepth = 8
 // pathKeys are result and argument members that name a downloaded file.
 var pathKeys = []string{"path", "file_path", "filePath", "outputPath", "output_path", "localPath", "local_path", "savedTo", "saved_to"}
 
-// downloadedToRE finds "downloaded to <path>" and the like in text.
+// downloadedToRE finds "downloaded to <path>" and the like in text. An unquoted path may hold
+// spaces, so it is matched only as far as its first word; see unquotedPath.
 var downloadedToRE = regexp.MustCompile(`(?i)(?:downloaded|saved|written)\s+to\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|(/[^\s"'<>]+))`)
+
+// maxPathWords bounds the words of an unquoted path tried, so a long line costs little.
+const maxPathWords = 16
+
+// unquotedPath returns the path an unquoted "downloaded to" names in tail, the rest of its line:
+// the longest of its first maxPathWords words, trailing punctuation dropped, that isFile
+// accepts, or the first word when none is accepted or isFile is nil.
+func unquotedPath(tail string, isFile func(string) bool) string {
+	const space = "\t\n\f\r " // what \s matches in downloadedToRE
+	tail = strings.TrimRight(tail, space)
+	var ends []int // the end of each word, the last being the end of the tail
+	for i := 1; i < len(tail) && len(ends) < maxPathWords-1; i++ {
+		if strings.IndexByte(space, tail[i]) >= 0 && strings.IndexByte(space, tail[i-1]) < 0 {
+			ends = append(ends, i)
+		}
+	}
+	if len(ends) < maxPathWords-1 {
+		ends = append(ends, len(tail))
+	}
+	if isFile != nil {
+		for i := len(ends) - 1; i > 0; i-- {
+			if p := strings.TrimRight(tail[:ends[i]], ".,;"); isFile(p) {
+				return p
+			}
+		}
+	}
+	return tail[:ends[0]]
+}
 
 // candidate is an absolute path a file tool's call names.
 type candidate struct {
@@ -30,8 +59,9 @@ type candidate struct {
 
 // candidates collects the absolute paths a file tool reported in its result (path members of
 // structured content and of JSON text at any depth, file:// URIs, "downloaded to" in text) or
-// that its arguments name (an output path the caller chose).
-func candidates(args map[string]any, res *mcp.CallToolResult) []candidate {
+// that its arguments name (an output path the caller chose). isFile, which may be nil, tells
+// where an unquoted path with spaces ends.
+func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string) bool) []candidate {
 	var out []candidate
 	fromArguments := false
 	add := func(raw string) {
@@ -92,12 +122,19 @@ func candidates(args map[string]any, res *mcp.CallToolResult) []candidate {
 		if json.Unmarshal([]byte(text), &decoded) == nil {
 			walk("", decoded, 0)
 		}
-		for _, m := range downloadedToRE.FindAllStringSubmatch(text, -1) {
-			for _, group := range m[1:] {
-				if group != "" {
-					add(group)
-					break
+		for _, m := range downloadedToRE.FindAllStringSubmatchIndex(text, -1) {
+			switch {
+			case m[2] >= 0:
+				add(text[m[2]:m[3]])
+			case m[4] >= 0:
+				add(text[m[4]:m[5]])
+			case m[6] >= 0:
+				// The rest of the line, up to a quote or angle bracket.
+				tail := text[m[6]:]
+				if end := strings.IndexAny(tail, "\r\n\"'<>"); end >= 0 {
+					tail = tail[:end]
 				}
+				add(unquotedPath(tail, isFile))
 			}
 		}
 	}
