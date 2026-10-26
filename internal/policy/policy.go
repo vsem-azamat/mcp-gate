@@ -13,10 +13,12 @@
 package policy
 
 import (
+	"math/big"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/yosida95/uritemplate/v3"
 
@@ -220,8 +222,9 @@ type Entry struct{ Key, Name string }
 // spelling, a read is also refused when the comparison key of its URI (NormalizeURI, without
 // the query) is that of an entry a deny list names, or of a listed resource the filter hides,
 // with these exceptions for a hidden resource whose URI has a query, under an allow list only:
-// the read is refused when its query holds every parameter of the hidden URI's (see
-// queryParams), and passes otherwise, so that hiding db://t?id=1 does not refuse db://t?id=2.
+// the read is refused when its query, with the ";" parameters of its path, holds every
+// parameter of the hidden URI's query (see readParams, queryParams and containsParams), and
+// passes otherwise, so that hiding db://t?id=1 does not refuse db://t?id=2.
 // Under a deny list every query of a hidden URI is refused. It errs towards refusing.
 type Reads struct {
 	all       bool // no filter
@@ -281,7 +284,7 @@ func (r *Reads) Allowed(uri string) bool {
 		return false
 	}
 	if hidden := r.queries[key]; len(hidden) > 0 {
-		params := queryParams(uri)
+		params := readParams(uri)
 		for _, h := range hidden {
 			if containsParams(params, h) {
 				return false
@@ -306,35 +309,138 @@ func (r *Reads) Allowed(uri string) bool {
 
 // queryParams returns the parameters of a URI's query, as compared to tell whether a read names
 // a hidden resource: the query decoded as NormalizeURI decodes, split at "&" and ";", each
-// parameter at its first "="; "+" read as a space; keys and values trimmed of spaces and NULs
-// and lower-cased; a value of digits without its leading zeros; empty parameters dropped. Every
-// choice makes more queries alike, which refuses more, never less.
+// parameter at its first "="; "+" read as a space; format characters (such as a zero-width
+// space) and control characters removed from keys and values, which are then trimmed of spaces
+// and "=" and lower-cased; a key without a "[...]" suffix; a value that reads as a number in its
+// canonical form (see canonicalNumber); empty parameters dropped. Every choice makes more
+// queries alike, which refuses more, never less.
 func queryParams(raw string) map[string][]string {
 	_, query, _ := strings.Cut(decodeAll(raw), "?")
+	return parseParams(query)
+}
+
+// readParams returns the parameters of a read's URI: those of its query and the ";" parameters
+// of its path, which some servers read as query parameters. A read gains parameters by them, so
+// it refuses more, never less; a hidden URI's parameters are those of its query only.
+func readParams(raw string) map[string][]string {
+	decoded := decodeAll(raw)
+	path, query, _ := strings.Cut(decoded, "?")
+	var b strings.Builder
+	b.WriteString(query)
+	for seg := range strings.SplitSeq(path, "/") {
+		if _, p, ok := strings.Cut(seg, ";"); ok {
+			b.WriteString("&")
+			b.WriteString(p)
+		}
+	}
+	return parseParams(b.String())
+}
+
+func parseParams(query string) map[string][]string {
 	params := map[string][]string{}
 	for part := range strings.FieldsFuncSeq(query, func(r rune) bool { return r == '&' || r == ';' }) {
 		k, v, _ := strings.Cut(strings.ReplaceAll(part, "+", " "), "=")
 		k, v = queryText(k), queryText(v)
+		if i := strings.IndexByte(k, '['); i > 0 {
+			k = queryText(k[:i])
+		}
 		if k == "" && v == "" {
 			continue
 		}
-		if strings.Trim(v, "0123456789") == "" && v != "" {
-			if v = strings.TrimLeft(v, "0"); v == "" {
-				v = "0"
-			}
+		if n, ok := canonicalNumber(v); ok {
+			v = n
 		}
 		params[k] = append(params[k], v)
 	}
 	return params
 }
 
-func queryText(s string) string { return strings.ToLower(strings.Trim(s, " \t\r\n\x00")) }
+// queryText removes format characters (such as a zero-width space) and control characters from
+// s, trims it of spaces and "=", and lower-cases it.
+func queryText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.ToLower(strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '=' }))
+}
+
+// numberPrec is the precision, in bits, at which canonicalNumber compares numbers: integers up
+// to 2^256 stay exact, and numbers that differ by less round alike, which refuses more.
+const numberPrec = 256
+
+// maxNumberLen is the longest value, once its padding zeros are dropped, that canonicalNumber
+// parses, which bounds the time it takes. Its canonical form is binary, so that the time does
+// not grow with the exponent.
+const maxNumberLen = 128
+
+// numberChars are the characters a value read as a number may have, once lower-cased.
+const numberChars = "0123456789abcdefopx.+-_ "
+
+var numberSeparators = strings.NewReplacer("_", "", " ", "")
+
+// canonicalNumber returns the canonical form of a value that reads as a number, in decimal or
+// with a "0x", "0o" or "0b" prefix, with a sign, a fraction and an exponent, after dropping
+// every "_" and space, so that "01", "1.0", "0x1" and "1e0" share one. Padding zeros are dropped
+// before the value is parsed; a value still longer than maxNumberLen is read as a number only
+// when it is all digits, and is then kept as it is.
+func canonicalNumber(v string) (string, bool) {
+	if v == "" || strings.Trim(v, numberChars) != "" || !strings.ContainsAny(v, "0123456789") {
+		return "", false
+	}
+	if v = dropPaddingZeros(numberSeparators.Replace(v)); len(v) > maxNumberLen {
+		return v, strings.Trim(v, "0123456789") == ""
+	}
+	f, _, err := big.ParseFloat(v, 0, numberPrec, big.ToNearestEven)
+	if err != nil || f.IsInf() {
+		return "", false
+	}
+	if f.Sign() == 0 {
+		return "0", true
+	}
+	return f.Text('p', 0), true
+}
+
+// dropPaddingZeros drops the leading zeros of the integer part, after any sign and base prefix,
+// and the trailing zeros of the fraction of a value written as a number. A value that is not a
+// number may become one ("0-5" becomes "-5"), which only makes more values alike.
+func dropPaddingZeros(v string) string {
+	sign := ""
+	if v != "" && (v[0] == '+' || v[0] == '-') {
+		sign, v = v[:1], v[1:]
+	}
+	prefix, expMark := "", "e"
+	if len(v) > 1 && v[0] == '0' && strings.ContainsRune("xob", rune(v[1])) {
+		prefix, v, expMark = v[:2], v[2:], "p"
+	}
+	mantissa, exp, hasExp := strings.Cut(v, expMark)
+	whole, frac, _ := strings.Cut(mantissa, ".")
+	if trimmed := strings.TrimLeft(whole, "0"); trimmed != "" || whole == "" {
+		whole = trimmed
+	} else {
+		whole = "0"
+	}
+	frac = strings.TrimRight(frac, "0")
+	out := sign + prefix + whole
+	if frac != "" {
+		out += "." + frac
+	}
+	if hasExp {
+		out += expMark + exp
+	}
+	return out
+}
 
 // containsParams reports whether params has every parameter of hidden, each with one of its
-// values.
+// values; a hidden parameter without a value is held by the key with any value.
 func containsParams(params, hidden map[string][]string) bool {
 	for k, values := range hidden {
 		for _, v := range values {
+			if v == "" && len(params[k]) > 0 {
+				continue
+			}
 			if !slices.Contains(params[k], v) {
 				return false
 			}

@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
@@ -141,7 +142,7 @@ func TestReadAllowed(t *testing.T) {
 // of its parameters, however written, and passes other queries; one without a query refuses
 // every query. Under a deny list every query of a hidden URI is refused.
 func TestReadQueries(t *testing.T) {
-	resources := []Entry{{"db://t?id=1", "one"}, {"fake://hidden", "hidden"}}
+	resources := []Entry{{"db://t?id=1", "one"}, {"db://f?flag", "flag"}, {"fake://hidden", "hidden"}}
 	templates := []Entry{{"db://t{?id}", "rows"}, {"db://{+path}", "db"}, {"fake://{+path}", "any"}}
 	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"rows", "db", "any"}}})
 	allow.SetCatalog(resources, templates)
@@ -151,13 +152,33 @@ func TestReadQueries(t *testing.T) {
 		"db://t?id=1", "DB://t?id=%31", "db://t?id=1&", "db://t?&id=1", "db://t?id=1&id=1", "db://t?x=&id=1",
 		"db://t?id=1&x=y", "db://t?id=1;", "db://t?ID=1", "db://t?id=01", "db://t?id=+1", "db://t/?id=1#x",
 		"fake://hidden", "fake://hidden?a=b", "FAKE://%68idden?", "fake://hidden/?x",
+		// A ";" parameter of the path counts as a query parameter.
+		"db://t;id=1", "db://t;x=y;id=1", "db://t/;id=1", "db://t;id=1?x=2", "db://t%3Bid=1",
+		// A "[...]" suffix of a key is dropped.
+		"db://t?id[]=1", "db://t?id%5B%5D=1", "db://t?id[0]=1", "db://t;id[]=1",
+		// A number is compared in its canonical form.
+		"db://t?id=1.0", "db://t?id=1.", "db://t?id=0x1", "db://t?id=0X01", "db://t?id=0o1", "db://t?id=0b1",
+		"db://t?id=1e0", "db://t?id=10e-1", "db://t?id=%2B1", "db://t?id=0x1p0", "db://t?id=1_",
+		"db://t?id=" + strings.Repeat("0", 300) + "1." + strings.Repeat("0", 300),
+		// "=" around a value is trimmed.
+		"db://t?id==1", "db://t?id=1=", "db://t?id===1",
+		// Format characters are removed and Unicode spaces trimmed.
+		"db://t?id=%E2%80%8B1", "db://t?id=1%E2%80%8B", "db://t?i%E2%80%8Bd=1", "db://t?id=%EF%BB%BF1",
+		"db://t?id=%C2%A01", "db://t?id=%E2%80%831", "db://t?id=%011",
+		// A hidden parameter without a value is held by the key with any value.
+		"db://f?flag", "db://f?flag=", "db://f?flag=1", "db://f?FLAG=yes", "db://f;flag=1", "db://f?flag[]=1", "db://f?x=1&flag",
 	}
 	for _, uri := range refused {
 		if allow.ReadAllowed(uri) {
 			t.Errorf("allow list: %s is read", uri)
 		}
 	}
-	for _, uri := range []string{"db://t?id=2", "db://t", "db://t?id=10", "db://t?x=1", "fake://other?a=b"} {
+	for _, uri := range []string{
+		"db://t?id=2", "db://t", "db://t?id=10", "db://t?id=12", "db://t?x=1", "fake://other?a=b",
+		"db://t;x=1", "db://t;id=2", "db://t?id[]=2", "db://t?id=1.5", "db://t?id=0x2", "db://t?id=1e1",
+		"db://t?id==2", "db://t?id=%E2%80%8B2", "db://t?xid=1", "db://t?i=1", "db://t?id=1x",
+		"db://t?id=" + strings.Repeat("1", 200), "db://f", "db://f?other=1", "db://f?flagx=1",
+	} {
 		if !allow.ReadAllowed(uri) {
 			t.Errorf("allow list: %s is refused", uri)
 		}
@@ -166,6 +187,58 @@ func TestReadQueries(t *testing.T) {
 		if deny.ReadAllowed(uri) {
 			t.Errorf("deny list: %s is read", uri)
 		}
+	}
+}
+
+// TestQueryParams checks which values queryParams compares alike: the values of a group share a
+// form, and no two groups do.
+func TestQueryParams(t *testing.T) {
+	groups := [][]string{
+		{"1", "01", "1.0", "1.", "0x1", "0X01", "0o1", "0b1", "1e0", "10e-1", "+1", "%2B1", "0x1p0", "1_", "%E2%80%8B==1", "1%E2%80%8B", "%011"},
+		{"10", "0xa", "1e1", "1%090", "1 0", "010.000"},
+		{"0", "-0", "0.000", "0x0", "00"},
+		{"2"},
+		{"12"},
+		{"1.5"},
+		{"-1"},
+		{"abc"},
+		{"inf"},
+		{"00inf"},
+		{"e5"},
+		{"."},
+		{"0x"},
+		{strings.Repeat("9", 200), strings.Repeat("0", 10) + strings.Repeat("9", 200)},
+		// Large exponents stay cheap, since the canonical form is binary.
+		{"1e-300000000"},
+		{"1e600000000"},
+		{"0x1p-2000000000"},
+	}
+	value := func(v string) string {
+		vs := queryParams("x://a?id=" + v)["id"]
+		if len(vs) != 1 {
+			t.Fatalf("queryParams(id=%s) = %q", v, vs)
+		}
+		return vs[0]
+	}
+	group := map[string]int{}
+	for i, g := range groups {
+		for _, v := range g {
+			got := value(v)
+			if j, ok := group[got]; ok && j != i {
+				t.Errorf("%q (group %d) reads as group %d", v, i, j)
+			}
+			if first := value(g[0]); got != first {
+				t.Errorf("%q reads as %q, %q as %q", v, got, g[0], first)
+			}
+			group[got] = i
+		}
+	}
+	got := queryParams("x://a?a[b]=X&flag&ID%E2%80%8B[]=2")
+	if len(got) != 3 || got["a"][0] != "x" || got["flag"][0] != "" || len(got["id"]) != 1 {
+		t.Errorf("queryParams of keys = %v", got)
+	}
+	if got := readParams("x://a;id=1/b;k=2?q=3"); len(got) != 3 || got["id"][0] != value("1") || got["k"][0] != value("2") || got["q"][0] != value("3") {
+		t.Errorf("readParams = %v", got)
 	}
 }
 
