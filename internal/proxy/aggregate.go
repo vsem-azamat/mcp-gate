@@ -163,7 +163,7 @@ func (a *Aggregate) refresh() {
 
 // rebuild is the aggregate naming step of the catalog pipeline: it reads what each member serves
 // (Mirror.Catalogs, what each token with a policy there sees included) and names the members'
-// tools and prompts (named). The caller holds a.mu.
+// tools and prompts (nameEntries). The caller holds a.mu.
 func (a *Aggregate) rebuild() {
 	a.cats = make(map[string]Catalog, len(a.members))
 	a.tokenCats = make(map[string]map[string]Catalog, len(a.members))

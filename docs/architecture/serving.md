@@ -41,14 +41,14 @@ The sync loop, which runs in the server's `Source`, lists what is marked dirty: 
 | Step | Where | What it does |
 | --- | --- | --- |
 | listing | `Source.sync` | lists the dirty kinds and keeps them as the server sent them |
-| server filter | `Mirror.filter`, outside the mirror's lock | keeps what the server's filter passes and the SDK can take, logging the rest (`validTool`, a resource URI that does not parse) |
+| server filter | `Mirror.filter`, outside the mirror's lock | keeps what the server's filter passes, marking a tool the SDK would reject invalid (`validTool`) and leaving out a resource whose URI does not parse, and logs both |
 | register | `Mirror.register`, under the mirror's lock | registers the entries on the mirror's own server, compiles the server's resource filter from everything listed (`Policy.SetCatalog`) and what reads reach (`served`) |
 | per-token projection | `Mirror.syncView`, under the same lock | registers on each token's server what its policy passes of the registered entries |
 | aggregate naming | `Aggregate.rebuild`, through the mirror's watchers | names the members' tools and prompts for `/mcp` (`nameEntries`) and syncs the views |
 
 Registering compares each entry with the registered one by its JSON encoding and changes only those that differ (`syncSet`), so a resync that finds nothing new sends clients no notification; an invalid tool keeps its previous version. The SDK panics on entries it rejects (a tool schema that is not an object); `validTool` catches the usual case first so the log can say why, and `guard` recovers the rest.
 
-Locks are taken in one order: a source's `applyMu` (which orders listings and mirrors attaching), then an aggregate's `mu`, then a mirror's `mu`. A mirror calls its watchers without its lock, and an aggregate reads its members' catalogs under its own; the source's `mu` and a mirror's `watchMu` are held alone.
+Locks are taken in one order: a source's `applyMu` (which orders listings and mirrors attaching), then an aggregate's `mu`, then a mirror's `mu`. A mirror calls its watchers without its lock, and an aggregate reads its members' catalogs under its own; the source's `mu` and a mirror's `watchMu` take no other lock while held.
 
 Every tool call, prompt get and resource read runs through the request pipeline ([`pipeline.go`](../../internal/proxy/pipeline.go)), the same for the three kinds, which differ only in their `pipeline` value (the typed request and result, the stages, and whether a failure is answered with a tool result or an error):
 

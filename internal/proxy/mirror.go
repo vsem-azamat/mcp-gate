@@ -331,8 +331,9 @@ func collect[T any](seq func(func(*T, error) bool)) ([]*T, error) {
 //
 //   - listing: the source lists the kinds that are dirty and keeps them as the server sent them
 //     (Source.sync), then hands them to each mirror's apply;
-//   - server filter: the entries the server's filter passes and that the SDK can take, checked
-//     outside the mirror's lock (filter);
+//   - server filter: the entries the server's filter passes, checked outside the mirror's lock,
+//     with the tools the SDK would reject marked invalid and the resources whose URI does not
+//     parse left out (filter);
 //   - register: they are registered on the mirror's own server, changing only the entries that
 //     differ from the registered ones, with the server's resource filter and what reads reach
 //     compiled from them (register);
@@ -379,7 +380,7 @@ type candidate struct {
 	invalid bool
 }
 
-// filter is the server filter step: it needs no lock, and logs what it leaves out as invalid.
+// filter is the server filter step: it needs no lock, and logs the invalid tools and resources.
 func (m *Mirror) filter(kinds kindSet, l *listing) *filtered {
 	f := &filtered{}
 	if kinds.has(audit.Tool) {
