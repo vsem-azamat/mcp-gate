@@ -86,6 +86,8 @@ type Fake struct {
 	Grandchild bool `json:"grandchild,omitempty"`
 	// Stderr is written to stderr, one line each, at start.
 	Stderr []string `json:"stderr,omitempty"`
+	// StderrAfter, if not zero, delays writing Stderr by this long while the fake serves.
+	StderrAfter time.Duration `json:"stderrAfter,omitempty"`
 	// StdoutNoise is written to stdout before serving, as a server that logs to stdout does.
 	StdoutNoise string `json:"stdoutNoise,omitempty"`
 }
@@ -134,8 +136,15 @@ func runStdio(f Fake) int {
 	if f.IgnoreSIGTERM {
 		signal.Ignore(syscall.SIGTERM)
 	}
-	for _, line := range f.Stderr {
-		fmt.Fprintln(os.Stderr, line)
+	writeStderr := func() {
+		for _, line := range f.Stderr {
+			fmt.Fprintln(os.Stderr, line)
+		}
+	}
+	if f.StderrAfter > 0 {
+		time.AfterFunc(f.StderrAfter, writeStderr)
+	} else {
+		writeStderr()
 	}
 	if f.StdoutNoise != "" {
 		fmt.Fprintln(os.Stdout, f.StdoutNoise)

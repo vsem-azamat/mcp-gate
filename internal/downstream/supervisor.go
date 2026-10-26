@@ -364,7 +364,7 @@ func New(opts Options) (*Supervisor, error) {
 	s.client = mcp.NewClient(impl, opts.Notifications.clientOptions(logger))
 	s.client.AddReceivingMiddleware(s.watchAck)
 	if opts.Stdio != nil {
-		s.stderr = procutil.NewLineLog(logger, s.scrub, 0)
+		s.stderr = procutil.NewLineLog(logger, s.scrub, 0, s.changedStatus)
 	} else {
 		s.http, s.httpBase = newHTTPClient(opts.HTTP.Headers, opts.MaxMessageBytes, logger)
 	}
@@ -555,6 +555,18 @@ func (s *Supervisor) setStateLocked(st State) {
 	}
 	s.logger.Info("server state", "from", s.state.String(), "to", st.String())
 	s.state = st
+	s.changedLocked()
+}
+
+// changedStatus wakes Wait after a change of the status other than its state, such as a new
+// stderr line.
+func (s *Supervisor) changedStatus() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.changedLocked()
+}
+
+func (s *Supervisor) changedLocked() {
 	close(s.changed)
 	s.changed = make(chan struct{})
 }
@@ -563,6 +575,7 @@ func (s *Supervisor) recordError(err error) {
 	msg := s.ErrorText(err)
 	s.mu.Lock()
 	s.lastErr, s.lastErrAt = msg, time.Now()
+	s.changedLocked()
 	s.mu.Unlock()
 	s.logger.Warn("server failed", "error", msg)
 }
@@ -646,6 +659,7 @@ func (s *Supervisor) waitLogin(lr *LoginRequiredError) {
 	s.mu.Lock()
 	again := s.state == NeedsLogin && s.lastErr == msg
 	s.lastErr, s.lastErrAt = msg, time.Now()
+	s.changedLocked()
 	s.setStateLocked(NeedsLogin)
 	s.mu.Unlock()
 	if !again {

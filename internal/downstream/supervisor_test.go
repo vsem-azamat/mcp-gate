@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -374,11 +375,13 @@ func TestNoProbesWhileCallsRun(t *testing.T) {
 func TestProbeErrorReplyMeansAlive(t *testing.T) {
 	t.Parallel()
 	o := stdioOptions(t, testkit.Fake{RefuseProbes: true})
-	o.ProbeInterval = 100 * time.Millisecond // also the probe timeout, roomy enough under -race
+	// The interval is also the probe timeout: a reply slower than that is a real failure, so it
+	// leaves room for a loaded machine under -race.
+	o.ProbeInterval = 400 * time.Millisecond
 	o.ProbeFailures = 1
 	s := start(t, o)
 	pid := waitReady(t, s).PID
-	time.Sleep(700 * time.Millisecond)
+	time.Sleep(1500 * time.Millisecond)
 	if st := s.Status(); st.PID != pid || st.Restarts != 0 || st.State != Ready {
 		t.Errorf("an error reply counted as a failure: %+v", st)
 	}
@@ -441,13 +444,36 @@ func TestStopKillsTheProcessGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, pid := range []int{pids.PID, pids.Grandchild} {
-		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-			t.Errorf("process %d is still there after Stop (%v)", pid, err)
+		if state, ok := processState(t, pid); ok && state != 'Z' {
+			t.Errorf("process %d is still running after Stop (state %c)", pid, state)
 		}
 	}
 	if s.Status().State != Stopped {
 		t.Errorf("state = %s", s.Status().State)
 	}
+}
+
+// processState returns the state ps(1) shows for pid, such as 'Z' for a zombie; ok is false
+// when there is no such process. The grandchild of a stopped server is left to init (launchd on
+// darwin) or a subreaper to reap,
+// and on darwin a process group whose only members are zombies is gone for kill(2), so Stop may
+// return while the grandchild is still a zombie.
+func processState(t *testing.T, pid int) (state byte, ok bool) {
+	t.Helper()
+	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		return 0, false
+	}
+	out, err := exec.CommandContext(t.Context(), "ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	stat := strings.TrimSpace(string(out))
+	var exit *exec.ExitError
+	switch {
+	case err == nil && stat != "":
+		return stat[0], true
+	case errors.As(err, &exit) && stat == "":
+		return 0, false // reaped since kill
+	}
+	t.Fatalf("ps -p %d: %q, %v", pid, out, err)
+	return 0, false
 }
 
 func TestStderrIsLoggedRedacted(t *testing.T) {
@@ -464,6 +490,23 @@ func TestStderrIsLoggedRedacted(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), token) {
 		t.Error("the token reached the log")
+	}
+}
+
+// TestStderrAfterReadyWakesWait checks that a stderr line wakes Wait: after Ready no state
+// change follows, so only the line can.
+func TestStderrAfterReadyWakesWait(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{Stderr: []string{"late line"}, StderrAfter: 300 * time.Millisecond})
+	s := start(t, o)
+	waitReady(t, s)
+	if st := s.Status(); len(st.Stderr) != 0 {
+		t.Skipf("the line came before Ready (%q), so this run does not check the wakeup", st.Stderr)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := s.Wait(ctx, func(st Status) bool { return len(st.Stderr) == 1 }); err != nil {
+		t.Fatalf("Wait missed the stderr line: %v (status %+v)", err, s.Status())
 	}
 }
 

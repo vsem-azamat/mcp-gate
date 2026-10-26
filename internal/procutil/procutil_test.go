@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -201,7 +202,14 @@ func TestLineLog(t *testing.T) {
 	t.Parallel()
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	ll := NewLineLog(logger, func(s string) string { return strings.ReplaceAll(s, "first", "[F]") }, 0)
+	var added atomic.Int32
+	var ll *LineLog
+	ll = NewLineLog(logger, func(s string) string { return strings.ReplaceAll(s, "first", "[F]") }, 0, func() {
+		// The line is kept before onLine runs, and no lock of the LineLog is held.
+		if n := added.Add(1); len(ll.Tail()) != int(n) {
+			t.Errorf("onLine %d sees %d lines", n, len(ll.Tail()))
+		}
+	})
 	p := startHelper(t, "stderr", Spec{Stderr: ll})
 	if err := p.ExitErr(); err != nil {
 		t.Fatal(err)
@@ -214,6 +222,9 @@ func TestLineLog(t *testing.T) {
 		len(tail[1]) != MaxLineBytes+len(" [truncated]") || tail[2] != "last line without newline" {
 		t.Errorf("tail = %q", tail)
 	}
+	if n := added.Load(); n != 3 {
+		t.Errorf("onLine was called %d times, want 3", n)
+	}
 	if strings.Contains(logs.String(), "first line") || !strings.Contains(logs.String(), "[F] line") {
 		t.Errorf("the filter was not applied to the log: %s", logs.String())
 	}
@@ -222,7 +233,7 @@ func TestLineLog(t *testing.T) {
 func TestLineLogLimits(t *testing.T) {
 	t.Parallel()
 	var logs bytes.Buffer
-	ll := NewLineLog(slog.New(slog.NewTextHandler(&logs, nil)), nil, 100)
+	ll := NewLineLog(slog.New(slog.NewTextHandler(&logs, nil)), nil, 100, nil)
 	var in strings.Builder
 	for i := range 500 {
 		fmt.Fprintf(&in, "line %03d\n", i)
