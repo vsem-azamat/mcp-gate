@@ -110,7 +110,7 @@ mcp-gate is young (v0.1) but already handles day-to-day traffic for a dozen serv
 
 ## Contributing
 
-Issues, fixes and features are welcome, and pull requests get a prompt review. Start with [CONTRIBUTING](.github/CONTRIBUTING.md); [AGENTS.md](AGENTS.md) has the working rules, and security issues go through [private reporting](https://github.com/vsem-azamat/mcp-gate/security/advisories/new).
+Issues, fixes and features are welcome. I answer issues and review pull requests as soon as I can, usually within a day or two: slow upstream reviews are part of why this project exists. Start with [CONTRIBUTING](.github/CONTRIBUTING.md); [AGENTS.md](AGENTS.md) has the working rules, and security issues go through [private reporting](https://github.com/vsem-azamat/mcp-gate/security/advisories/new).
 
 ## License
 
