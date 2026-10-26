@@ -31,7 +31,32 @@ A client connects to `http://<listen.addr>/<name>/mcp` with one of the server's 
 }
 ```
 
+With `aggregate` in the config, one entry reaches many servers at `/mcp` (see [Aggregate endpoint](#aggregate-endpoint)).
+
 A route answers 503 with `Retry-After: 5` until its server has connected once. After that, a restart of the server keeps its catalog: listing still works, and calls fail with a tool error saying the server is not available until it is back.
+
+## Aggregate endpoint
+
+`aggregate: {}` serves every enabled server, or those in `aggregate.servers`, together at `/mcp`:
+
+```json
+{
+  "mcpServers": {
+    "gate": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    }
+  }
+}
+```
+
+- **Names.** Tools and prompts are named `<server>__<name>`, such as `notes__search`. A name that would be longer than 64 characters, or hold characters other than letters, digits, `_`, `.` and `-`, is left out, with a warning in the log; the tool is still on its server's own route. A server on the endpoint cannot have `__` in its name or end in `_`, so a name splits one way only.
+- **Resources** keep their URIs. A read goes to the server that lists the URI, or else to the one whose template matches it. A URI or template that two of the caller's servers both list is left out, and a read no single server claims fails; read those on the server's own route.
+- **Tokens.** A token sees and calls only the servers whose own routes accept it, plus the public ones; without a token, only the public ones. A token that no server on the endpoint accepts gets 401, even when some are public. If every server listed in `aggregate.servers` is disabled, `/mcp` answers every request with 401 and the gate logs a warning at start. Each call is checked again against its server before it is forwarded.
+- **The same handling.** A call runs through its server exactly as on `/<server>/mcp`: filters, `callTimeout`, progress, cancellation, redaction, file scanning, escrow, and the `call` log line, which names the real server and the token name that server knows.
+- **Changes.** A server's new or removed tools reach the endpoint, and clients listening for changes are told. A server that is down keeps its tools there, as on its own route; one that never connected, or waits for a login, has none until it does.
+- `/mcp` answers 503 until startup is over or every server the caller reaches has listed its catalog or waits for a login. `/_readyz` and `/_status` report servers, not the endpoint.
 
 ## Health and status
 
@@ -101,4 +126,4 @@ Every forwarded call writes one `call` line with the server, the token name (`pr
 {"time":"…","level":"INFO","msg":"call","server":"notes","principal":"laptop","method":"tools/call","tool":"search","durMs":412,"outcome":"ok","redactions":0}
 ```
 
-With `log.requests`, each HTTP request to the route also writes a `request` line with its method, status, duration and remote address.
+With `log.requests`, each HTTP request to the route also writes a `request` line with its method, status, duration and remote address; `aggregate.log.requests` does the same for `/mcp`, with `server` `/mcp`. A call the aggregate endpoint refuses before any server sees it (a name of a server the token does not reach, say) is a `call` line with outcome `denied` and an empty `server`.

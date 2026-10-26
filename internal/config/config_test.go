@@ -594,3 +594,42 @@ func TestEscrowSocket(t *testing.T) {
 		}
 	}
 }
+
+func TestAggregate(t *testing.T) {
+	const servers = `
+auth: {tokens: {laptop: secret-laptop}}
+servers:
+  a: {stdio: {command: /bin/a}}
+  b: {stdio: {command: /bin/b}, disabled: true}
+  c.d: {stdio: {command: /bin/c}}
+  e__f: {stdio: {command: /bin/e}}
+  g_: {stdio: {command: /bin/g}}
+`
+	off, err := Parse([]byte("version: 1\n"+strings.Replace(strings.Replace(servers, "  e__f: {stdio: {command: /bin/e}}\n", "", 1), "  g_: {stdio: {command: /bin/g}}\n", "", 1)), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.AggregateMembers() != nil {
+		t.Errorf("members without aggregate: %v", off.AggregateMembers())
+	}
+	c, err := Parse([]byte("version: 1\naggregate: {servers: [c.d, b, a], log: {requests: true}}\n"+servers), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.AggregateMembers(); !slices.Equal(got, []string{"a", "c.d"}) || !c.Aggregate.Log.Requests {
+		t.Errorf("members %v, the disabled b left out", got)
+	}
+	for doc, want := range map[string]string{
+		"aggregate: {}\n":                     `servers.e__f: a server on the aggregate endpoint cannot have "__" in its name`,
+		"aggregate: {servers: [g_]}\n":        `servers.g_: a server on the aggregate endpoint cannot have "__" in its name or end in '_'`,
+		"aggregate: {servers: []}\n":          "aggregate.servers: must name at least one server",
+		"aggregate: {servers: [a, nope]}\n":   "aggregate.servers[1]: is not a server in servers",
+		"aggregate: {servers: [a, a]}\n":      "aggregate.servers[1]: is listed twice",
+		"aggregate: {servers: [a], other: 1}": "field other not found",
+	} {
+		_, err := Parse([]byte("version: 1\n"+doc+"\n"+servers), noEnv)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: err = %v, want %q", doc, err, want)
+		}
+	}
+}

@@ -26,6 +26,8 @@ escrow:
   maxEntries: 1000
   sourceArguments: [chat_id, message_id, ticket]
   socket: {path: /run/mcp-gate/escrow.sock, allowUIDs: [1001]}   # user 1001 needs no key
+aggregate:
+  servers: [notes, mail]   # leave out to serve every enabled server
 servers:
   notes:
     stdio:
@@ -92,6 +94,9 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `escrow.socket.path` | required with `socket` | Absolute path of a unix socket that serves the same API, at most 103 bytes. Its directory (symlinks resolved) must be root's or the gate's user's and writable by nobody else, except a sticky directory owned by root; prefer a directory of the gate's own, such as `/run/mcp-gate`, to a shared one like `/tmp`. The parent directory is created 0700 if missing; a stale socket file is replaced, anything else there stops the start; the file is removed at shutdown |
 | `escrow.socket.allowUIDs` | none | User IDs served on the socket without a key, read from the kernel (`SO_PEERCRED`, `LOCAL_PEERCRED`). Every process of a listed user outside the gate's tree is trusted; on Linux the gate and its descendants (the stdio servers) still need the key, on macOS they do not. On Linux the check reads other users' `/proc` entries; where they are hidden (`ProtectProc=invisible`, `hidepid`), keyless access fails closed. Do not list the gate's own user: its stdio servers can start processes outside its tree (see [serve](../commands/serve.md#escrow-socket)). Other users need the key, as on the listener |
 | `escrow.socket.mode` | `0600` | Permission bits of the socket file, in octal. `0600` admits only the gate's user and root; `0660` with a shared group admits the group's members, who need the key unless listed in `allowUIDs` |
+| `aggregate` | none | Serve servers together at `/mcp`, tools and prompts named `<server>__<name>` (see [serve](../commands/serve.md#aggregate-endpoint)). `aggregate: {}` serves every enabled server |
+| `aggregate.servers` | every server | The servers served at `/mcp`; not empty, no name twice. A disabled server is left out. A server served there cannot have `__` in its name or end in `_` |
+| `aggregate.log.requests` | `false` | Log each HTTP request to `/mcp`, as `log.requests` does for a server |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |

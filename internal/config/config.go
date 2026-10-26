@@ -17,6 +17,8 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,8 +77,51 @@ type Config struct {
 	Admin Tokens `yaml:"admin,omitempty"`
 	// Escrow configures the secret escrow, which is on when its key hash is in the config or the
 	// environment.
-	Escrow  Escrow             `yaml:"escrow,omitempty"`
-	Servers map[string]*Server `yaml:"servers"`
+	Escrow Escrow `yaml:"escrow,omitempty"`
+	// Aggregate, if set, serves the tools, prompts and resources of several servers at
+	// AggregatePath.
+	Aggregate *Aggregate         `yaml:"aggregate,omitempty"`
+	Servers   map[string]*Server `yaml:"servers"`
+}
+
+// AggregatePath is the route of the aggregate endpoint. It has one segment, so it never
+// collides with a server's /<name>/mcp.
+const AggregatePath = "/mcp"
+
+// AggregateSeparator joins a server's name and a tool or prompt name in the aggregate catalog;
+// the name of a member server cannot hold it.
+const AggregateSeparator = "__"
+
+// Aggregate configures the aggregate endpoint.
+type Aggregate struct {
+	// Servers are the servers it serves; nil means every enabled server. A disabled server is
+	// left out.
+	Servers []string `yaml:"servers,omitempty"`
+	Log     Log      `yaml:"log,omitempty"`
+}
+
+// AggregateMembers returns the enabled servers the aggregate endpoint serves, sorted; nil when
+// it is off.
+func (c *Config) AggregateMembers() []string {
+	if c.Aggregate == nil {
+		return nil
+	}
+	var out []string
+	if c.Aggregate.Servers == nil {
+		for name, s := range c.Servers {
+			if s != nil && !s.Disabled {
+				out = append(out, name)
+			}
+		}
+	} else {
+		for _, name := range c.Aggregate.Servers {
+			if s := c.Servers[name]; s != nil && !s.Disabled && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Escrow configures the secret escrow.

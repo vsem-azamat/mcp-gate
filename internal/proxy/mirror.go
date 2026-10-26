@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -95,6 +96,8 @@ type Mirror struct {
 
 	cancel context.CancelFunc // set by Start; ends the workers and the listings
 	wg     sync.WaitGroup
+
+	watchers []func() // told after the catalog changed; set before Start
 }
 
 type stats struct {
@@ -257,9 +260,37 @@ func (m *Mirror) sync(ctx context.Context, kinds int) (failed int, notReady bool
 	if err != nil {
 		return kinds, false
 	}
-	m.apply(kinds&^l.failed, &l)
+	if applied := kinds &^ l.failed; applied != 0 {
+		m.apply(applied, &l)
+		for _, w := range m.watchers {
+			w()
+		}
+	}
 	return l.failed, false
 }
+
+// Watch registers fn to be called, outside the mirror's lock, after a listing was applied to
+// the catalog. It is called before Start.
+func (m *Mirror) Watch(fn func()) { m.watchers = append(m.watchers, fn) }
+
+// Catalog is a snapshot of the entries a mirror serves, keyed as registered: tools and prompts
+// by name, resources by URI, templates by URI template. The entries are shared and read-only.
+type Catalog struct {
+	Tools     map[string]*mcp.Tool
+	Prompts   map[string]*mcp.Prompt
+	Resources map[string]*mcp.Resource
+	Templates map[string]*mcp.ResourceTemplate
+}
+
+// Catalog returns the entries the mirror serves now.
+func (m *Mirror) Catalog() Catalog {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return Catalog{Tools: maps.Clone(m.tools), Prompts: maps.Clone(m.prompts), Resources: maps.Clone(m.resources), Templates: maps.Clone(m.templates)}
+}
+
+// Name is the server's name in the config.
+func (m *Mirror) Name() string { return m.opts.Name }
 
 // list reads the kinds the server advertises; a kind it does not advertise is empty.
 func (m *Mirror) list(ctx context.Context, cs *mcp.ClientSession, kinds int) listing {

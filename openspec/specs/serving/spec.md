@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`mcp-gate serve` puts the downstream servers of a config behind one HTTP listener. Each enabled server is served at `/<name>/mcp` over stateless streamable HTTP, behind named bearer tokens, with its catalog mirrored from the one supervised downstream session and filtered by the server's policy. Calls are forwarded to that session with progress, cancellation and `_meta` handled per call, and their results are redacted, failing closed, with the files of download tools scanned (see the file-scanning spec) and the secrets kept in the escrow when it is on (see the escrow spec). The gate reports liveness, readiness and status, and writes one audit line per call.
+`mcp-gate serve` puts the downstream servers of a config behind one HTTP listener. Each enabled server is served at `/<name>/mcp` over stateless streamable HTTP, behind named bearer tokens, and optionally many of them together at `/mcp`, with its catalog mirrored from the one supervised downstream session and filtered by the server's policy. Calls are forwarded to that session with progress, cancellation and `_meta` handled per call, and their results are redacted, failing closed, with the files of download tools scanned (see the file-scanning spec) and the secrets kept in the escrow when it is on (see the escrow spec). The gate reports liveness, readiness and status, and writes one audit line per call.
 
 ## Requirements
 
@@ -27,7 +27,7 @@
 
 ### Requirement: Routes
 
-Each enabled server SHALL be served at exactly `/<name>/mcp`; any other path, including the route of a disabled server, SHALL get 404, except `/_healthz`, `/_readyz`, `/_status` and, with the escrow on and `escrow.tcp` true, the escrow API under `/_escrow/`, which none of the route checks below apply to. A route SHALL run, in this order: the Host check, the token check, cross-origin protection, a 503 with `Retry-After: 5` while the server's catalog has never been listed, a request body limit of 4 MiB (413) read within 30 seconds (408), and the SDK's stateless streamable HTTP handler, which answers GET with 405. When `listen.allowedHosts` is set, a request whose Host is not in it (an entry without a port matching any port, without regard to case) SHALL get 403. Unless `listen.behindProxy` is set, the SDK's DNS-rebinding check SHALL reject a request to a loopback listener whose Host is not a loopback name. A panic in an HTTP handler SHALL be answered with 500, and a panic while handling an MCP request or a notification with an internal JSON-RPC error or nothing; either SHALL be logged by its type, without its value. The listener SHALL bound request headers to 64 KiB read within 10 seconds and close idle connections after 120 seconds, and SHALL NOT bound the time a call takes.
+Each enabled server SHALL be served at exactly `/<name>/mcp`; any other path, including the route of a disabled server, SHALL get 404, except `/mcp` when the aggregate endpoint is on (see Aggregate endpoint), `/_healthz`, `/_readyz`, `/_status` and, with the escrow on and `escrow.tcp` true, the escrow API under `/_escrow/`, which none of the route checks below apply to. A route SHALL run, in this order: the Host check, the token check, cross-origin protection, a 503 with `Retry-After: 5` while the server's catalog has never been listed, a request body limit of 4 MiB (413) read within 30 seconds (408), and the SDK's stateless streamable HTTP handler, which answers GET with 405. When `listen.allowedHosts` is set, a request whose Host is not in it (an entry without a port matching any port, without regard to case) SHALL get 403. Unless `listen.behindProxy` is set, the SDK's DNS-rebinding check SHALL reject a request to a loopback listener whose Host is not a loopback name. A panic in an HTTP handler SHALL be answered with 500, and a panic while handling an MCP request or a notification with an internal JSON-RPC error or nothing; either SHALL be logged by its type, without its value. The listener SHALL bound request headers to 64 KiB read within 10 seconds and close idle connections after 120 seconds, and SHALL NOT bound the time a call takes.
 
 #### Scenario: Server not connected yet
 
@@ -52,6 +52,34 @@ A route SHALL accept the tokens in `auth.tokens` unless the server sets `auth.in
 
 - **WHEN** a server takes the global token `laptop`, a second server only its own token `phone`, and a third is public
 - **THEN** `laptop` reaches only the first, `phone` only the second, the third needs none, and the audit lines name `laptop`, `phone` and no principal
+
+### Requirement: Aggregate endpoint
+
+With `aggregate` set, the gate SHALL also serve the servers of `aggregate.servers` (every enabled server by default) together at exactly `/mcp`, which no server route can be, through the same chain as a server route with these differences. A request SHALL reach a member exactly when that member's own route would accept its `Authorization` header: a public member always, any other when the token is one the member accepts. A request without the header SHALL reach the public members; a request whose credential no member accepts, or that reaches no member, SHALL get 401 with the body `Unauthorized`, even when there are public members. A request SHALL get 503 with `Retry-After: 5` until startup is over (see Health) or every member it reaches has had its catalog listed or is in `needs-login`.
+
+A request SHALL be served a catalog of only the members it reaches, computed for that set of members: each member's tools and prompts as the member's own route lists them, renamed `<server>__<name>`, and its resources and resource templates with their URIs unchanged. A tool or prompt whose new name is longer than 64 characters or holds a character other than ASCII letters, digits, `_`, `.` and `-` SHALL be left out of it and logged once, and a call of it SHALL be refused with a `denied` line naming the member. A resource URI, or a resource template, that more than one of those members lists SHALL be left out of it. A resource read SHALL go to the one member that lists the URI, or, when none lists it, to the one member with a template that matches it; when no member or more than one qualifies, the read SHALL fail as one of an unknown resource. The upstream server SHALL advertise tools, and prompts and resources when any of the members' does, each with list-changed notifications, and SHALL report the config's `name` and the gate's version as its implementation.
+
+A tool call, prompt get or resource read SHALL be checked again against the access of the request before it is handed to the member, and SHALL then be handled by the member as on its own route: its filters, `forwardMeta`, `callTimeout`, progress, cancellation, redaction, file scanning and escrow, its errors, and its audit line, which SHALL name the member as `server`, the member's own name for the tool or prompt, and as `principal` the name the member gives the token. A request the aggregate refuses before a member sees it, because it names no member the request reaches or a resource more than one member claims, SHALL be logged, with the name redacted under every redaction rule, as a `call` line with outcome `denied`, an empty `server`, the name as the client sent it, and the request's token names joined by commas as `principal`. A change in a member's catalog SHALL reach the aggregate catalog, and clients that listen for changes there SHALL be told. A member keeps its entries in the aggregate catalog while it is down, as on its own route, and a member whose catalog was never listed has none. `/_readyz` and `/_status` SHALL NOT report the aggregate endpoint. `aggregate.log.requests` SHALL log the requests to `/mcp` as `log.requests` does for a server, naming `/mcp` as the server.
+
+#### Scenario: Tokens with different access
+
+- **WHEN** `alpha` takes the global token `laptop`, `beta` only its own token `phone`, `pub` is public with the tool allow list `[echo]`, and all three are on the aggregate endpoint
+- **THEN** `laptop` lists and calls the tools of `alpha` and `pub`, `phone` those of `beta` and `pub`, a request without a token only `pub__echo`; a call of `beta__echo` with `laptop` or of `alpha__echo` with `phone` fails as one of an unknown tool and is logged `denied` with an empty `server`; `pub__sleep` is refused by `pub`'s filter with a `denied` line naming `pub`; and a wrong token gets 401
+
+#### Scenario: Same behaviour as the server's route
+
+- **WHEN** a client calls `alpha__echo` with a GitHub token in the text, `alpha__badblob`, and `alpha__progress` with a progress token, through the aggregate endpoint
+- **THEN** the token is replaced by `[REDACTED:github_token]` and the audit line names `alpha` and counts one redaction, the blob result is withheld, and the progress reaches the client
+
+#### Scenario: Catalog change and a long name
+
+- **WHEN** a member adds the tool `fresh` and a tool whose prefixed name is 65 characters long
+- **THEN** a `2026-07-28` client listening on `/mcp` is notified, `alpha__fresh` is listed and can be called, and the long tool is listed only on the member's own route
+
+#### Scenario: Resource on two members
+
+- **WHEN** two members both list `fake://info` and the template `fake://items/{id}`
+- **THEN** the aggregate catalog lists neither, and reads of `fake://info` and `fake://items/7` fail
 
 ### Requirement: Filters
 
