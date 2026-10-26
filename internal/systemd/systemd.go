@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"syscall"
 )
 
 // Environment variables of the protocol. None of them is meant for the gate's children.
@@ -27,9 +28,8 @@ const listenFDsStart = 3
 
 // Notification states the gate sends.
 const (
-	Ready     = "READY=1"
-	Stopping  = "STOPPING=1"
-	Reloading = "RELOADING=1"
+	Ready    = "READY=1"
+	Stopping = "STOPPING=1"
 )
 
 // Listener returns the TCP listening socket systemd passed to this process, or nil when it passed
@@ -56,6 +56,10 @@ func listener(lookup func(string) (string, bool), pid, fd int) (net.Listener, er
 		return nil, nil
 	case n > 1:
 		return nil, fmt.Errorf("systemd passed %d sockets; the gate serves exactly one (one ListenStream= in the socket unit)", n)
+	}
+	// FileListener takes a connected socket too, which fails only at the first accept.
+	if listening, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_ACCEPTCONN); err != nil || listening == 0 {
+		return nil, errors.New("the socket systemd passed is not a listening socket (Accept=no in the socket unit)")
 	}
 	f := os.NewFile(uintptr(fd), "systemd-socket")
 	if f == nil {

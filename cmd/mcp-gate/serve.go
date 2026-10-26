@@ -116,7 +116,7 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 	}
 	ln, err := listen(ctx, g, cfg, env, logger)
 	if err != nil {
-		logger.Error("cannot listen", "addr", cfg.Listen.Addr, "error", err.Error())
+		logger.Error("cannot listen", "error", err.Error())
 		return exitTrouble
 	}
 	if err := g.Run(ctx, ln); err != nil {
@@ -132,10 +132,14 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 func listen(ctx context.Context, g *gate.Gate, cfg *config.Config, env lookupEnv, logger *slog.Logger) (net.Listener, error) {
 	ln, err := systemd.Listener(env, os.Getpid())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("the socket systemd passed: %w", err)
 	}
 	if ln == nil {
-		return g.Listen(ctx)
+		ln, err := g.Listen(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("listen.addr %s: %w", cfg.Listen.Addr, err)
+		}
+		return ln, nil
 	}
 	logger.Info("serving the socket systemd passed", "addr", ln.Addr().String())
 	if !sameAddr(ln.Addr(), cfg.Listen.Addr) {
@@ -145,8 +149,10 @@ func listen(ctx context.Context, g *gate.Gate, cfg *config.Config, env lookupEnv
 	return ln, nil
 }
 
-// sameAddr reports whether a listener's address is the configured one: the same port and the
-// same IP, any unspecified address matching another. A configured host name is taken to match.
+// sameAddr reports whether a listener's address is the configured one: the same port, and the
+// same IP, an unspecified address (or an empty host) matching only another, and localhost
+// matching only a loopback address. Any other host name is taken not to match, since the gate
+// cannot tell what it resolves to.
 func sameAddr(a net.Addr, configured string) bool {
 	tcp, ok := a.(*net.TCPAddr)
 	if !ok {
@@ -156,11 +162,21 @@ func sameAddr(a net.Addr, configured string) bool {
 	if err != nil || port != strconv.Itoa(tcp.Port) {
 		return false
 	}
+	got, ok := netip.AddrFromSlice(tcp.IP)
+	if !ok {
+		return false
+	}
+	got = got.Unmap()
+	switch {
+	case host == "":
+		return got.IsUnspecified()
+	case strings.EqualFold(host, "localhost"):
+		return got.IsLoopback()
+	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
-		return true
+		return false
 	}
-	got, _ := netip.AddrFromSlice(tcp.IP)
-	got, ip = got.Unmap(), ip.Unmap()
+	ip = ip.Unmap()
 	return got == ip || (got.IsUnspecified() && ip.IsUnspecified())
 }

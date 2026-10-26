@@ -164,3 +164,28 @@ func TestDrainLinger(t *testing.T) {
 		t.Errorf("serve: %v", err)
 	}
 }
+
+// TestDrainThenShutdown checks that Shutdown after a Drain that found no connection succeeds:
+// both close the listener.
+func TestDrainThenShutdown(t *testing.T) {
+	for range 50 {
+		var lc net.ListenConfig
+		ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := NewServer("", http.NotFoundHandler(), slog.New(slog.DiscardHandler))
+		served := make(chan error, 1)
+		go func() { served <- srv.Serve(ln) }()
+		srv.Drain(t.Context(), 0)
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		err = srv.Shutdown(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("shutdown after drain: %v", err)
+		}
+		if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("serve: %v", err)
+		}
+	}
+}

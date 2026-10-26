@@ -261,25 +261,54 @@ servers:
 	}
 
 	time.Sleep(300 * time.Millisecond)
-	slowSession := connect(t, keepAlive, endpoint)
+	// A slow call, with progress so that the test knows it reached the server before the SIGTERM.
+	progressed := make(chan struct{}, 1)
+	slowClient := mcp.NewClient(&mcp.Implementation{Name: "smoke", Version: "1"}, &mcp.ClientOptions{
+		ProgressNotificationHandler: func(context.Context, *mcp.ProgressNotificationClientRequest) {
+			select {
+			case progressed <- struct{}{}:
+			default:
+			}
+		},
+	})
+	slowSession, err := slowClient.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: endpoint, HTTPClient: &http.Client{Transport: bearer{keepAlive}}, MaxRetries: -1, DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = slowSession.Close() })
 	slow := make(chan error, 1)
 	go func() {
-		res, err := slowSession.CallTool(ctx, &mcp.CallToolParams{Name: "sleep", Arguments: map[string]any{"ms": 1500}})
-		if err == nil && res.IsError {
-			err = fmt.Errorf("sleep: %+v", res)
+		params := &mcp.CallToolParams{Name: "progress", Arguments: map[string]any{"steps": 8, "ms": 200}}
+		params.SetProgressToken("slow")
+		res, err := slowSession.CallTool(ctx, params)
+		if err == nil && (res.IsError || len(res.Content) == 0) {
+			err = fmt.Errorf("progress: %+v", res)
 		}
 		slow <- err
 	}()
-	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-progressed:
+	case err := <-slow:
+		t.Fatalf("the slow call ended early: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("no progress from the slow call")
+	}
 
 	// systemctl restart: stop the running gate, then start the next on the same socket.
 	old.stop(t)
 	oldNotify.await(t, old, "STOPPING=1")
-	if err := <-slow; err != nil {
-		t.Errorf("the call in flight at SIGTERM: %v", err)
-	}
 	next, _ := start("new")
 	afterRestart.Store(true)
+	select {
+	case err := <-slow:
+		if err != nil {
+			t.Errorf("the call in flight at SIGTERM: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the call in flight at SIGTERM did not end")
+	}
 	time.Sleep(time.Second)
 	stopTraffic()
 
@@ -295,6 +324,17 @@ servers:
 	// The session of the slow call, idle across the restart, still calls.
 	if err := echo(ctx, slowSession, "after"); err != nil {
 		t.Errorf("a session idle across the restart: %v", err)
+	}
+	// The stdio server inherits neither the passed socket nor systemd's variables.
+	var pids struct{ Sockets int }
+	if err := json.Unmarshal([]byte(callText(t, slowSession, "pids", nil)), &pids); err != nil || pids.Sockets != 0 {
+		t.Errorf("the stdio server has %d sockets open (%v)", pids.Sockets, err)
+	}
+	env := callText(t, slowSession, "env", nil)
+	for _, leak := range []string{"LISTEN_", "NOTIFY_SOCKET"} {
+		if strings.Contains(env, leak) {
+			t.Errorf("the stdio server's environment holds %s", leak)
+		}
 	}
 	for _, p := range []*process{old, next} {
 		if len(p.logs.messages("serving the socket systemd passed")) != 1 {

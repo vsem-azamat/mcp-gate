@@ -439,7 +439,6 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	select {
 	case <-ctx.Done():
 		g.logger.Info("shutting down")
-		g.notify(systemd.Stopping)
 	case err = <-served:
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
@@ -447,6 +446,8 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	}
 	cancelStartup()
 	<-startupDone
+	// After the startup watcher, so that READY=1 never follows it.
+	g.notify(systemd.Stopping)
 	err = errors.Join(err, g.shutdown(context.WithoutCancel(ctx)))
 	if sockServed != nil {
 		if serr := <-sockServed; !errors.Is(serr, http.ErrServerClosed) {

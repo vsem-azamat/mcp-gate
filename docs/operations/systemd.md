@@ -77,7 +77,7 @@ sudo install -m 0644 packaging/systemd/mcp-gate.service packaging/systemd/mcp-ga
 sudo systemctl daemon-reload
 ```
 
-`ListenStream=` in `mcp-gate.socket` must be the config's `listen.addr`; change it with `sudo systemctl edit mcp-gate.socket` (an empty `ListenStream=` line first clears the shipped one). systemd binds the socket, so the gate needs no privilege even for a port below 1024.
+`ListenStream=` in `mcp-gate.socket` must be the config's `listen.addr`; change it with `sudo systemctl edit mcp-gate.socket` (an empty `ListenStream=` line first clears the shipped one). The gate warns at start when the socket is on another address. systemd binds the socket, so the gate needs no privilege even for a port below 1024. The socket starts before the network is up; `FreeBind=yes` in the shipped unit lets it bind an address that is not configured yet, such as a LAN or VPN address. On a host where the gate already runs without the socket unit, stop `mcp-gate.service` before the first start of `mcp-gate.socket`, or the bind fails with "address in use".
 
 Check the config with the service's environment before the first start, then start it:
 

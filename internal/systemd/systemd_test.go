@@ -105,11 +105,34 @@ func TestListenerErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A connected TCP socket, as Accept=yes would pass.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("conn is %T", conn)
+	}
+	connFile, err := tcpConn.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connFile.Close()
 	for _, c := range []struct {
 		name, fds string
 		fd        int
 		want      string
 	}{
+		{"connected", "1", int(connFile.Fd()), "not a listening socket"},
 		{"garbage", "x", 1 << 20, "not a number"},
 		{"two", "2", 1 << 20, "passed 2 sockets"},
 		{"unix", "1", unixFD, "not TCP"},

@@ -86,6 +86,8 @@ func (s *Server) Serve(ln net.Listener) error {
 		_ = ln.Close()
 		return http.ErrServerClosed
 	}
+	// Drain and Shutdown both close it; the second close must not fail the Shutdown.
+	ln = &closeOnce{Listener: ln}
 	s.listeners = append(s.listeners, ln)
 	s.mu.Unlock()
 	err := s.Server.Serve(ln)
@@ -119,6 +121,18 @@ func (s *Server) Drain(ctx context.Context, linger time.Duration) {
 		case <-tick.C:
 		}
 	}
+}
+
+// closeOnce is a listener whose Close closes it once and then reports success.
+type closeOnce struct {
+	net.Listener
+	once sync.Once
+	err  error
+}
+
+func (l *closeOnce) Close() error {
+	l.once.Do(func() { l.err = l.Listener.Close() })
+	return l.err
 }
 
 // drainPoll is how often Drain checks the open connections.
