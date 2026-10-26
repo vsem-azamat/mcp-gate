@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/vsem-azamat/mcp-gate)](go.mod)
 [![License](https://img.shields.io/github/license/vsem-azamat/mcp-gate)](LICENSE)
 
-mcp-gate sits between your AI agents and your [MCP](https://modelcontextprotocol.io) servers. Each server gets its own URL, each agent gets its own token, and passwords or API keys in a server's answer are hidden before the agent sees them.
+mcp-gate is a self-hosted gateway between your AI agents and your [MCP](https://modelcontextprotocol.io) servers. Each server gets its own URL, each agent gets its own token, and passwords or API keys in a server's answer are hidden before the agent sees them.
 
 It is one Go binary, built on the official [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).
 
