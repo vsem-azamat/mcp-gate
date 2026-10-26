@@ -5,10 +5,31 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 )
+
+// FileMode is a file's permission bits, written in octal: 0600, "0600" or "0o600".
+type FileMode uint32
+
+// UnmarshalYAML implements yaml.Unmarshaler. It reads the scalar's text as octal whatever its
+// YAML type, since YAML reads 0600 as a decimal or octal number depending on the version.
+func (m *FileMode) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode {
+		return fmt.Errorf("line %d: a file mode is octal, such as 0600", n.Line)
+	}
+	v, err := strconv.ParseUint(strings.TrimPrefix(strings.TrimPrefix(n.Value, "0o"), "0O"), 8, 32)
+	if err != nil {
+		return fmt.Errorf("line %d: a file mode is octal, such as 0600", n.Line)
+	}
+	*m = FileMode(v)
+	return nil
+}
+
+// MarshalYAML implements yaml.Marshaler.
+func (m FileMode) MarshalYAML() (any, error) { return fmt.Sprintf("%04o", uint32(m)), nil }
 
 // Duration is a time.Duration written as a string with a unit, such as "30s" or "2m". A bare
 // number is rejected, since it is ambiguous.

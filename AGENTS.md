@@ -63,7 +63,7 @@ This repository is public. Before every commit and PR, check that nothing privat
 | `internal/config/` | Config file: strict YAML, `${VAR}` expansion, defaults, validation |
 | `internal/config/importer/` | Conversion of an mcp-proxy `config.json` for `mcp-gate import` |
 | `internal/downstream/` | Supervisor of one downstream server: stdio line connection, size-limited HTTP client, probes, restarts, version pin, notifications |
-| `internal/escrow/` | Secret escrow: key hash sources, in-memory store, replacer that keeps findings, kept files, the frozen `/_escrow/` HTTP API and its failed-auth limit |
+| `internal/escrow/` | Secret escrow: key hash sources, in-memory store, replacer that keeps findings, kept files, the frozen `/_escrow/` HTTP API, its failed-auth limit, the unix socket with peer credentials |
 | `internal/filescan/` | Scanning of the files download tools write: paths, safe opening under roots, withholding, failing closed |
 | `internal/gate/` | `mcp-gate serve` assembled: supervisors, mirrors and routes per server, readiness, `/_status`, learned pins file, shutdown |
 | `internal/oauth/` | OAuth client of HTTP servers: discovery, registration and login for `mcp-gate auth`, the grant store, the token source that refreshes |

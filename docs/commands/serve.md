@@ -80,6 +80,17 @@ $ curl -s -X DELETE -H "Authorization: Bearer $key" http://127.0.0.1:9090/_escro
 
 A wrong or missing key is 401 on every path; 20 wrong keys from one client address give 429 until it has waited (one more attempt every 3 seconds). Requests without a key do not count. Behind a reverse proxy on the same host, set `listen.behindProxy` so that the limit is kept per client (`X-Forwarded-For`), not for the proxy as a whole. Files that a server's `redact.files.tools` write are kept the same way, as `[REDACTED:file #<handle>]`.
 
+### Escrow socket
+
+With `escrow.socket`, the same API is also served on a unix socket. The kernel tells the gate which user connected; a user in `escrow.socket.allowUIDs` (by default the gate's own user) needs no key there, and any other user needs the key, exactly as on the listener. With `escrow.tcp: false` the listener no longer answers `/_escrow/`, so a reverse proxy in front of the gate cannot reach the API at all.
+
+```console
+$ curl -s --unix-socket /run/mcp-gate/escrow.sock http://escrow/_escrow/k3j5rz2q7wd/meta
+{"handle":"k3j5rz2q7wd","type":"password",…}
+```
+
+The access log names a socket client `unix:uid=<n>`, and the failed-auth limit counts per user ID. Where the system does not report the peer's user (on systems other than Linux and macOS), every socket request needs the key.
+
 ## Logs
 
 Every forwarded call writes one `call` line with the server, the token name (`principal`), the method, the tool or prompt or resource URI, the duration, the outcome and the number of redactions; arguments and results are never logged:

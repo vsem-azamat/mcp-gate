@@ -31,6 +31,23 @@ escrow:
 
 systemd gives the service a private read-only copy (mode 0400, owned by the service's user or by root), which passes the gate's checks on the file. Commands run through `systemd-run` need the same `-p LoadCredential=…` for the config to load. Remove `MCP_GATE_ESCROW_KEY_SHA256` from `gate.env`, or keep it equal: two different hashes stop the gate.
 
+### Escrow socket
+
+To serve the escrow API on a unix socket (see [serve](../commands/serve.md#escrow-socket)), give the unit a runtime directory in a drop-in and put the socket in it:
+
+```ini
+[Service]
+RuntimeDirectory=mcp-gate
+RuntimeDirectoryMode=0700
+```
+
+```yaml
+escrow:
+  socket: {path: /run/mcp-gate/escrow.sock}   # the user unit: ${XDG_RUNTIME_DIR}/mcp-gate/escrow.sock
+```
+
+systemd creates the directory before the start, writable despite `ProtectSystem=strict`, and removes it at stop. The gate's own user then reads secrets without the key; other local users, and a reverse proxy in front of the TCP listener, still need it. Add `escrow.tcp: false` when nothing should reach the API over TCP.
+
 ## Install the system unit
 
 ```sh

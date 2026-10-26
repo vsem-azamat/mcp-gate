@@ -54,7 +54,8 @@ type meta struct {
 //	DELETE /_escrow/<handle>       drops the entry: 204
 //
 // Every answer carries Cache-Control: no-store. Without the key the answer is 401, whatever the
-// path; a client with too many failed attempts gets 429 first.
+// path; a client with too many failed attempts gets 429 first. A request through the escrow
+// socket from an allowed user ID needs no key.
 func (e *Escrow) Handler() http.Handler { return http.HandlerFunc(e.serveHTTP) }
 
 func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +73,15 @@ func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if !HandleRE.MatchString(handle) {
 		logHandle = "<invalid>"
 	}
-	client := e.remote(r)
+	var client string
+	sp, viaSocket := socketPeer(r.Context())
+	if viaSocket {
+		client = sp.String()
+	} else {
+		client = e.remote(r)
+	}
+	// A socket peer whose user ID the kernel reported and that is allowed needs no key.
+	keyless := viaSocket && sp.known && e.allowed[sp.uid]
 	defer func() {
 		e.logger.Info("escrow access", "op", op, "handle", logHandle, "status", status, "remote", client)
 	}()
@@ -83,7 +92,7 @@ func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too Many Requests", status)
 		return
 	}
-	if key := presentedKey(r); !e.authorized(key) {
+	if key := presentedKey(r); !keyless && !e.authorized(key) {
 		if key != "" {
 			e.limit.fail(client) // only a presented key can be a guess
 		}

@@ -38,6 +38,7 @@ const (
 	DefaultEscrowTTL          = 24 * time.Hour
 	DefaultEscrowMaxEntries   = 1000
 	DefaultFileMaxBytes       = 20 << 20
+	DefaultEscrowSocketMode   = FileMode(0o600)
 )
 
 // DefaultTrustedProxies are the peers whose X-Forwarded-For is read when behindProxy is set
@@ -80,6 +81,10 @@ type Config struct {
 
 // Escrow configures the secret escrow.
 type Escrow struct {
+	// TTL is how long a kept secret stays retrievable, unless its server sets redact.escrowTTL.
+	TTL *Duration `yaml:"ttl,omitempty"`
+	// MaxEntries caps the entries held; the oldest is evicted. 0 means the default.
+	MaxEntries int `yaml:"maxEntries,omitempty"`
 	// KeyHash is the hex SHA-256 of the API key, usually ${VAR}. It excludes KeyHashFile.
 	KeyHash string `yaml:"keyHash,omitempty"`
 	// KeyHashFile is the absolute path of a file that holds the hex SHA-256 of the API key, such
@@ -91,10 +96,22 @@ type Escrow struct {
 	// KeyHashVars are the environment variables KeyHash was expanded from, which the gate keeps
 	// from its children as it keeps the key hash variables. Set by Parse, not by the file.
 	KeyHashVars []string `yaml:"-"`
-	// TTL is how long a kept secret stays retrievable, unless its server sets redact.escrowTTL.
-	TTL *Duration `yaml:"ttl,omitempty"`
-	// MaxEntries caps the entries held; the oldest is evicted. 0 means the default.
-	MaxEntries int `yaml:"maxEntries,omitempty"`
+	// TCP serves the API at /_escrow/ on the listener; nil means true.
+	TCP *bool `yaml:"tcp,omitempty"`
+	// Socket, if set, also serves the API on a unix socket.
+	Socket *EscrowSocket `yaml:"socket,omitempty"`
+}
+
+// EscrowSocket serves the escrow API on a unix socket, where peers whose user ID is allowed need
+// no key.
+type EscrowSocket struct {
+	// Path is the absolute path of the socket.
+	Path string `yaml:"path"`
+	// AllowUIDs are the user IDs of peers served without a key; nil means the gate's own user
+	// and an empty list none.
+	AllowUIDs []int `yaml:"allowUIDs"`
+	// Mode is the socket file's permission bits; nil means DefaultEscrowSocketMode.
+	Mode *FileMode `yaml:"mode,omitempty"`
 }
 
 // Listen configures the upstream listener.
@@ -363,6 +380,13 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Escrow.MaxEntries == 0 {
 		c.Escrow.MaxEntries = DefaultEscrowMaxEntries
+	}
+	if c.Escrow.TCP == nil {
+		c.Escrow.TCP = new(true)
+	}
+	if s := c.Escrow.Socket; s != nil && s.Mode == nil {
+		v := DefaultEscrowSocketMode
+		s.Mode = &v
 	}
 	for _, s := range c.Servers {
 		if s.Redact.EscrowTTL == nil {

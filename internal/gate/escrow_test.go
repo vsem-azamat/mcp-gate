@@ -1,12 +1,16 @@
 package gate_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -243,5 +247,84 @@ func TestEscrowPerServer(t *testing.T) {
 	}
 	if n := len(r.logs.lines("escrowed secret")) + len(r.logs.lines("escrowed file")); n != 1 {
 		t.Errorf("%d entries kept, want 1 (from kept)", n)
+	}
+}
+
+// socketGet performs a request on the escrow socket at sock.
+func socketGet(t *testing.T, sock, method, path string, headers ...string) (int, string) {
+	t.Helper()
+	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", sock)
+	}}
+	defer tr.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(t.Context(), method, "http://escrow"+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	res, err := (&http.Client{Transport: tr}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(body)
+}
+
+func TestEscrowSocket(t *testing.T) {
+	const secret = "Summer-Blue-77!"
+	for _, tcp := range []bool{true, false} {
+		t.Run(fmt.Sprintf("tcp=%v", tcp), func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "esc") //nolint:usetesting // t.TempDir can exceed the socket path limit of about 100 bytes
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			sock := filepath.Join(dir, "run", "escrow.sock")
+			r := startGate(t, configDoc(fmt.Sprintf("escrow:\n  tcp: %v\n  socket: {path: %q}\n", tcp, sock), map[string]string{
+				"chat": stdioServer(t, testkit.Fake{}, ""),
+			}), gateOpts{escrowKey: escrowKey})
+			r.waitReady(t, "chat")
+			res, err := r.connect(t, "chat", clientOpts{}).CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{
+				"text": "the password: " + secret, "chat_id": 42,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := escrowMarkerRE.FindStringSubmatch(textOf(t, res))
+			if m == nil {
+				t.Fatalf("result = %q", textOf(t, res))
+			}
+			// The gate's own user needs no key on the socket; the key works there too.
+			if code, body := socketGet(t, sock, http.MethodGet, "/_escrow/"+m[2]); code != http.StatusOK || body != secret {
+				t.Errorf("socket without a key = %d %q", code, body)
+			}
+			if code, body := socketGet(t, sock, http.MethodGet, "/_escrow/"+m[2]+"/meta", "Authorization", "Bearer "+escrowKey); code != http.StatusOK || !strings.Contains(body, `"source":{"chat_id":42}`) {
+				t.Errorf("socket meta with the key = %d %q", code, body)
+			}
+			if code, _ := socketGet(t, sock, http.MethodGet, "/chat/mcp"); code != http.StatusNotFound {
+				t.Errorf("an MCP route on the socket = %d, want 404", code)
+			}
+			code, _, _ := r.escrowGet(t, http.MethodGet, "/_escrow/"+m[2], "Authorization", "Bearer "+escrowKey)
+			if want := map[bool]int{true: http.StatusOK, false: http.StatusNotFound}[tcp]; code != want {
+				t.Errorf("TCP with the key = %d, want %d", code, want)
+			}
+			if lines := r.logs.lines("escrow access"); len(lines) == 0 || lines[0]["remote"] != "unix:uid="+strconv.Itoa(os.Geteuid()) {
+				t.Errorf("access lines = %v", lines)
+			}
+			if fi, err := os.Stat(filepath.Dir(sock)); err != nil || fi.Mode().Perm() != 0o700 {
+				t.Errorf("socket directory = %v, %v; want 0700", fi, err)
+			}
+			if fi, err := os.Lstat(sock); err != nil || fi.Mode().Perm() != 0o600 {
+				t.Errorf("socket = %v, %v; want 0600", fi, err)
+			}
+			r.stop()
+			if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+				t.Errorf("the socket is still there after shutdown: %v", err)
+			}
+		})
 	}
 }
