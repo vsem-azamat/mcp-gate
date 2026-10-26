@@ -57,3 +57,16 @@ func errUnknownPrompt(name string) error {
 
 // errUnknownResource is the SDK's error for a read of a resource the server does not serve.
 func errUnknownResource(uri string) error { return mcp.ResourceNotFoundError(uri) }
+
+// errUnknown is the error of a request for a tool, prompt or resource the server does not have,
+// named as the caller named it.
+func errUnknown(kind audit.Kind, shown string) error {
+	switch kind {
+	case audit.Prompt:
+		return errUnknownPrompt(shown)
+	case audit.Resource:
+		return errUnknownResource(shown)
+	case audit.Tool:
+	}
+	return errUnknownTool(shown) // a tool's, or what a request of no known kind gets
+}

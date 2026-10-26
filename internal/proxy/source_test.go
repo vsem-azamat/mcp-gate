@@ -53,7 +53,7 @@ func (d *sessionDown) Call(ctx context.Context, fn func(context.Context, *mcp.Cl
 // registered the first listing, so that a route that waits for ready never serves an empty catalog.
 func TestReadyAfterMirrorsHaveTheTools(t *testing.T) {
 	src := NewSource("s", nil)
-	src.Attach(newSessionDown(t))
+	src.Attach(onSession{newSessionDown(t)})
 	m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Source: src})
 	var readyAtApply []bool
 	m.Watch(func() { readyAtApply = append(readyAtApply, m.Ready()) })
@@ -73,7 +73,7 @@ func TestReadyAfterMirrorsHaveTheTools(t *testing.T) {
 func TestMirrorAttachedDuringListing(t *testing.T) {
 	down := newSessionDown(t)
 	src := NewSource("s", nil)
-	src.Attach(down)
+	src.Attach(onSession{down})
 	none := &config.Filter{Allow: []string{}}
 	_ = New(Options{Name: "s", Policy: policy.New(&config.Server{Prompts: none}), Source: src})
 	var shows *Mirror

@@ -66,7 +66,7 @@ func TestAuditOutcomesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mirror := func(down Downstream, r *Redaction) *Mirror {
+	mirror := func(down sessionRunner, r *Redaction) *Mirror {
 		return newMirror(Options{Name: "s", Policy: policy.New(&config.Server{}), Logger: logger, Redaction: r}, down)
 	}
 	call := func(m *Mirror, name string) {

@@ -20,7 +20,7 @@ With `escrow.socket`, `gate.New` builds a second `http.Server` whose mux holds o
 
 Each server's `proxy.Redaction` gets a `proxy.ReplacerFunc`: for every call the mirror builds a `proxy.Request` (method, name, and the arguments decoded once, lazily) and asks for a replacer, which with the escrow on and the server's `redact.escrow` true is `Escrow.Replacer` with the server's name and `redact.escrowTTL`; otherwise the plain marker. A replaced JSON member name is the marker with `#2`, `#3` and so on appended when the object already has that name, so a consumer that parses markers should allow that suffix. Progress messages and logged texts use `redact.Marker` directly, so they never create entries.
 
-A server with `redact.files` gets a `filescan.Scanner` as `proxy.Options.Files`, with `Escrow.KeepFile` as its keeper when the escrow is on for the server; without a keeper it withholds with `[REDACTED:file]`. `Mirror.callTool` runs it on the redacted result, with the time taken just before the call was forwarded; an error withholds the result like a redaction failure, and the number of withheld files is added to the audit line's redactions.
+A server with `redact.files` gets a `filescan.Scanner` as `proxy.Options.Files`, with `Escrow.KeepFile` as its keeper when the escrow is on for the server; without a keeper it withholds with `[REDACTED:file]`. The file scan stage of the request pipeline (`scanFiles`) runs it on the redacted result of a tool call, with the time taken just before the call was forwarded; an error withholds the result like a redaction failure, and the number of withheld files is added to the audit record's redactions.
 
 ## Store
 

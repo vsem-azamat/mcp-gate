@@ -8,6 +8,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
@@ -42,7 +43,7 @@ type nowhere struct{}
 func (nowhere) Write(p []byte) (int, error) { return len(p), nil }
 
 // benchMirror returns a mirror with redaction on and audit lines written as JSON to nowhere.
-func benchMirror(b *testing.B, down Downstream, filter *config.Filter) *Mirror {
+func benchMirror(b *testing.B, down sessionRunner, filter *config.Filter) *Mirror {
 	b.Helper()
 	engine, err := redact.New(redact.Options{})
 	if err != nil {
@@ -75,6 +76,26 @@ func BenchmarkCallToolDenied(b *testing.B) {
 	for b.Loop() {
 		if _, err := m.callTool(b.Context(), req); err == nil {
 			b.Fatal("not denied")
+		}
+	}
+}
+
+// BenchmarkCallToolPipeline is the pipeline alone: a tool call answered by a fake supervisor
+// without any session, with redaction and the audit line.
+func BenchmarkCallToolPipeline(b *testing.B) {
+	engine, err := redact.New(redact.Options{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	down := &fakeDown{tool: textResult("hello, world")}
+	m, _ := fakeMirror(Options{Redaction: NewRedaction(engine, nil, 1<<20)}, down)
+	m.audit = audit.Log(slog.New(slog.NewJSONHandler(nowhere{}, nil)))
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo", Arguments: json.RawMessage(`{"text":"hello, world"}`)}}
+	b.ReportAllocs()
+	for b.Loop() {
+		down.tools = down.tools[:0]
+		if _, err := m.callTool(b.Context(), req); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

@@ -223,6 +223,41 @@ func TestReceiveRecoversAndAuditsRefusals(t *testing.T) {
 	}
 }
 
+// sessionRunner is the session side of a supervisor, which most fakes of a downstream implement.
+type sessionRunner interface {
+	Call(ctx context.Context, fn func(context.Context, *mcp.ClientSession) error) error
+	ErrorText(err error) string
+	HideURL(text string) string
+}
+
+// onSession is a Supervisor whose calls run on the session of a sessionRunner, as those of
+// downstream.Supervisor do.
+type onSession struct{ sessionRunner }
+
+func (d onSession) CallTool(ctx context.Context, p *mcp.CallToolParams) (res *mcp.CallToolResult, err error) {
+	err = d.Call(ctx, func(ctx context.Context, cs *mcp.ClientSession) (err error) {
+		res, err = cs.CallTool(ctx, p)
+		return err
+	})
+	return res, err
+}
+
+func (d onSession) GetPrompt(ctx context.Context, p *mcp.GetPromptParams) (res *mcp.GetPromptResult, err error) {
+	err = d.Call(ctx, func(ctx context.Context, cs *mcp.ClientSession) (err error) {
+		res, err = cs.GetPrompt(ctx, p)
+		return err
+	})
+	return res, err
+}
+
+func (d onSession) ReadResource(ctx context.Context, p *mcp.ReadResourceParams) (res *mcp.ReadResourceResult, err error) {
+	err = d.Call(ctx, func(ctx context.Context, cs *mcp.ClientSession) (err error) {
+		res, err = cs.ReadResource(ctx, p)
+		return err
+	})
+	return res, err
+}
+
 type stubDown struct{}
 
 func (stubDown) Call(context.Context, func(context.Context, *mcp.ClientSession) error) error {
@@ -344,9 +379,9 @@ func TestLogTextKeepsCharacters(t *testing.T) {
 }
 
 // newMirror returns a mirror of a source of its own, attached to down.
-func newMirror(opts Options, down Downstream) *Mirror {
+func newMirror(opts Options, down sessionRunner) *Mirror {
 	src := NewSource(opts.Name, opts.Logger)
-	src.Attach(down)
+	src.Attach(onSession{down})
 	opts.Source = src
 	return New(opts)
 }
@@ -355,7 +390,7 @@ func newMirror(opts Options, down Downstream) *Mirror {
 // policy, that a listing reaches every attached mirror, and that a detached one hears no more.
 func TestMirrorsOfOneSource(t *testing.T) {
 	src := NewSource("s", nil)
-	src.Attach(stubDown{})
+	src.Attach(onSession{stubDown{}})
 	all := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Source: src})
 	tool := func(name string) *mcp.Tool {
 		return &mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}}

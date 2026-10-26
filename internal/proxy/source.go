@@ -22,7 +22,7 @@ import (
 type Source struct {
 	name   string
 	logger *slog.Logger
-	down   Downstream
+	down   Supervisor
 
 	ready atomic.Bool // the tools were listed once
 
@@ -61,7 +61,7 @@ func NewSource(name string, logger *slog.Logger) *Source {
 
 // Attach sets the supervisor calls go to. The supervisor takes the source's Notifications and
 // OnSession, so it is built after the source; Attach is called once, before Start.
-func (s *Source) Attach(d Downstream) { s.down = d }
+func (s *Source) Attach(d Supervisor) { s.down = d }
 
 // Inherit takes over the listing and the counters of prev, the source of a server whose
 // settings changed, so that the server keeps its catalog listed while it restarts, as after a
