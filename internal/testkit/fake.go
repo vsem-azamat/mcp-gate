@@ -48,6 +48,9 @@ import (
 //     to the file at path, like a download tool, and returns "Media downloaded to <path>." with
 //     structured content {"path": <path>}.
 //
+// With Failures set, it also serves the tool "toolerror", whose result reports an error to the
+// model, and the prompt "ask", whose result asks the client for input.
+//
 // With Catalog set, it also serves the prompt "greet", the resources "fake://info" and
 // "fake://hidden", and the template "fake://items/{id}"; reads return "contents of <uri>".
 type Fake struct {
@@ -69,6 +72,8 @@ type Fake struct {
 	StartDelay time.Duration `json:"startDelay,omitempty"`
 	// Catalog serves a prompt, resources and a resource template besides the tools.
 	Catalog bool `json:"catalog,omitempty"`
+	// Failures serves a tool whose result is a tool error and a prompt that asks for input.
+	Failures bool `json:"failures,omitempty"`
 	// RejectListen answers subscriptions/listen with a JSON-RPC error, like a server that does
 	// not offer change notifications to 2026-07-28 clients.
 	RejectListen bool `json:"rejectListen,omitempty"`
@@ -238,6 +243,14 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 	number := func(args map[string]any, k string) int {
 		v, _ := args[k].(float64)
 		return int(v)
+	}
+	if f.Failures {
+		tool("toolerror", func(context.Context, map[string]any) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "it failed"}}}, nil
+		})
+		s.AddPrompt(&mcp.Prompt{Name: "ask"}, func(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{RequestState: "waiting"}, nil
+		})
 	}
 	tool("echo", func(_ context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 		v, _ := args["text"].(string)

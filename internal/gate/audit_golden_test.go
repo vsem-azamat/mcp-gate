@@ -33,7 +33,7 @@ policies:
         resources: {allow: [fake://info]}
 servers:
   cat:
-` + stdioServer(t, testkit.Fake{Catalog: true}, "tools: {deny: [env]}\n") + `  web:
+` + stdioServer(t, testkit.Fake{Catalog: true, Failures: true}, "tools: {deny: [env]}\n") + `  web:
 ` + httpServer(web, "")
 	r := startGate(t, doc, gateOpts{})
 	for _, s := range []string{"cat", "web"} {
@@ -64,6 +64,8 @@ servers:
 	tool(agg, "cat__big", nil)      // hidden by the policy, audited by cat
 	tool(agg, "nowhere__echo", nil) // no such server: audited by the aggregate
 	_, _ = agg.GetPrompt(t.Context(), &mcp.GetPromptParams{Name: "cat__greet"})
+	tool(laptop, "toolerror", nil)                                          // a tool error
+	_, _ = laptop.GetPrompt(t.Context(), &mcp.GetPromptParams{Name: "ask"}) // asks for input
 
 	var got []string
 	for line := range strings.SplitSeq(r.logs.String(), "\n") {
@@ -88,6 +90,8 @@ servers:
 		`{"level":"INFO","msg":"call","server":"cat","principal":"phone","method":"tools/call","tool":"big","durMs":0,"outcome":"denied","tokenPolicy":"deny","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"","principal":"phone","method":"tools/call","tool":"nowhere__echo","durMs":0,"outcome":"denied","tokenPolicy":"none","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"cat","principal":"phone","method":"prompts/get","prompt":"greet","durMs":0,"outcome":"ok","tokenPolicy":"allow","redactions":0}`,
+		`{"level":"INFO","msg":"call","server":"cat","principal":"laptop","method":"tools/call","tool":"toolerror","durMs":0,"outcome":"tool_error","tokenPolicy":"none","redactions":0}`,
+		`{"level":"INFO","msg":"call","server":"cat","principal":"laptop","method":"prompts/get","prompt":"ask","durMs":0,"outcome":"input_required","tokenPolicy":"none","redactions":0}`,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("audit lines:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
