@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -71,6 +72,18 @@ func helper(mode string) {
 		}
 		fmt.Fprintln(os.Stdout, "ready")
 		time.Sleep(time.Hour)
+	case "holder":
+		// A grandchild in a session of its own that holds stderr for a while, then exit.
+		gc := exec.Command(os.Args[0], helperFlag, "hold") //nolint:noctx // killed by the test, or exits by itself
+		gc.Stderr = os.Stderr
+		gc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := gc.Start(); err != nil {
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, gc.Process.Pid)
+		fmt.Fprintln(os.Stderr, "holder started")
+	case "hold":
+		time.Sleep(10 * time.Second)
 	case "brief":
 		time.Sleep(300 * time.Millisecond)
 	case "stderr":
@@ -227,6 +240,65 @@ func TestLineLog(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "first line") || !strings.Contains(logs.String(), "[F] line") {
 		t.Errorf("the filter was not applied to the log: %s", logs.String())
+	}
+}
+
+// TestStopDrainsStderr checks that Stop keeps the lines a child wrote before it exited, even
+// when the reader is behind: here it is held on the first line until Stop has begun.
+func TestStopDrainsStderr(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	var once, released sync.Once
+	unblock := func() { released.Do(func() { close(release) }) }
+	defer unblock() // before the cleanup's Stop, should the test fail early
+	ll := NewLineLog(slog.New(slog.DiscardHandler), func(s string) string {
+		once.Do(func() { <-release })
+		return s
+	}, 0, nil)
+	p := startHelper(t, "stderr", Spec{Stderr: ll})
+	if err := p.ExitErr(); err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- p.Stop(time.Second) }()
+	time.Sleep(100 * time.Millisecond) // Stop has reached the pipes; it must not close stderr yet
+	unblock()
+	start := time.Now()
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	// Stop returns as soon as the reader meets EOF, not after drainWait.
+	if took := time.Since(start); took > drainWait/2 {
+		t.Errorf("Stop returned %v after the reader was released", took)
+	}
+	if tail := ll.Tail(); len(tail) != 3 || tail[2] != "last line without newline" {
+		t.Errorf("tail = %q, want 3 lines ending with the last one", tail)
+	}
+}
+
+// TestStopWithStderrHeldElsewhere checks that Stop does not wait for a member that left the
+// group and still holds stderr longer than drainWait.
+func TestStopWithStderrHeldElsewhere(t *testing.T) {
+	t.Parallel()
+	ll := NewLineLog(slog.New(slog.DiscardHandler), nil, 0, nil)
+	p := startHelper(t, "holder", Spec{Stderr: ll})
+	holder, err := strconv.Atoi(readLine(t, p.Stdout()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(holder, syscall.SIGKILL) })
+	if err := p.ExitErr(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := p.Stop(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took < drainWait/2 || took > drainWait+2*time.Second {
+		t.Errorf("Stop took %v, want about drainWait (%v)", took, drainWait)
+	}
+	if tail := ll.Tail(); len(tail) != 1 || tail[0] != "holder started" {
+		t.Errorf("tail = %q", tail)
 	}
 }
 
