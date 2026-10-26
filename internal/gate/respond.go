@@ -3,10 +3,11 @@ package gate
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/segmentio/encoding/json"
 
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -57,15 +58,21 @@ func (g *Gate) respond(stream, plain http.Handler) http.Handler {
 			}()
 			r = r.WithContext(ctx)
 		}
+		if r.Method != http.MethodPost {
+			stream.ServeHTTP(w, r)
+			return
+		}
 		jsonOK, streamOK := accepts(r.Header.Values("Accept"))
 		usePlain := jsonOK && (kind == bodyPlain || (!streamOK && kind != bodyListen))
 		switch {
+		case !usePlain && !streamOK && kind == bodyListen:
+			http.Error(w, "Accept must admit text/event-stream for subscriptions/listen", http.StatusBadRequest)
+			return
 		case !usePlain && !streamOK:
-			// An event stream the client does not accept: neither type, or subscriptions/listen
-			// accepting only JSON. The SDK, which reads no q=0, refuses a request without Accept.
-			r = r.Clone(r.Context())
-			r.Header.Del("Accept")
+			http.Error(w, "Accept must admit application/json or text/event-stream", http.StatusBadRequest)
+			return
 		case (usePlain && !streamOK) || (!usePlain && !jsonOK):
+			// The SDK's handler requires both; the client gets the one it accepts.
 			r = r.Clone(r.Context())
 			r.Header.Set("Accept", bothAccepted)
 		}
@@ -79,7 +86,8 @@ func (g *Gate) respond(stream, plain http.Handler) http.Handler {
 
 // classify tells what body holds. A JSON object that holds neither "progressToken" nor "listen"
 // (which subscriptions\/listen spells too) nor a \u escape, which could spell either, is plain
-// without decoding it; any other is decoded with exact key names, as the SDK decodes it.
+// without decoding it. Any other is decoded as the SDK decodes it (see decodeExact), so that it
+// finds the progress token the SDK finds.
 func classify(body []byte) bodyKind {
 	trimmed := bytes.TrimLeft(body, " \t\r\n")
 	if len(trimmed) == 0 || trimmed[0] != '{' {
@@ -89,29 +97,37 @@ func classify(body []byte) bodyKind {
 		!bytes.Contains(body, []byte(`\u`)) {
 		return bodyPlain
 	}
-	// Maps, unlike structs, match keys exactly.
-	var msg, params map[string]json.RawMessage
-	var method string
-	if json.Unmarshal(body, &msg) != nil {
+	var msg struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if decodeExact(body, &msg) != nil {
 		return bodyStream
 	}
-	if m, ok := msg["method"]; ok && json.Unmarshal(m, &method) != nil {
-		return bodyStream
-	}
-	if method == methodListen {
+	if msg.Method == methodListen {
 		return bodyListen
 	}
-	if p, ok := msg["params"]; ok && json.Unmarshal(p, &params) != nil {
+	if len(msg.Params) == 0 {
+		return bodyPlain
+	}
+	var params struct {
+		Meta map[string]any `json:"_meta"`
+	}
+	if decodeExact(msg.Params, &params) != nil {
 		return bodyStream
 	}
-	var meta map[string]json.RawMessage
-	if m, ok := params["_meta"]; ok && json.Unmarshal(m, &meta) != nil {
-		return bodyStream
-	}
-	if _, ok := meta["progressToken"]; ok {
+	if _, ok := params.Meta["progressToken"]; ok {
 		return bodyStream
 	}
 	return bodyPlain
+}
+
+// decodeExact decodes data into v the way the SDK decodes messages: with segmentio's decoder,
+// matching struct field names exactly, and merging a repeated object key into the same map.
+func decodeExact(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DontMatchCaseInsensitiveStructFields()
+	return dec.Decode(v)
 }
 
 // accepts reports whether an Accept header admits application/json and text/event-stream, read

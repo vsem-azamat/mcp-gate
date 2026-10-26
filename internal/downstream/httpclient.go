@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
@@ -47,7 +48,7 @@ func (t *limitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			req.Header[k] = v
 		}
 	}
-	call := func() (jsonrpc.ID, bool) { return callID(req) }
+	call := sync.OnceValues(func() (jsonrpc.ID, bool) { return callID(req) })
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err

@@ -208,3 +208,30 @@ func TestPlainNotification(t *testing.T) {
 		}
 	}
 }
+
+// TestAggregateResponseTypes checks the same choice on the aggregate endpoint: a plain call is
+// answered with JSON, a call with a progress token with an event stream of its progress and then
+// its result.
+func TestAggregateResponseTypes(t *testing.T) {
+	r := aggregateGate(t)
+	const both = "application/json, text/event-stream"
+	echo := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"alpha__echo","arguments":{"text":"x"}}}`
+	code, mediaType, body := r.rawPost(t, "/mcp", "2025-11-25", both, echo)
+	if code != http.StatusOK || mediaType != "application/json" || !strings.Contains(body, `"id":3`) {
+		t.Errorf("plain aggregate call: %d %s %q", code, mediaType, body)
+	}
+	progress := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"alpha__progress",` +
+		`"arguments":{"steps":3,"ms":10},"_meta":{"progressToken":"tok-a"}}}`
+	code, mediaType, body = r.rawPost(t, "/mcp", "2025-11-25", both, progress)
+	if code != http.StatusOK || mediaType != "text/event-stream" {
+		t.Fatalf("aggregate call with a progress token: %d %s %q", code, mediaType, body)
+	}
+	data := eventData(body)
+	if len(data) < 2 || !strings.Contains(data[0], `"notifications/progress"`) || !strings.Contains(data[0], `"tok-a"`) ||
+		!strings.Contains(data[len(data)-1], `"id":4`) {
+		t.Errorf("aggregate events: %q", body)
+	}
+	if l := r.lastCall("tool", "echo"); l["server"] != "alpha" || l["outcome"] != "ok" {
+		t.Errorf("audit line: %v", l)
+	}
+}

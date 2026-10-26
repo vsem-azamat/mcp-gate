@@ -23,6 +23,8 @@ func TestClassify(t *testing.T) {
 		{"listen with an escaped slash", `{"jsonrpc":"2.0","id":1,"method":"subscriptions\/listen"}`, bodyListen},
 		{"listen and another case", `{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","METHOD":"x"}`, bodyListen},
 		{"listen in arguments", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"text":"subscriptions/listen"}}}`, bodyPlain},
+		{"repeated _meta", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"progressToken":1},"_meta":{}}}`, bodyStream},
+		{"repeated params", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"progressToken":1}},"params":{}}`, bodyPlain},
 		{"batch", `[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]`, bodyStream},
 		{"params not an object", `{"jsonrpc":"2.0","id":1,"method":"x","params":["progressToken"]}`, bodyStream},
 		{"malformed with a token", `{"progressToken"`, bodyStream},
