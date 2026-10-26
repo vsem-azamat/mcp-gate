@@ -99,6 +99,9 @@ type Mirror struct {
 	server *mcp.Server
 	src    *Source
 
+	// mu guards the registered catalog, served and the views' maps. Lock order: a Source's
+	// applyMu, then an Aggregate's mu, then mu, then the server filter's policy.Policy mu (a
+	// leaf); the watchers are called without mu.
 	mu        sync.Mutex
 	tools     map[string]*mcp.Tool
 	prompts   map[string]*mcp.Prompt
@@ -325,37 +328,93 @@ func collect[T any](seq func(func(*T, error) bool)) ([]*T, error) {
 	return out, nil
 }
 
-// apply registers the listed kinds, changing only the entries that differ from the mirrored
-// ones, then tells the watchers.
+// The catalog pipeline. A listing reaches the clients in these steps, in order:
+//
+//   - listing: the source lists the kinds that are dirty and keeps them as the server sent them
+//     (Source.sync), then hands them to each mirror's apply;
+//   - server filter: the entries the server's filter passes, checked outside the mirror's lock,
+//     with the tools the SDK would reject marked invalid and the resources whose URI does not
+//     parse left out (filter);
+//   - register: they are registered on the mirror's own server, changing only the entries that
+//     differ from the registered ones, with the server's resource filter and what reads reach
+//     compiled from them (register);
+//   - per-token projection: each token with a policy gets, on its own server, what the policy
+//     passes of the registered entries (syncView);
+//   - aggregate naming: the watchers are told, and an aggregate the mirror is a member of names
+//     its tools and prompts <server>__<name> for /mcp and syncs its views (Aggregate.rebuild).
+//
+// Register and the projection run under m.mu, so that a token's server never lags the catalog
+// its handlers check against.
+
+// apply runs the mirror's steps of the catalog pipeline for the listed kinds, then tells the
+// watchers.
 func (m *Mirror) apply(kinds kindSet, l *listing, at time.Time) {
 	if kinds == 0 {
 		return
 	}
-	m.applyLocked(kinds, l, at)
+	f := m.filter(kinds, l)
+	m.mu.Lock()
+	m.register(kinds, f, at)
+	for _, v := range m.views {
+		m.syncView(v, kinds)
+	}
+	m.mu.Unlock()
 	m.notifyWatchers()
 }
 
-func (m *Mirror) applyLocked(kinds kindSet, l *listing, at time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// filtered is a listing after the server's filter: of each listed kind, the entries the mirror's
+// own server is to hold, and of resources and templates everything the server lists, which the
+// server's resource filter is compiled from.
+type filtered struct {
+	tools     []candidate
+	prompts   map[string]*mcp.Prompt
+	resources map[string]*mcp.Resource
+	templates map[string]*mcp.ResourceTemplate
+	listed    []policy.Entry // every listed resource
+	listedT   []policy.Entry // every listed template
+}
+
+// candidate is a listed tool the server's filter passes; one the SDK cannot take is invalid, and
+// keeps its previous version.
+type candidate struct {
+	tool    *mcp.Tool
+	invalid bool
+}
+
+// filter is the server filter step: it needs no lock, and logs the invalid tools and resources.
+func (m *Mirror) filter(kinds kindSet, l *listing) *filtered {
+	f := &filtered{}
 	if kinds.has(audit.Tool) {
-		m.tools = m.applyTools(l.tools)
+		f.tools = m.filterTools(l.tools)
 	}
 	if kinds.has(audit.Prompt) {
-		m.prompts = m.applyPrompts(l.prompts)
+		f.prompts = m.filterPrompts(l.prompts)
+	}
+	if kinds.has(audit.Resource) {
+		f.resources = m.filterResources(l.resources)
+		f.templates = m.filterTemplates(l.templates)
+		f.listed, f.listedT = entries(l.resources, resourceEntry), entries(l.templates, templateEntry)
+	}
+	return f
+}
+
+// register is the register step for the kinds of a filtered listing. The caller holds m.mu.
+func (m *Mirror) register(kinds kindSet, f *filtered, at time.Time) {
+	if kinds.has(audit.Tool) {
+		m.tools = m.registerTools(f.tools)
+	}
+	if kinds.has(audit.Prompt) {
+		m.prompts = m.registerPrompts(f.prompts)
 	}
 	if kinds.has(audit.Resource) {
 		// Before the entries are registered, so that no new template reaches a newly hidden
 		// resource.
-		m.opts.Policy.SetCatalog(entries(l.resources, resourceEntry), entries(l.templates, templateEntry))
-		m.resources = m.applyResources(l.resources)
-		m.templates = m.applyTemplates(l.templates)
+		m.opts.Policy.SetCatalog(f.listed, f.listedT)
+		m.resources = m.registerResources(f.resources)
+		m.templates = m.registerTemplates(f.templates)
 		m.served = newServed(m.resources, m.templates)
 	}
 	m.lastSync = at
-	for _, v := range m.views {
-		m.syncView(v, kinds)
-	}
 }
 
 func resourceEntry(r *mcp.Resource) policy.Entry { return policy.Entry{Key: r.URI, Name: r.Name} }
@@ -487,20 +546,34 @@ func syncSet[T any](logger *slog.Logger, logText func(string) string, what entry
 	return out
 }
 
-func (m *Mirror) applyTools(list []*mcp.Tool) map[string]*mcp.Tool {
-	want := map[string]*mcp.Tool{}
+// filterTools returns the listed tools the server's filter passes, in the order listed, and logs
+// the invalid ones.
+func (m *Mirror) filterTools(list []*mcp.Tool) []candidate {
+	out := make([]candidate, 0, len(list))
 	for _, t := range list {
 		if t == nil || !m.opts.Policy.Tools.Allows(t.Name) {
 			continue
 		}
 		if err := validTool(t); err != nil {
 			m.logger.Warn("skipping an invalid tool", "tool", t.Name, "error", err.Error())
-			if old, ok := m.tools[t.Name]; ok {
-				want[t.Name] = old // keep the previous version
-			}
+			out = append(out, candidate{tool: t, invalid: true})
 			continue
 		}
-		want[t.Name] = t
+		out = append(out, candidate{tool: t})
+	}
+	return out
+}
+
+// registerTools registers the filtered tools; an invalid one keeps its previous version. The
+// caller holds m.mu.
+func (m *Mirror) registerTools(list []candidate) map[string]*mcp.Tool {
+	want := map[string]*mcp.Tool{}
+	for _, c := range list {
+		if !c.invalid {
+			want[c.tool.Name] = c.tool
+		} else if old, ok := m.tools[c.tool.Name]; ok {
+			want[c.tool.Name] = old // keep the previous version
+		}
 	}
 	return syncSet(m.logger, m.logText, entryTool, m.tools, want, func(t *mcp.Tool) error {
 		return guard(func() { m.server.AddTool(t, m.callTool) })
@@ -523,19 +596,27 @@ func validTool(t *mcp.Tool) error {
 	return nil
 }
 
-func (m *Mirror) applyPrompts(list []*mcp.Prompt) map[string]*mcp.Prompt {
+// filterPrompts returns the listed prompts the server's filter passes, by name.
+func (m *Mirror) filterPrompts(list []*mcp.Prompt) map[string]*mcp.Prompt {
 	want := map[string]*mcp.Prompt{}
 	for _, p := range list {
 		if p != nil && p.Name != "" && m.opts.Policy.Prompts.Allows(p.Name) {
 			want[p.Name] = p
 		}
 	}
+	return want
+}
+
+// registerPrompts registers the filtered prompts. The caller holds m.mu.
+func (m *Mirror) registerPrompts(want map[string]*mcp.Prompt) map[string]*mcp.Prompt {
 	return syncSet(m.logger, m.logText, entryPrompt, m.prompts, want, func(p *mcp.Prompt) error {
 		return guard(func() { m.server.AddPrompt(p, m.getPrompt) })
 	}, m.server.RemovePrompts)
 }
 
-func (m *Mirror) applyResources(list []*mcp.Resource) map[string]*mcp.Resource {
+// filterResources returns the listed resources the server's filter passes, by URI, and logs
+// those whose URI does not parse.
+func (m *Mirror) filterResources(list []*mcp.Resource) map[string]*mcp.Resource {
 	want := map[string]*mcp.Resource{}
 	for _, r := range list {
 		if r == nil || r.URI == "" || !m.opts.Policy.Resources.Allows(r.URI, r.Name) {
@@ -547,12 +628,19 @@ func (m *Mirror) applyResources(list []*mcp.Resource) map[string]*mcp.Resource {
 		}
 		want[r.URI] = r
 	}
+	return want
+}
+
+// registerResources registers the filtered resources. The caller holds m.mu.
+func (m *Mirror) registerResources(want map[string]*mcp.Resource) map[string]*mcp.Resource {
 	return syncSet(m.logger, m.logText, entryResource, m.resources, want, func(r *mcp.Resource) error {
 		return guard(func() { m.server.AddResource(r, m.readResource) })
 	}, m.server.RemoveResources)
 }
 
-func (m *Mirror) applyTemplates(list []*mcp.ResourceTemplate) map[string]*mcp.ResourceTemplate {
+// filterTemplates returns the listed resource templates the server's filter passes, by URI
+// template.
+func (m *Mirror) filterTemplates(list []*mcp.ResourceTemplate) map[string]*mcp.ResourceTemplate {
 	want := map[string]*mcp.ResourceTemplate{}
 	for _, t := range list {
 		if t == nil || t.URITemplate == "" {
@@ -562,6 +650,11 @@ func (m *Mirror) applyTemplates(list []*mcp.ResourceTemplate) map[string]*mcp.Re
 			want[t.URITemplate] = t
 		}
 	}
+	return want
+}
+
+// registerTemplates registers the filtered templates. The caller holds m.mu.
+func (m *Mirror) registerTemplates(want map[string]*mcp.ResourceTemplate) map[string]*mcp.ResourceTemplate {
 	return syncSet(m.logger, m.logText, entryTemplate, m.templates, want, func(t *mcp.ResourceTemplate) error {
 		return guard(func() { m.server.AddResourceTemplate(t, m.readResource) })
 	}, m.server.RemoveResourceTemplates)

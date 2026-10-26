@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -71,6 +72,10 @@ type AggregateOptions struct {
 // reach has its own View, an upstream MCP server holding only those servers' entries. Calls are
 // handed to the mirror of the server an entry came from, which filters, forwards, redacts and
 // audits them as on its own route.
+//
+// Lock order: a.mu before a member's Mirror.mu. A member's listing reaches the aggregate through
+// its watchers, which run outside the member's lock, and rebuild then reads the member's
+// catalog under a.mu; nothing takes a.mu while it holds a Mirror.mu.
 type Aggregate struct {
 	opts    AggregateOptions
 	logger  *slog.Logger
@@ -156,8 +161,9 @@ func (a *Aggregate) refresh() {
 	}
 }
 
-// rebuild reads the members' catalogs and names their tools and prompts. A name that is too long
-// or holds characters the MCP specification does not allow is left out, and logged once.
+// rebuild is the aggregate naming step of the catalog pipeline: it reads what each member serves
+// (Mirror.Catalogs, what each token with a policy there sees included) and names the members'
+// tools and prompts (nameEntries). The caller holds a.mu.
 func (a *Aggregate) rebuild() {
 	a.cats = make(map[string]Catalog, len(a.members))
 	a.tokenCats = make(map[string]map[string]Catalog, len(a.members))
@@ -165,50 +171,38 @@ func (a *Aggregate) rebuild() {
 	a.tools = map[string]routed[mcp.Tool]{}
 	a.prompts = map[string]routed[mcp.Prompt]{}
 	skipped := map[named]bool{}
-	names := make([]string, 0, len(a.members))
-	for name := range a.members {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, server := range names {
+	for _, server := range slices.Sorted(maps.Keys(a.members)) {
 		m := a.members[server]
 		// Read before the catalog: a mirror is ready only once its tools were applied.
 		a.listed[server] = m.Ready()
 		c, byToken := m.Catalogs()
 		a.cats[server] = c
 		a.tokenCats[server] = byToken
-		for name, t := range c.Tools {
-			full := server + separator + name
-			if !validAggregateName(full) {
-				skipped[named{audit.Tool, full}] = true
-				a.logSkipped(m, audit.Tool, full)
-				continue
-			}
-			a.tools[full] = routed[mcp.Tool]{server: server, name: name, entry: t}
-		}
-		for name, p := range c.Prompts {
-			full := server + separator + name
-			if !validAggregateName(full) {
-				skipped[named{audit.Prompt, full}] = true
-				a.logSkipped(m, audit.Prompt, full)
-				continue
-			}
-			a.prompts[full] = routed[mcp.Prompt]{server: server, name: name, entry: p}
-		}
-	}
-	// Config validation keeps member names free of a trailing '_' and of the separator, so a
-	// name splits one way only; a clash would still be dropped rather than routed by chance.
-	for full, r := range a.tools {
-		if server, _, _ := splitName(full); server != r.server {
-			delete(a.tools, full)
-		}
-	}
-	for full, r := range a.prompts {
-		if server, _, _ := splitName(full); server != r.server {
-			delete(a.prompts, full)
-		}
+		nameEntries(a, m, audit.Tool, c.Tools, a.tools, skipped)
+		nameEntries(a, m, audit.Prompt, c.Prompts, a.prompts, skipped)
 	}
 	a.skipped = skipped
+}
+
+// nameEntries adds the tools or prompts of member m to out under their aggregate names,
+// <server>__<name>. A name that is too long or holds characters the MCP specification does not
+// allow is left out, recorded in skipped and logged once. Config validation keeps member names
+// free of a trailing '_' and of the separator, so a name splits one way only; one that would
+// split to another server is still dropped rather than routed by chance.
+func nameEntries[T any](a *Aggregate, m *Mirror, kind audit.Kind, entries map[string]*T, out map[string]routed[T], skipped map[named]bool) {
+	server := m.Name()
+	for name, e := range entries {
+		full := server + separator + name
+		if !validAggregateName(full) {
+			skipped[named{kind, full}] = true
+			a.logSkipped(m, kind, full)
+			continue
+		}
+		if s, _, _ := splitName(full); s != server {
+			continue
+		}
+		out[full] = routed[T]{server: server, name: name, entry: e}
+	}
 }
 
 func (a *Aggregate) logSkipped(m *Mirror, kind audit.Kind, full string) {
