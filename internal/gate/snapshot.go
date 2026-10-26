@@ -103,6 +103,9 @@ type route struct {
 	idle    chan struct{} // closed once retired with no request in flight
 }
 
+// clientAuthKey holds, in a request's context, the Authorization header the client sent.
+type clientAuthKey struct{}
+
 func newRoute(key map[string]any, again http.Handler) *route {
 	return &route{key: key, again: again, ended: make(chan struct{}), idle: make(chan struct{})}
 }
@@ -117,6 +120,8 @@ func (rt *route) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rt.active++
 	rt.mu.Unlock()
+	// The aggregate's token check rewrites the header; a request handed back keeps the client's.
+	r = r.WithContext(context.WithValue(r.Context(), clientAuthKey{}, r.Header.Values("Authorization")))
 	defer func() {
 		rt.mu.Lock()
 		rt.active--
@@ -377,8 +382,13 @@ func (g *Gate) chain(sn *snapshot, rt *route, name string, logRequests bool, aut
 		// current snapshot, which checks it again: a token the reload revoked runs nothing.
 		select {
 		case <-rt.ended:
+			r = r.Clone(r.Context())
 			if body, ok := upstream.BodyBytes(r); ok {
 				r.Body = io.NopCloser(bytes.NewReader(body))
+			}
+			r.Header.Del("Authorization")
+			if auth, ok := r.Context().Value(clientAuthKey{}).([]string); ok {
+				r.Header["Authorization"] = auth
 			}
 			rt.again.ServeHTTP(w, r)
 			return
