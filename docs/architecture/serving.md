@@ -17,14 +17,16 @@ How `mcp-gate serve` puts the downstream servers behind one listener. The behavi
 
 ```
 client ─POST /<name>/mcp─▶ Recover ─▶ LogRequests (log.requests) ─▶ AllowHosts ─▶ RequireToken
-   ─▶ CrossOriginProtection ─▶ 503 until mounted ─▶ ReadBody (4 MiB, 30 s) ─▶ endListenOnDrain
-   ─▶ SDK StreamableHTTPHandler (stateless) ─▶ Mirror's mcp.Server ─▶ receive middleware ─▶ handler
+   ─▶ CrossOriginProtection ─▶ 503 until mounted ─▶ ReadBody (4 MiB, 30 s) ─▶ respond
+   ─▶ SDK StreamableHTTPHandler (stateless; event stream or JSONResponse) ─▶ Mirror's mcp.Server ─▶ receive middleware ─▶ handler
    ─▶ Supervisor.Call ─▶ downstream ClientSession
 ```
 
 `/_healthz`, `/_readyz`, `/_status` and, with the escrow on, `/_escrow/` are separate handlers on the same mux, outside this chain (see [Escrow and file scanning](escrow.md)).
 
 The upstream side is the SDK's streamable HTTP handler in stateless mode, with `PropagateRequestCancellation`: every POST gets a fresh `ServerSession` over the mirror's one `*mcp.Server`, and the handler's context ends with the POST. Nothing about a client is kept between requests, so any number of clients share the one downstream session that the supervisor keeps. The listener has no read timeout, since net/http would cancel a long call's context when it passes; `ReadBody` reads the body under its own deadline and clears it.
+
+A route has two SDK handlers over the same `*mcp.Server`, identical but for `JSONResponse`, and `respond` picks one per POST from the body that `ReadBody` kept (`upstream.BodyBytes`). The only messages the gate sends on a request's stream besides its response are progress notifications for a request with a progress token: a stateless session cannot send requests (sampling, elicitation), the mirror logs the server's log messages instead of forwarding them, and list-changed notifications reach only `subscriptions/listen` streams. So one JSON-RPC object without `_meta.progressToken` that is not `subscriptions/listen` goes to the `JSONResponse` handler, which writes the response as one `application/json` body, and the rest to the event-stream handler. `classify` decides without decoding when the body holds neither `progressToken` nor `listen` (which `subscriptions\/listen` also spells) nor a `\u` escape that could spell one, and otherwise decodes the method and `_meta` into maps, so that keys match exactly as they do for the SDK. The MCP transport requires clients to accept both types; one that names only one gets it, with its `Accept` widened for the SDK, which otherwise refuses it.
 
 `RequireToken` checks the `Authorization` header against SHA-256 digests of the route's tokens, every one compared in constant time, and hands the token's name to the SDK's bearer middleware as the `TokenInfo` user, where the handlers read it for the audit line.
 
@@ -62,7 +64,7 @@ A view's handler checks that the request's access names the entry's server, then
 
 ## Shutdown
 
-`http.Server.Shutdown` waits for every open request, and a `2026-07-28` client listening for changes keeps one POST open for good. `endListenOnDrain` recognises `subscriptions/listen` bodies and ties their context to a channel closed from `RegisterOnShutdown`, so those streams end at once and only real calls use the 10 second grace. `Shutdown` also waits until a connection on which no request has arrived is 5 seconds old, and HTTP clients keep spare connections they may never use: `upstream.NewServer` tracks those through `ConnState` and closes them from `RegisterOnShutdown`. That tracking is why the listener serves HTTP/1 only: net/http does not report an HTTP/2 connection becoming active. The mirrors run on a context detached from the signal, so calls finishing in the grace still get their progress; `shutdown` closes them after stopping the servers. A server that does not stop in time is logged and does not change the exit status.
+`http.Server.Shutdown` waits for every open request, and a `2026-07-28` client listening for changes keeps one POST open for good. `respond` recognises `subscriptions/listen` bodies and ties their context to a channel closed from `RegisterOnShutdown`, so those streams end at once and only real calls use the 10 second grace. `Shutdown` also waits until a connection on which no request has arrived is 5 seconds old, and HTTP clients keep spare connections they may never use: `upstream.NewServer` tracks those through `ConnState` and closes them from `RegisterOnShutdown`. That tracking is why the listener serves HTTP/1 only: net/http does not report an HTTP/2 connection becoming active. The mirrors run on a context detached from the signal, so calls finishing in the grace still get their progress; `shutdown` closes them after stopping the servers. A server that does not stop in time is logged and does not change the exit status.
 
 ## Readiness and status
 

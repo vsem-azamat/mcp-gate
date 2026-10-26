@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -69,7 +70,7 @@ func TestEventLimiter(t *testing.T) {
 		"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n" +
 		"id: 9\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"t\":\"" + big + "\"}}\n\n"
 	l := &eventLimiter{
-		src: io.NopCloser(strings.NewReader(stream)), limit: 1024, id: id, isCall: true,
+		src: io.NopCloser(strings.NewReader(stream)), limit: 1024, call: func() (jsonrpc.ID, bool) { return id, true },
 		logger: slog.New(slog.DiscardHandler), lineStart: true,
 	}
 	l.br = bufio.NewReaderSize(l.src, 64)
@@ -82,5 +83,55 @@ func TestEventLimiter(t *testing.T) {
 		"event: message\ndata: " + string(oversizedResponse(id, 1024)) + "\n\n"
 	if got != want {
 		t.Errorf("stream =\n%q\nwant\n%q", got, want)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestCallIDOnlyWhenOversized checks that the request id is decoded only for a response over the
+// limit, which needs it.
+func TestCallIDOnlyWhenOversized(t *testing.T) {
+	t.Parallel()
+	const limit = 64
+	for _, c := range []struct {
+		name, mediaType, body string
+		decoded               bool
+	}{
+		{"small JSON", "application/json", `{"jsonrpc":"2.0","id":1,"result":{}}`, false},
+		{"small event", "text/event-stream", "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n", false},
+		{"large JSON", "application/json", `{"jsonrpc":"2.0","id":1,"result":{"t":"` + strings.Repeat("x", 100) + `"}}`, true},
+		{"large event", "text/event-stream", "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"t\":\"" + strings.Repeat("x", 100) + "\"}}\n\n", true},
+	} {
+		lt := &limitTransport{
+			limit: limit, logger: slog.New(slog.DiscardHandler),
+			base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {c.mediaType}},
+					Body: io.NopCloser(strings.NewReader(c.body)),
+				}, nil
+			}),
+		}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://server.example/mcp",
+			strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		getBody := req.GetBody
+		decoded := 0
+		req.GetBody = func() (io.ReadCloser, error) { decoded++; return getBody() }
+		resp, err := lt.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if (decoded > 0) != c.decoded {
+			t.Errorf("%s: the request body was decoded %d times", c.name, decoded)
+		}
+		if c.decoded && !strings.Contains(string(out), `"id":1`) {
+			t.Errorf("%s: no error for the call: %q", c.name, out)
+		}
 	}
 }

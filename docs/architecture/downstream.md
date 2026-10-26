@@ -39,7 +39,7 @@ Child stderr goes through a `LineLog`: up to 8 KiB of each line is read and reda
 The SDK's streamable client transport gets an `http.Client` whose transport wraps a clone of the default one. It adds the configured headers, follows no redirects, and limits responses:
 
 - an error response body is cut at 64 KiB;
-- a JSON body is read into memory up to `maxMessageBytes`; a larger one (or a larger `Content-Length`) is replaced by a JSON-RPC error for the request id found in the POST body, so the SDK fails only that call instead of the connection;
+- a JSON body is read into memory up to `maxMessageBytes`; a larger one (or a larger `Content-Length`) is replaced by a JSON-RPC error for the request id found in the POST body, which is decoded only then, so the SDK fails only that call instead of the connection;
 - an event stream passes through one event at a time; an event over the limit is dropped and, when it is the response to the call that opened the stream, replaced by an error event. The SDK's own `MaxEventSize` is set slightly higher, as a backstop.
 
 Compressed responses are decoded by the Go transport before the limits apply; `Accept-Encoding` cannot be configured.
