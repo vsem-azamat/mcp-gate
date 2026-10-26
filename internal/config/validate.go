@@ -61,8 +61,9 @@ var reservedHeaders = []string{
 }
 
 // validate records every problem in c, except at the paths in skip (whose values did not
-// expand, and so are already reported).
-func (c *Config) validate(errs *[]error, skip map[string]bool) {
+// expand, and so are already reported). home is the home directory of the gate's environment,
+// or empty.
+func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 	add := func(path, format string, args ...any) {
 		if skip[path] {
 			return
@@ -114,6 +115,9 @@ func (c *Config) validate(errs *[]error, skip map[string]bool) {
 			continue
 		}
 		s.validate(path, add)
+		if f := s.Redact.Files; f != nil {
+			f.validateHome(path+".redact.files", home, add)
+		}
 		c.validateServerAuth(name, path+".auth", add)
 	}
 }
@@ -246,6 +250,24 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 			add(path+".redact.files", "needs redact.enabled: files are scanned only on a server whose results are redacted")
 		}
 		f.validate(path+".redact.files", add)
+	}
+}
+
+// validateHome rejects a root that is home or a directory above it: a download tool's files
+// belong in a directory of their own, and the gate would otherwise scan, and could keep, any
+// file in the home directory a result names.
+func (f *Files) validateHome(path, home string, add func(path, format string, args ...any)) {
+	if home == "" || !filepath.IsAbs(home) {
+		return
+	}
+	home = filepath.Clean(home)
+	for i, r := range f.Roots {
+		if !filepath.IsAbs(r) {
+			continue
+		}
+		if x, err := filepath.Rel(filepath.Clean(r), home); err == nil && x != ".." && !strings.HasPrefix(x, ".."+string(filepath.Separator)) {
+			add(fmt.Sprintf("%s.roots[%d]", path, i), "must not be $HOME or a directory that contains it")
+		}
 	}
 }
 

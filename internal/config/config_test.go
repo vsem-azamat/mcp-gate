@@ -462,3 +462,21 @@ func TestMaxBackoffBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestFileRootsExcludeHome(t *testing.T) {
+	t.Parallel()
+	const head = "version: 1\nauth: {tokens: {a: s}}\nservers:\n  a:\n    stdio: {command: x}\n    redact: {files: {tools: [x], roots: ["
+	home := func(name string) (string, bool) { return "/home/example", name == "HOME" }
+	for root, ok := range map[string]bool{
+		"/home/example": false, "/home/example/": false, "/home": false,
+		"/home/example/downloads": true, "/home/other": true, "/srv/dl": true,
+	} {
+		_, err := Parse([]byte(head+root+"]}}\n"), home)
+		if got := err == nil; got != ok {
+			t.Errorf("root %s: error %v, want ok %v", root, err, ok)
+		}
+		if err != nil && !strings.Contains(err.Error(), "servers.a.redact.files.roots[0]: must not be $HOME") {
+			t.Errorf("root %s: error %v", root, err)
+		}
+	}
+}

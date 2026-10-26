@@ -504,6 +504,7 @@ func TestCut(t *testing.T) {
 		{"ab€", 3, "ab…"}, // € is three bytes
 		{"ab€", 5, "ab€"},
 		{"€", 1, "…"},
+		{"ab" + strings.Repeat("\x80", 10), 8, "ab\x80\x80\x80…"}, // not UTF-8: backs up 3 bytes at most
 	} {
 		if got := Cut(c.in, c.n); got != c.want {
 			t.Errorf("Cut(%q, %d) = %q, want %q", c.in, c.n, got, c.want)

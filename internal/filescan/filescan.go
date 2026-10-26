@@ -1,14 +1,14 @@
 // Package filescan scans the files that download tools write, and withholds from the result
 // any file that holds secrets.
 //
-// A server's file tools are the tools that save a file locally and report its path. After such a
-// call, the paths its result or its arguments name are looked up; a file is considered only when
-// it lies under one of the server's roots, so that neither a client (through arguments) nor a
-// server (through its result) can make the gate read a file outside them, and a path only the
-// arguments name only when its inode changed during the call, so that a client cannot have an
-// older file read. A file with secrets is kept in the escrow when there is one, and every mention of it is
-// replaced by a marker. A file that should be scanned but cannot be is a failure: the caller
-// withholds the whole result.
+// A server's file tools are the tools that save a file locally and report its path. After such
+// a call, the paths its result or its arguments name are looked up. A file is considered only
+// when it lies under one of the server's roots, so that neither a client (through arguments)
+// nor a server (through its result) can make the gate read a file outside them. A path only the
+// arguments name must also have changed during the call, and one the result names since the
+// gate started, so that an older file is not read. A file with secrets is kept in the escrow
+// when there is one, and every mention of it is replaced by a marker. A file that should be
+// scanned but cannot be is a failure: the caller withholds the whole result.
 package filescan
 
 import (
@@ -44,6 +44,8 @@ const (
 	// scanSlots bounds concurrent scans, so that parallel downloads cannot pull many large
 	// files into memory at once.
 	scanSlots = 2
+	// clockSlack allows for the coarse clock of inode change times against the gate's start.
+	clockSlack = 2 * time.Second
 	// maxCandidates bounds the paths one call may name; a result naming more is withheld.
 	maxCandidates = 64
 	openFlags     = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
@@ -78,12 +80,16 @@ type Options struct {
 	// has no handle.
 	Keep   func(escrow.File) (string, error)
 	Logger *slog.Logger
+	// Started is when the gate started; a file a result names must have changed after it. Zero
+	// means when New is called.
+	Started time.Time
 }
 
 // Scanner scans the files of one server's file tools.
 type Scanner struct {
-	o     Options
-	tools map[string]bool
+	o       Options
+	tools   map[string]bool
+	started time.Time
 }
 
 // New returns a scanner.
@@ -94,7 +100,10 @@ func New(o Options) *Scanner {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
-	s := &Scanner{o: o, tools: map[string]bool{}}
+	s := &Scanner{o: o, tools: map[string]bool{}, started: o.Started}
+	if s.started.IsZero() {
+		s.started = time.Now()
+	}
 	for _, t := range o.Tools {
 		s.tools[t] = true
 	}
@@ -120,16 +129,19 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 		arguments = args()
 	}
 	out = res
-	cands := candidates(arguments, res, regularFile)
-	if len(cands) > maxCandidates {
+	roots := s.rootForms()
+	cands, overflow := candidates(arguments, res, func(path string) bool {
+		return underAny(path, roots) && regularFile(path)
+	})
+	if overflow {
 		s.o.Logger.Warn("file not scanned; withholding the result", "tool", tool, "reason", "too many paths")
 		return nil, 0, fmt.Errorf("%w (the call names more than %d paths)", ErrUnscannable, maxCandidates)
 	}
 	for _, c := range cands {
 		// A path only the caller named must have changed after the call started, or a client
-		// could have any file under a root read. One the result names may be older: a tool that
-		// caches its downloads reports the same file again.
-		var since time.Time
+		// could have any file under a root read. One the result names may be older, since a tool
+		// that caches its downloads reports the same file again, but not older than the gate.
+		since := s.started.Add(-clockSlack)
 		if c.fromArguments {
 			since = start
 		}
@@ -183,7 +195,7 @@ type opened struct {
 }
 
 // open opens path when it is a candidate: under one of the roots, a regular file with one link,
-// whose inode changed at or after since (any time when since is zero). It returns nil when path is not a candidate, and an
+// whose inode changed at or after since. It returns nil when path is not a candidate, and an
 // error when it is one but cannot be opened or checked. The file is opened through its root, so
 // no symlink can lead outside it, and every check runs on the opened file.
 func (s *Scanner) open(path string, since time.Time) (*opened, error) {
@@ -252,16 +264,25 @@ func regularFile(path string) bool {
 
 // lexicallyUnderRoot reports whether path, as written, lies under one of the roots, as written
 // or with their symlinks resolved.
-func (s *Scanner) lexicallyUnderRoot(path string) bool {
-	under := func(r string) bool {
-		x, err := filepath.Rel(r, path)
-		return err == nil && x != "." && x != ".." && !strings.HasPrefix(x, ".."+string(filepath.Separator))
-	}
+func (s *Scanner) lexicallyUnderRoot(path string) bool { return underAny(path, s.rootForms()) }
+
+// rootForms returns the roots as written and, where it differs, with their symlinks resolved.
+func (s *Scanner) rootForms() []string {
+	forms := make([]string, 0, 2*len(s.o.Roots))
 	for _, r := range s.o.Roots {
-		if under(r) {
-			return true
+		forms = append(forms, r)
+		if rr, err := filepath.EvalSymlinks(r); err == nil && rr != r {
+			forms = append(forms, rr)
 		}
-		if rr, err := filepath.EvalSymlinks(r); err == nil && under(rr) {
+	}
+	return forms
+}
+
+// underAny reports whether path, as written, lies strictly under one of roots.
+func underAny(path string, roots []string) bool {
+	for _, r := range roots {
+		x, err := filepath.Rel(r, path)
+		if err == nil && x != "." && x != ".." && !strings.HasPrefix(x, ".."+string(filepath.Separator)) {
 			return true
 		}
 	}

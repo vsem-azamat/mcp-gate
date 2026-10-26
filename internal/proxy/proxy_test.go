@@ -214,20 +214,26 @@ func TestDownstreamErrorHidesURL(t *testing.T) {
 	}
 	rejected := fmt.Errorf("calling: %w: Post %q: connection refused", &jsonrpc.Error{Code: -32005, Message: "rejected by transport"}, serverURL)
 	reply := &jsonrpc.Error{
-		Code: -32000, Message: "failed at " + serverURL,
+		Code: -32000, Message: "failed at " + serverURL + " with " + token,
 		Data: json.RawMessage(`{"url":"` + serverURL + `","token":"` + token + `"}`),
 	}
+	const kept = "[REDACTED:secret #kabcdefghij]"
+	escrow := NewRedaction(engine, func(Request) redact.Replacer {
+		return redact.ReplacerFunc(func(redact.Finding) string { return kept })
+	}, 1<<20)
 	for _, c := range []struct {
 		name      string
 		redaction *Redaction
 		err       error
 		code      int64
 		data      bool
+		marker    string // in the message and the data
 	}{
-		{"transport, plain", nil, rejected, -32005, false},
-		{"transport, redacted", NewRedaction(engine, nil, 1<<20), rejected, -32005, false},
-		{"reply, plain", nil, reply, -32000, false},
-		{"reply, redacted", NewRedaction(engine, nil, 1<<20), reply, -32000, true},
+		{"transport, plain", nil, rejected, -32005, false, ""},
+		{"transport, redacted", NewRedaction(engine, nil, 1<<20), rejected, -32005, false, ""},
+		{"reply, plain", nil, reply, -32000, false, ""},
+		{"reply, redacted", NewRedaction(engine, nil, 1<<20), reply, -32000, true, "[REDACTED:"},
+		{"reply, escrow", escrow, reply, -32000, true, kept},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Redaction: c.redaction})
@@ -246,6 +252,9 @@ func TestDownstreamErrorHidesURL(t *testing.T) {
 			}
 			if got := len(rpc.Data) > 0; got != c.data {
 				t.Errorf("data %s, want data: %v", rpc.Data, c.data)
+			}
+			if c.marker != "" && (!strings.Contains(rpc.Message, c.marker) || !strings.Contains(string(rpc.Data), c.marker) || strings.Contains(rpc.Message, token)) {
+				t.Errorf("want %q in message and data: %q %s", c.marker, rpc.Message, rpc.Data)
 			}
 		})
 	}

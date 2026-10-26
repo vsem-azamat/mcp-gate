@@ -76,9 +76,9 @@ func toolError(text string) *mcp.CallToolResult {
 // downstreamError turns a failed call into what the client gets, and sets the outcome. Every
 // error is rebuilt, so that nothing the SDK or the server put in it reaches the client
 // unchecked: its message never quotes the server's URL (an HTTP request that fails is reported
-// with its full URL, inside a JSON-RPC error) and is redacted. A JSON-RPC error keeps its code;
-// the data of a JSON-RPC error reply has the URL replaced and is redacted with the result, and dropped when results are
-// not redacted.
+// with its full URL, inside a JSON-RPC error) and is redacted. A JSON-RPC error keeps its code.
+// The data of a JSON-RPC error reply has the URL replaced and is redacted with the result, or
+// dropped when results are not redacted.
 func (c *call) downstreamError(ctx context.Context, err error) error {
 	c.outcome = outcomeError
 	switch {

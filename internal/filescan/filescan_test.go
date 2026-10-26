@@ -207,6 +207,32 @@ func TestCachedDownload(t *testing.T) {
 	if err != nil || n != 1 || strings.Contains(text(t, res), cached) {
 		t.Errorf("a cached file = %q, %d, %v", text(t, res), n, err)
 	}
+	// A file that predates the gate is not one this gate's calls wrote.
+	o := f.scanner.o
+	o.Started = time.Now().Add(time.Minute)
+	if res, n, err := New(o).Scan(t.Context(), "download_media", nil, in, later); err != nil || n != 0 || text(t, res) != text(t, in) {
+		t.Errorf("a file older than the gate = %q, %d, %v", text(t, res), n, err)
+	}
+}
+
+// TestLongLineStaysCheap checks that a text built to make the search for unquoted paths slow
+// costs a bounded number of file lookups.
+func TestLongLineStaysCheap(t *testing.T) {
+	t.Parallel()
+	for _, line := range []string{
+		strings.Repeat("saved to /a ", 3<<20/12),
+		"saved to /a" + strings.Repeat(" w", 2<<20),
+	} {
+		lookups := 0
+		begin := time.Now()
+		_, _ = candidates(nil, textResult(line), func(string) bool { lookups++; return false })
+		if lookups > (maxCandidates+1)*maxPathWords || time.Since(begin) > 5*time.Second {
+			t.Errorf("%d lookups in %v", lookups, time.Since(begin))
+		}
+	}
+	if _, overflow := candidates(nil, textResult(strings.Repeat("saved to /a ", maxCandidates+1)), nil); !overflow {
+		t.Error("more than maxCandidates mentions do not overflow")
+	}
 }
 
 // TestUnquotedPathWithSpaces checks that an unquoted path after "downloaded to" may hold
@@ -315,7 +341,11 @@ func TestCandidates(t *testing.T) {
 		StructuredContent: map[string]any{"saved_to": "/d/i.txt"},
 	}
 	got := map[string]bool{}
-	for _, c := range candidates(map[string]any{"output_path": "/d/j.txt", "path": "/d/e.txt"}, res, nil) {
+	cands, overflow := candidates(map[string]any{"output_path": "/d/j.txt", "path": "/d/e.txt"}, res, nil)
+	if overflow {
+		t.Error("overflow")
+	}
+	for _, c := range cands {
 		got[c.path] = c.fromArguments
 	}
 	want := map[string]bool{

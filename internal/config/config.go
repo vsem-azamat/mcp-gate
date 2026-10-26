@@ -277,7 +277,8 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	var errs []error
 	skip := map[string]bool{}
 	expandAll(&c, lookup, &errs, skip)
-	c.validate(&errs, skip)
+	home, _ := lookup("HOME")
+	c.validate(&errs, skip, home)
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
