@@ -24,11 +24,14 @@ const maxTreeDepth = 4096
 
 // outsideGateTree reports whether the process pid is neither the gate nor one of its
 // descendants, walking up the parent IDs in /proc/<pid>/stat. The gate is a child subreaper, so
-// a descendant whose parent exits is reparented to the gate and stays in its tree. When the
-// process cannot be read (it has exited, or /proc is hidden), the answer is false: the peer
-// then needs the key.
-func outsideGateTree(pid int) bool {
-	self := os.Getpid()
+// a descendant whose parent exits is reparented to the gate and stays in its tree. When a
+// process on the way cannot be read (it has exited, or another user's /proc entries are hidden
+// by ProtectProc= or hidepid), the answer is false: the peer then needs the key.
+func outsideGateTree(pid int) bool { return outsideTree(pid, os.Getpid(), parentPID) }
+
+// outsideTree walks up from pid with parent and reports whether it reaches init without
+// passing self.
+func outsideTree(pid, self int, parent func(int) (int, error)) bool {
 	for range maxTreeDepth {
 		switch {
 		case pid == self:
@@ -36,13 +39,21 @@ func outsideGateTree(pid int) bool {
 		case pid <= 1:
 			return pid == 1 // pid 0 is no process; reaching init means the chain left the gate
 		}
-		ppid, err := parentPID(pid)
+		ppid, err := parent(pid)
 		if err != nil {
 			return false
 		}
 		pid = ppid
 	}
 	return false
+}
+
+// OthersProcVisible reports whether the gate can read the /proc entries of other users'
+// processes, which the process-tree check of a keyless socket peer needs: init's is the probe.
+// ProtectProc=invisible or a hidepid mount hide them.
+func OthersProcVisible() bool {
+	_, err := parentPID(1)
+	return err == nil
 }
 
 // parentPID reads the parent process ID from /proc/<pid>/stat. The command name, in parentheses,

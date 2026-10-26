@@ -182,6 +182,20 @@ func TestListenSocket(t *testing.T) {
 		t.Errorf("left behind in the directory: %v", entries)
 	}
 
+	// A symlinked directory is checked where it leads.
+	target := filepath.Join(dir, "real")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "via")); err != nil {
+		t.Fatal(err)
+	}
+	if ln, err := ListenSocket(t.Context(), filepath.Join(dir, "via", "e.sock"), 0o600); err != nil {
+		t.Errorf("a directory reached through a symlink: %v", err)
+	} else {
+		_ = ln.Close()
+	}
+
 	// Anything else at the path is left alone.
 	file := filepath.Join(dir, "file.sock")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {

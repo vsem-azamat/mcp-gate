@@ -131,6 +131,10 @@ func New(opts Options) (*Gate, error) {
 					"risk", "the stdio servers run as that user and can start processes outside the gate's tree "+
 						"(through systemd-run, tmux, ssh or ptrace) that read secrets without the key")
 			}
+			if len(cfg.Escrow.Socket.AllowUIDs) > 0 && !escrow.OthersProcVisible() {
+				g.logger.Warn("escrow socket: other users' /proc entries are hidden (ProtectProc= or hidepid), so the process-tree check "+
+					"cannot place most peers and keyless access fails closed: they need the key", "allowUIDs", cfg.Escrow.Socket.AllowUIDs)
+			}
 			mux := http.NewServeMux()
 			mux.Handle(escrow.Route, api)
 			g.sock = upstream.NewServer("", mux, g.logger)

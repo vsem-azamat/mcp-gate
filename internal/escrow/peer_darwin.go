@@ -15,3 +15,6 @@ func fdPeerCred(fd int) (uid, pid int, err error) {
 // outsideGateTree is not checked on macOS: a peer of an allowed user ID is served without a key
 // even when it is the gate's descendant.
 func outsideGateTree(int) bool { return true }
+
+// OthersProcVisible is true: macOS does not check the process tree.
+func OthersProcVisible() bool { return true }

@@ -122,3 +122,27 @@ func TestSocketProcessTree(t *testing.T) {
 		t.Errorf("a process outside the gate's tree without a key = %q, want the value", got)
 	}
 }
+
+func TestOutsideGateTree(t *testing.T) {
+	t.Parallel()
+	const self = 100
+	tree := map[int]int{500: 400, 400: 1, 300: self, 200: 300, 600: 0}
+	parent := func(pid int) (int, error) {
+		if ppid, ok := tree[pid]; ok {
+			return ppid, nil
+		}
+		return 0, os.ErrPermission // another user's /proc entry, hidden by ProtectProc= or hidepid
+	}
+	for pid, want := range map[int]bool{
+		500:  true,  // reaches init
+		self: false, // the gate itself
+		200:  false, // a grandchild of the gate
+		700:  false, // unreadable: fails closed
+		600:  false, // a parent that is no process
+		0:    false, // no PID reported
+	} {
+		if got := outsideTree(pid, self, parent); got != want {
+			t.Errorf("outsideTree(%d) = %v, want %v", pid, got, want)
+		}
+	}
+}

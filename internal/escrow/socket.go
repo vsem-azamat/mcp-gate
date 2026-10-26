@@ -119,12 +119,26 @@ func (l *socketListener) Close() error {
 }
 
 // checkSocketDir accepts a directory owned by root or the gate's user that neither its group
-// nor others can write, or a sticky one owned by root.
+// nor others can write, or a sticky one owned by root. A symlink is checked where it leads.
 func checkSocketDir(dir string) error {
-	fi, err := os.Lstat(dir)
+	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return err
 	}
+	fi, err := os.Lstat(resolved)
+	if err != nil {
+		return err
+	}
+	if resolved != filepath.Clean(dir) {
+		if err := checkDirInfo(fi); err != nil {
+			return fmt.Errorf("leads to %s, which %w", resolved, err)
+		}
+		return nil
+	}
+	return checkDirInfo(fi)
+}
+
+func checkDirInfo(fi fs.FileInfo) error {
 	if !fi.IsDir() {
 		return errors.New("is not a directory")
 	}

@@ -10,3 +10,6 @@ var errNoPeerCred = errors.New("peer credentials are not available on this syste
 func fdPeerCred(int) (uid, pid int, err error) { return 0, 0, errNoPeerCred }
 
 func outsideGateTree(int) bool { return false }
+
+// OthersProcVisible is true: without peer credentials no peer is served without a key anyway.
+func OthersProcVisible() bool { return true }
