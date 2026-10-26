@@ -9,16 +9,14 @@ A gateway for [Model Context Protocol](https://modelcontextprotocol.io) servers.
 
 mcp-gate is a single static binary built on the official [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).
 
-```mermaid
-flowchart LR
-    A[Claude, Codex, other agents] -- "Bearer token<br/>/&lt;server&gt;/mcp" --> G
-    subgraph G [mcp-gate]
-        direction TB
-        T[token check] --> F[tool, prompt and<br/>resource filters] --> R[redaction] --> L[audit log]
-    end
-    G -- stdio --> S1[local servers]
-    G -- "HTTP, OAuth" --> S2[remote servers]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/request-path-dark.svg">
+  <img alt="Agents call /&lt;server&gt;/mcp with a named token; mcp-gate checks the token and filters, forwards to stdio or HTTP servers, then redacts secrets, scans downloaded files and writes an audit line before the result goes back. Redacted values can be kept in an optional in-memory escrow that only the owner key opens." src=".github/assets/request-path-light.svg" width="100%">
+</picture>
+
+## Why another gateway
+
+I run a dozen MCP servers for my own agents and needed a few things in front of them: secrets redacted before they reach a model, a way to get a redacted value back when I need it, a name on every token, OAuth that works with real providers, and new protocol versions soon after they ship. None of the open-source gateways I tried had all of that. I kept a patched fork for a while, but features and fixes sent upstream could wait a long time for review. So I wrote mcp-gate on the official SDK, around those needs.
 
 ## Features
 
@@ -109,6 +107,10 @@ The [configuration reference](docs/configuration/README.md) lists every key. To 
 ## Status
 
 mcp-gate is young (v0.1) but already handles day-to-day traffic for a dozen servers. The config format is versioned (`version: 1`), and a key the build does not know is rejected rather than ignored. There is no config reload yet: after a change, restart the gate.
+
+## Contributing
+
+Issues, fixes and features are welcome, and pull requests get a prompt review. Start with [CONTRIBUTING](.github/CONTRIBUTING.md); [AGENTS.md](AGENTS.md) has the working rules, and security issues go through [private reporting](https://github.com/vsem-azamat/mcp-gate/security/advisories/new).
 
 ## License
 

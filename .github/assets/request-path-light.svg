@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 990 425" width="990" height="425" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+<title id="t">How mcp-gate handles a call</title>
+<desc id="d">Agents call one endpoint per server with a named token. mcp-gate checks the token and the filters, forwards the call to a stdio or HTTP server, then redacts secrets, scans downloaded files and writes an audit line before the result goes back. Redacted values can be kept in an in-memory escrow that only the owner key opens.</desc>
+<defs>
+<marker id="a-req" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#0969da"/></marker>
+<marker id="a-res" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1a7f37"/></marker>
+<marker id="a-esc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8250df"/></marker>
+<marker id="a-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#59636e"/></marker>
+</defs>
+<text x="30" y="34" font-size="11.5" font-weight="600" fill="#59636e" text-anchor="start">CLIENTS</text>
+<text x="485" y="34" font-size="11.5" font-weight="600" fill="#59636e" text-anchor="middle">MCP-GATE</text>
+<text x="960" y="34" font-size="11.5" font-weight="600" fill="#59636e" text-anchor="end">SERVERS</text>
+<rect x="30" y="70" width="170" height="58" rx="10" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="44" y="93" font-size="14" font-weight="600" fill="#1f2328" text-anchor="start">Claude Code</text>
+<text x="44" y="112" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">token: laptop</text>
+<rect x="30" y="152" width="170" height="58" rx="10" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="44" y="175" font-size="14" font-weight="600" fill="#1f2328" text-anchor="start">Codex</text>
+<text x="44" y="194" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">token: server</text>
+<rect x="30" y="234" width="170" height="58" rx="10" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="44" y="257" font-size="14" font-weight="600" fill="#1f2328" text-anchor="start">Phone agent</text>
+<text x="44" y="276" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">token: phone</text>
+<rect x="250" y="50" width="470" height="356" rx="16" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="270" y="80" font-size="13" font-weight="400" fill="#59636e" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">/&lt;server&gt;/mcp</text>
+<text x="700" y="80" font-size="12" font-weight="400" fill="#59636e" text-anchor="end">one endpoint per server</text>
+<text x="270" y="102" font-size="11.5" font-weight="600" fill="#0969da" text-anchor="start">request</text>
+<rect x="276.0" y="112" width="118" height="54" rx="8" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+<text x="335" y="135" font-size="13.5" font-weight="600" fill="#1f2328" text-anchor="middle">Token</text>
+<text x="335" y="153" font-size="11.5" font-weight="400" fill="#59636e" text-anchor="middle">named, per client</text>
+<rect x="426.0" y="112" width="118" height="54" rx="8" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+<text x="485" y="135" font-size="13.5" font-weight="600" fill="#1f2328" text-anchor="middle">Filters</text>
+<text x="485" y="153" font-size="11.5" font-weight="400" fill="#59636e" text-anchor="middle">tools, prompts, res.</text>
+<rect x="576.0" y="112" width="118" height="54" rx="8" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+<text x="635" y="135" font-size="13.5" font-weight="600" fill="#1f2328" text-anchor="middle">Forward</text>
+<text x="635" y="153" font-size="11.5" font-weight="400" fill="#59636e" text-anchor="middle">stdio or HTTP</text>
+<path d="M394 139 H422" fill="none" stroke="#0969da" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M544 139 H572" fill="none" stroke="#0969da" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<text x="270" y="208" font-size="11.5" font-weight="600" fill="#1a7f37" text-anchor="start">result</text>
+<rect x="576.0" y="218" width="118" height="54" rx="8" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
+<text x="635" y="241" font-size="13.5" font-weight="600" fill="#1f2328" text-anchor="middle">Redact</text>
+<text x="635" y="259" font-size="11.5" font-weight="400" fill="#59636e" text-anchor="middle">fails closed</text>
+<rect x="426.0" y="218" width="118" height="54" rx="8" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
+<text x="485" y="241" font-size="13.5" font-weight="600" fill="#1f2328" text-anchor="middle">Scan files</text>
+<text x="485" y="259" font-size="11.5" font-weight="400" fill="#59636e" text-anchor="middle">withhold secrets</text>
+<rect x="276.0" y="218" width="118" height="54" rx="8" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
+<text x="335" y="241" font-size="13.5" font-weight="600" fill="#1f2328" text-anchor="middle">Audit</text>
+<text x="335" y="259" font-size="11.5" font-weight="400" fill="#59636e" text-anchor="middle">who, what, outcome</text>
+<path d="M576 245 H548" fill="none" stroke="#1a7f37" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<path d="M426 245 H398" fill="none" stroke="#1a7f37" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<rect x="555" y="340" width="160" height="48" rx="8" fill="#fbefff" stroke="#8250df" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text x="635.0" y="360" font-size="13.5" font-weight="600" fill="#1f2328" text-anchor="middle">Escrow</text>
+<text x="635.0" y="377" font-size="11.5" font-weight="400" fill="#59636e" text-anchor="middle">in memory, optional</text>
+<path d="M635 272 V336" fill="none" stroke="#8250df" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 5" marker-end="url(#a-esc)"/>
+<text x="643" y="312" font-size="11" font-weight="400" fill="#8250df" text-anchor="start">kept values</text>
+<path d="M865 364 H721" fill="none" stroke="#8250df" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-esc)"/>
+<text x="871" y="360" font-size="12" font-weight="600" fill="#1f2328" text-anchor="start">owner key</text>
+<text x="871" y="376" font-size="11.5" font-weight="400" fill="#59636e" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">GET /_escrow/…</text>
+<text x="270" y="360" font-size="12" font-weight="400" fill="#59636e" text-anchor="start">Kept for the owner, released only</text>
+<text x="270" y="377" font-size="12" font-weight="400" fill="#59636e" text-anchor="start">with a separate key, never to clients</text>
+<path d="M200 99 H226" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M200 181 H226" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M200 263 H226" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M226 99 V263" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M226 139 H272" fill="none" stroke="#0969da" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M276 245 H230" fill="none" stroke="#1a7f37" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<rect x="800" y="70" width="170" height="58" rx="10" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="814" y="93" font-size="14" font-weight="600" fill="#1f2328" text-anchor="start">notes</text>
+<text x="814" y="112" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">stdio</text>
+<rect x="800" y="152" width="170" height="58" rx="10" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="814" y="175" font-size="14" font-weight="600" fill="#1f2328" text-anchor="start">files</text>
+<text x="814" y="194" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">stdio</text>
+<rect x="800" y="234" width="170" height="58" rx="10" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="814" y="257" font-size="14" font-weight="600" fill="#1f2328" text-anchor="start">docs</text>
+<text x="814" y="276" font-size="12" font-weight="400" fill="#59636e" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">HTTP + OAuth</text>
+<path d="M768 99 H796" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M768 181 H796" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M768 263 H796" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M768 99 V263" fill="none" stroke="#59636e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M694 139 H764" fill="none" stroke="#0969da" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M768 245 H698" fill="none" stroke="#1a7f37" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+</svg>

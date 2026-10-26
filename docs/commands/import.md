@@ -2,7 +2,7 @@
 
 [Docs](../README.md) / [Commands](README.md) / **import**
 
-`mcp-gate import <config.json>` converts an mcp-proxy config into an mcp-gate config and writes it to stdout. The mapping is specified in [`openspec/specs/config/spec.md`](../../openspec/specs/config/spec.md).
+`mcp-gate import <config.json>` converts a [TBXark/mcp-proxy](https://github.com/TBXark/mcp-proxy) config into an mcp-gate config and writes it to stdout. The `redact` blocks, the escrow settings and the file-scanning keys below are not part of upstream mcp-proxy; they come from builds that extend it, and the import maps them when a config has them. The mapping is specified in [`openspec/specs/config/spec.md`](../../openspec/specs/config/spec.md).
 
 ```sh
 mcp-gate import config.json > gate.yaml
