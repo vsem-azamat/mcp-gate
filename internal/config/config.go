@@ -72,13 +72,25 @@ type Config struct {
 	Auth Tokens `yaml:"auth,omitempty"`
 	// Admin holds the tokens that may read /_status.
 	Admin Tokens `yaml:"admin,omitempty"`
-	// Escrow configures the secret escrow, which is on when its key hash is in the environment.
+	// Escrow configures the secret escrow, which is on when its key hash is in the config or the
+	// environment.
 	Escrow  Escrow             `yaml:"escrow,omitempty"`
 	Servers map[string]*Server `yaml:"servers"`
 }
 
 // Escrow configures the secret escrow.
 type Escrow struct {
+	// KeyHash is the hex SHA-256 of the API key, usually ${VAR}. It excludes KeyHashFile.
+	KeyHash string `yaml:"keyHash,omitempty"`
+	// KeyHashFile is the absolute path of a file that holds the hex SHA-256 of the API key, such
+	// as a systemd credential; it is read at start.
+	KeyHashFile string `yaml:"keyHashFile,omitempty"`
+	// SourceArguments are the request arguments copied into an entry's source summary; nil
+	// means escrow.DefaultSourceArguments and an empty list copies none.
+	SourceArguments []string `yaml:"sourceArguments,omitempty"`
+	// KeyHashVars are the environment variables KeyHash was expanded from, which the gate keeps
+	// from its children as it keeps the key hash variables. Set by Parse, not by the file.
+	KeyHashVars []string `yaml:"-"`
 	// TTL is how long a kept secret stays retrievable, unless its server sets redact.escrowTTL.
 	TTL *Duration `yaml:"ttl,omitempty"`
 	// MaxEntries caps the entries held; the oldest is evicted. 0 means the default.
@@ -163,6 +175,9 @@ type Redact struct {
 	HighEntropy bool `yaml:"highEntropy,omitempty"`
 	// DisableRules lists rule kinds that are never reported.
 	DisableRules []string `yaml:"disableRules,omitempty"`
+	// Escrow keeps this server's findings and files in the escrow when it is on; nil means true.
+	// False gives them the plain [REDACTED:<kind>] marker and keeps nothing.
+	Escrow *bool `yaml:"escrow,omitempty"`
 	// EscrowTTL is how long the escrow keeps this server's secrets; nil means escrow.ttl.
 	EscrowTTL *Duration `yaml:"escrowTTL,omitempty"`
 	// Files configures the scanning of files the server's download tools write.
@@ -279,7 +294,9 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	}
 	var errs []error
 	skip := map[string]bool{}
+	keyHashVars := varNames(c.Escrow.KeyHash)
 	expandAll(&c, lookup, &errs, skip)
+	c.Escrow.KeyHashVars = keyHashVars
 	home, _ := lookup("HOME")
 	c.validate(&errs, skip, home)
 	if len(errs) > 0 {
@@ -358,6 +375,9 @@ func (c *Config) applyDefaults() {
 		}
 		if s.Redact.Enabled == nil {
 			s.Redact.Enabled = new(true)
+		}
+		if s.Redact.Escrow == nil {
+			s.Redact.Escrow = new(true)
 		}
 		if s.Auth.Inherit == nil && !s.Auth.Public {
 			s.Auth.Inherit = new(true)

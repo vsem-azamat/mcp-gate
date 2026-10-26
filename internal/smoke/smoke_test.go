@@ -169,7 +169,7 @@ servers:
 		"STATE_DIRECTORY=" + stateDir,
 		"SMOKE_CLIENT_TOKEN=" + clientToken,
 		"SMOKE_ADMIN_TOKEN=" + adminToken,
-		"MCP_HUB_ESCROW_KEY_SHA256=" + hex.EncodeToString(keyHash[:]),
+		"MCP_HUB_ESCROW_KEY_SHA256=" + hex.EncodeToString(keyHash[:]), // the deprecated name, which deployments still use
 	}
 	stderr, err := gate.StderrPipe()
 	if err != nil {
@@ -292,7 +292,7 @@ servers:
 
 	// The child gets neither the escrow key hash nor the gate's secrets.
 	env := callText(t, local, "env", nil)
-	for _, leak := range []string{"MCP_HUB_ESCROW_KEY_SHA256", "SMOKE_", "STATE_DIRECTORY"} {
+	for _, leak := range []string{"ESCROW_KEY_SHA256", "SMOKE_", "STATE_DIRECTORY"} {
 		if strings.Contains(env, leak) {
 			t.Errorf("the child's environment holds %s", leak)
 		}
@@ -340,6 +340,11 @@ servers:
 	}
 	if len(logs.messages("stopped")) != 1 {
 		t.Errorf("no stopped line\n%s", logs)
+	}
+	// The deprecated variable name of a deployment that predates MCP_GATE_ESCROW_KEY_SHA256 still
+	// turns the escrow on, with one warning.
+	if w := logs.messages("MCP_HUB_ESCROW_KEY_SHA256 is deprecated; rename it MCP_GATE_ESCROW_KEY_SHA256"); len(w) != 1 || w[0]["level"] != "WARN" {
+		t.Errorf("deprecation warnings = %v", w)
 	}
 	for what, pid := range map[string]int{"child": pids.PID, "grandchild": pids.Grandchild, "process group": -pids.PGID} {
 		if err := gone(pid); err != nil {

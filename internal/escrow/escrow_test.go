@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -363,5 +364,36 @@ func TestAbsentKeyCostsNothing(t *testing.T) {
 	}
 	if rec := request(t, e, http.MethodGet, Route+"kaaaaaaaaaa", "Bearer "+testKey); rec.Code != http.StatusNotFound {
 		t.Errorf("the owner after requests without a key = %d, want 404", rec.Code)
+	}
+}
+
+func TestSourceArguments(t *testing.T) {
+	t.Parallel()
+	args := map[string]any{
+		"chat_id": float64(42), "ticket": "T-1", "repo": "server-a", "text": "password: x",
+		"long": strings.Repeat("x", 201), "multi": "a\nb", "ids": []any{"a", float64(2), map[string]any{}},
+	}
+	sourceOf := func(e *Escrow) map[string]any {
+		t.Helper()
+		m := markerRE.FindStringSubmatch(e.Replacer(Source{Server: "s", Arguments: func() map[string]any { return args }}).
+			Replace(redact.Finding{Kind: "password", Value: "Qwerty-12345"}))
+		if m == nil {
+			t.Fatal("no marker")
+		}
+		ent, _ := e.store.get(m[2])
+		return ent.source
+	}
+	if got := sourceOf(New(Options{KeyHash: testHash()})); len(got) != 1 || got["chat_id"] != float64(42) {
+		t.Errorf("default source = %v, want chat_id only", got)
+	}
+	got := sourceOf(New(Options{KeyHash: testHash(), SourceArguments: []string{"ticket", "repo", "long", "multi", "ids"}}))
+	if ids, _ := got["ids"].([]any); len(got) != 3 || got["ticket"] != "T-1" || got["repo"] != "server-a" || len(ids) != 2 {
+		t.Errorf("configured source = %v, want ticket, repo and two ids", got)
+	}
+	if got := sourceOf(New(Options{KeyHash: testHash(), SourceArguments: []string{}})); len(got) != 0 {
+		t.Errorf("an empty list keeps %v, want nothing", got)
+	}
+	if !slices.Contains(DefaultSourceArguments, "chat_id") || len(DefaultSourceArguments) != 18 {
+		t.Errorf("DefaultSourceArguments = %v", DefaultSourceArguments)
 	}
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/escrow"
 	"github.com/vsem-azamat/mcp-gate/internal/gate"
 	"github.com/vsem-azamat/mcp-gate/internal/oauth"
 	"github.com/vsem-azamat/mcp-gate/internal/procutil"
@@ -26,6 +27,7 @@ import (
 const checkUsage = `Usage: mcp-gate check [flags] <config.yaml>
 
 Loads and validates an mcp-gate config: strict YAML, ${VAR} expanded from the environment.
+It also says whether the escrow would be on and where its key hash comes from.
 With -connect it also connects to every enabled server, starting stdio servers, and reports
 the protocol version and number of tools of each; then it stops them.
 
@@ -78,7 +80,13 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 		}
 	}
 	sort.Strings(names)
+	key, err := escrowKey(cfg, env)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "mcp-gate check: %s:\n  %s\n", fs.Arg(0), err)
+		return exitUsage
+	}
 	_, _ = fmt.Fprintf(stdout, "%s: valid, %d servers (%d disabled)\n", fs.Arg(0), len(names), disabled)
+	_, _ = fmt.Fprintln(stdout, escrowLine(key))
 	if !*connect {
 		return exitOK
 	}
@@ -87,6 +95,22 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 		logger = slog.New(slog.NewTextHandler(stderr, nil))
 	}
 	return connectAll(ctx, cfg, names, oauth.NewStore(*stateDir), *timeout, logger, stdout)
+}
+
+// escrowLine says whether the escrow would be on and where its key hash comes from, never the
+// hash.
+func escrowLine(key *escrow.Key) string {
+	switch {
+	case key == nil:
+		return "escrow: off (no key hash in " + escrow.KeyHashKey + ", " + escrow.KeyHashFileKey + ", " +
+			escrow.KeyHashEnv + " or " + escrow.LegacyKeyHashEnv + ")"
+	case key.Source == escrow.LegacyKeyHashEnv:
+		return "escrow: on, key hash from " + key.Source + " (deprecated: rename it " + escrow.KeyHashEnv + ")"
+	case key.Deprecated:
+		return "escrow: on, key hash from " + key.Source + " (" + escrow.LegacyKeyHashEnv + " is set too, and deprecated)"
+	default:
+		return "escrow: on, key hash from " + key.Source
+	}
 }
 
 // connectAll connects to every enabled server at once and prints one line per server.
@@ -127,7 +151,7 @@ func connectAll(ctx context.Context, cfg *config.Config, names []string, store *
 }
 
 func connectOne(ctx context.Context, cfg *config.Config, name string, s *config.Server, store *oauth.Store, timeout time.Duration, logger *slog.Logger) (string, bool) {
-	sup, err := downstream.New(gate.DownstreamOptions(cfg, name, s, parentEnviron(), version.Get().Version, store, logger))
+	sup, err := downstream.New(gate.DownstreamOptions(cfg, name, s, withoutEscrowKey(parentEnviron(), cfg.Escrow.KeyHashVars...), version.Get().Version, store, logger))
 	if err != nil {
 		return fmt.Sprintf("%s: failed: %v", name, err), false
 	}

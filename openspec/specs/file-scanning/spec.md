@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Some tools download a file to the gate's host and report its local path instead of returning its content, so its secrets would never pass through result redaction. File scanning reads the files that a server's download tools write, after their results are redacted, and withholds from the result every file that holds secrets: the path is replaced by a marker, and the file is kept in the escrow when it is on and was written since the gate started. Only files under the configured roots are read, and a path only the client named only when the call wrote it, so that neither a client nor a server can make the gate read a file outside the roots, nor a client an older one, and a server cannot pull an old file into the escrow.
+Some tools download a file to the gate's host and report its local path instead of returning its content, so its secrets would never pass through result redaction. File scanning reads the files that a server's download tools write, after their results are redacted, and withholds from the result every file that holds secrets: the path is replaced by a marker, and the file is kept in the escrow when it is on for the server and was written since the gate started. Only files under the configured roots are read, and a path only the client named only when the call wrote it, so that neither a client nor a server can make the gate read a file outside the roots, nor a client an older one, and a server cannot pull an old file into the escrow.
 
 ## Requirements
 
@@ -52,7 +52,7 @@ A file whose name ends in `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx` or `.ppk`
 
 ### Requirement: Withholding
 
-A file with secrets SHALL be withheld: kept in the escrow when it is on and its inode changed at or after 2 seconds before the gate started (an older file is withheld without being kept), and every content block whose text, URI or embedded resource text mentions its path (as reported, cleaned or resolved) SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
+A file with secrets SHALL be withheld: kept in the escrow when it is on, the server's `redact.escrow` is true and its inode changed at or after 2 seconds before the gate started (an older file is withheld without being kept), and every content block whose text, URI or embedded resource text mentions its path (as reported, cleaned or resolved) SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
 
 #### Scenario: File with a password
 
@@ -61,7 +61,7 @@ A file with secrets SHALL be withheld: kept in the escrow when it is on and its 
 
 #### Scenario: Without an escrow
 
-- **WHEN** the same happens with the escrow off
+- **WHEN** the same happens with the escrow off, or on a server with `redact.escrow: false`
 - **THEN** the marker is `[REDACTED:file]`
 
 ### Requirement: Failing closed

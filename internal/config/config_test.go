@@ -505,3 +505,50 @@ func TestFileRootsExcludeHome(t *testing.T) {
 		t.Errorf("with HOME: %v", err)
 	}
 }
+
+func TestEscrowKeyHashKeys(t *testing.T) {
+	t.Parallel()
+	const hash = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	c, err := Parse([]byte("version: 1\nescrow: {keyHash: '${HASH}', sourceArguments: [ticket, repo]}\nauth: {tokens: {t: secret}}\nservers:\n"+
+		"  a:\n    stdio: {command: srv}\n    redact: {escrow: false}\n  b:\n    stdio: {command: srv}\n"), env(map[string]string{"HASH": hash}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Escrow.KeyHash != hash || !slices.Equal(c.Escrow.KeyHashVars, []string{"HASH"}) || !slices.Equal(c.Escrow.SourceArguments, []string{"ticket", "repo"}) {
+		t.Errorf("escrow = %+v", c.Escrow)
+	}
+	if *c.Servers["a"].Redact.Escrow || !*c.Servers["b"].Redact.Escrow {
+		t.Errorf("redact.escrow = %v, %v; want false, true", *c.Servers["a"].Redact.Escrow, *c.Servers["b"].Redact.Escrow)
+	}
+	c, err = Parse([]byte("version: 1\nescrow: {keyHashFile: /run/credentials/mcp-gate.service/escrow-key-sha256, sourceArguments: []}\n"+
+		"auth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Escrow.KeyHashFile != "/run/credentials/mcp-gate.service/escrow-key-sha256" || c.Escrow.SourceArguments == nil || len(c.Escrow.SourceArguments) != 0 {
+		t.Errorf("escrow = %+v, want the file and an empty list", c.Escrow)
+	}
+	c, err = Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Escrow.SourceArguments != nil {
+		t.Errorf("default sourceArguments = %v, want nil (the escrow's default)", c.Escrow.SourceArguments)
+	}
+
+	const srv = "auth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n"
+	for _, c := range []struct{ name, doc, want string }{
+		{"both", "version: 1\nescrow: {keyHash: " + hash + ", keyHashFile: /run/h}\n" + srv, "escrow.keyHashFile: excludes escrow.keyHash"},
+		{"not a hash", "version: 1\nescrow: {keyHash: zz-not-a-hash}\n" + srv, "escrow.keyHash: is not a hex SHA-256"},
+		{"short hash", "version: 1\nescrow: {keyHash: " + hash[:63] + "}\n" + srv, "escrow.keyHash: is not a hex SHA-256"},
+		{"relative file", "version: 1\nescrow: {keyHashFile: escrow-key-sha256}\n" + srv, "escrow.keyHashFile: must be an absolute path"},
+		{"empty argument", "version: 1\nescrow: {sourceArguments: [' ']}\n" + srv, "escrow.sourceArguments[0]: cannot be empty"},
+		{"argument with space", "version: 1\nescrow: {sourceArguments: [' a']}\n" + srv, "escrow.sourceArguments[0]: cannot have surrounding space"},
+		{"argument twice", "version: 1\nescrow: {sourceArguments: [a, a]}\n" + srv, "escrow.sourceArguments[1]: is listed twice"},
+	} {
+		_, err := Parse([]byte(c.doc), noEnv)
+		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), "zz-not") || strings.Contains(err.Error(), hash[:63]) {
+			t.Errorf("%s: error = %v, want %q without the value", c.name, err, c.want)
+		}
+	}
+}

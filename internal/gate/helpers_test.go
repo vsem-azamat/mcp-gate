@@ -20,6 +20,7 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/escrow"
 	"github.com/vsem-azamat/mcp-gate/internal/gate"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
@@ -104,14 +105,13 @@ func startGate(t *testing.T, doc string, o gateOpts) *running {
 			o.tune(opts)
 		}
 	}
-	var keyHash *[sha256.Size]byte
+	var key *escrow.Key
 	if o.escrowKey != "" {
-		h := sha256.Sum256([]byte(o.escrowKey))
-		keyHash = &h
+		key = &escrow.Key{Hash: sha256.Sum256([]byte(o.escrowKey)), Source: escrow.KeyHashEnv}
 	}
 	g, err := gate.New(gate.Options{
 		Config: cfg, Environ: []string{"PATH=/usr/bin:/bin"}, StateDir: o.stateDir, Version: "test", Logger: logger,
-		Replacer: o.replacer, Tune: tune, EscrowKeyHash: keyHash,
+		Replacer: o.replacer, Tune: tune, EscrowKey: key,
 	})
 	if err != nil {
 		t.Fatal(err)

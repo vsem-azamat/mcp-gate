@@ -16,7 +16,7 @@ Type=exec
 StateDirectory=mcp-gate
 StateDirectoryMode=0700
 # ~/.config/mcp-gate: gate.yaml, and gate.env (0600) with the secrets the config names as
-# ${VAR} and MCP_HUB_ESCROW_KEY_SHA256.
+# ${VAR} and MCP_GATE_ESCROW_KEY_SHA256 (or a LoadCredential= file named by escrow.keyHashFile).
 ConfigurationDirectory=mcp-gate
 ConfigurationDirectoryMode=0700
 EnvironmentFile=%E/mcp-gate/gate.env

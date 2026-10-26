@@ -5,7 +5,6 @@ package gate
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,9 +50,9 @@ type Options struct {
 	StateDir string
 	Version  string
 	Logger   *slog.Logger
-	// EscrowKeyHash, if set, is the SHA-256 of the escrow API key: the escrow is on, results'
-	// findings are kept in it and /_escrow/ serves them.
-	EscrowKeyHash *[sha256.Size]byte
+	// EscrowKey, if set, is the SHA-256 of the escrow API key and where it came from: the escrow
+	// is on, the findings of servers with redact.escrow are kept in it and /_escrow/ serves them.
+	EscrowKey *escrow.Key
 	// Replacer, if set, returns the replacer for the findings in one call's result, in place of
 	// the escrow's or the [REDACTED:<kind>] marker; for tests.
 	Replacer func(server string, req proxy.Request) redact.Replacer
@@ -111,16 +110,17 @@ func New(opts Options) (*Gate, error) {
 	if cfg.FileRootsUnchecked {
 		g.logger.Warn("$HOME is unset or relative, so redact.files.roots were not checked against the home directory")
 	}
-	if opts.EscrowKeyHash != nil {
+	if opts.EscrowKey != nil {
 		// The API answers on the listener ahead of every MCP route check (Host, tokens), as the
 		// contract it keeps was served; its own key and failed-auth limit guard it.
 		g.escrow = escrow.New(escrow.Options{
-			KeyHash: *opts.EscrowKeyHash, MaxEntries: cfg.Escrow.MaxEntries, Remote: remote, Logger: g.logger,
+			KeyHash: opts.EscrowKey.Hash, MaxEntries: cfg.Escrow.MaxEntries, SourceArguments: cfg.Escrow.SourceArguments,
+			Remote: remote, Logger: g.logger,
 		})
 		g.mux.Handle(escrow.Route, upstream.Recover(g.logger, "_escrow", g.escrow.Handler()))
-		g.logger.Info("secret escrow enabled", "route", escrow.Route, "maxEntries", g.escrow.MaxEntries())
+		g.logger.Info("secret escrow enabled", "route", escrow.Route, "maxEntries", g.escrow.MaxEntries(), "keySource", opts.EscrowKey.Source)
 	} else {
-		g.logger.Info("secret escrow disabled", "reason", escrow.KeyHashEnv+" is not set")
+		g.logger.Info("secret escrow disabled", "reason", "no key hash in the config or the environment")
 	}
 	all := make([]string, 0, len(cfg.Servers))
 	for name := range cfg.Servers {
@@ -171,7 +171,7 @@ func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
 			Server: name, Tools: f.Tools, Roots: f.Roots, MaxBytes: int64(*f.MaxBytes),
 			TTL: s.Redact.EscrowTTL.D(), Engine: engine, Logger: g.logger.With("server", name),
 		}
-		if g.escrow != nil {
+		if g.escrowFor(s) {
 			o.Keep = g.escrow.KeepFile
 		}
 		sc := filescan.New(o)
@@ -206,7 +206,7 @@ func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
 }
 
 // replacer returns what replaces the findings in a server's results: the test hook, the escrow's
-// markers, or nil for the plain marker.
+// markers when the escrow is on for the server, or nil for the plain marker.
 func (g *Gate) replacer(name string, s *config.Server) proxy.ReplacerFunc {
 	switch {
 	case g.opts.Replacer != nil:
@@ -216,13 +216,18 @@ func (g *Gate) replacer(name string, s *config.Server) proxy.ReplacerFunc {
 			}
 			return redact.Marker{}
 		}
-	case g.escrow != nil:
+	case g.escrowFor(s):
 		ttl := s.Redact.EscrowTTL.D()
 		return func(r proxy.Request) redact.Replacer {
 			return g.escrow.Replacer(escrow.Source{Server: name, Tool: r.Name, TTL: ttl, Arguments: r.Arguments})
 		}
 	}
 	return nil
+}
+
+// escrowFor reports whether a server's findings and files are kept in the escrow.
+func (g *Gate) escrowFor(s *config.Server) bool {
+	return g.escrow != nil && *s.Redact.Escrow
 }
 
 // DownstreamOptions turns a server's config into supervisor options. An OAuth server takes its
