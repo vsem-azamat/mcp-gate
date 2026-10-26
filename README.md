@@ -11,7 +11,7 @@ mcp-gate is a single static binary built on the official [MCP Go SDK](https://gi
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/request-path-dark.svg">
-  <img alt="Agents call /&lt;server&gt;/mcp with a named token; mcp-gate checks the token and filters, forwards to stdio or HTTP servers, then redacts secrets, scans downloaded files and writes an audit line before the result goes back. Redacted values can be kept in an optional in-memory escrow that only the owner key opens." src=".github/assets/request-path-light.svg" width="100%">
+  <img alt="AI agents call mcp-gate, each with its own token. The gate authenticates the caller, checks that the tool is allowed and forwards the call to one MCP server; denied calls go straight back. The result comes back through redaction of secrets, a scan of downloaded files and an audit log. Optionally, redacted secrets are kept in memory for the owner, who reads them with a separate key." src=".github/assets/request-path-light.svg" width="100%">
 </picture>
 
 ## Why another gateway
@@ -29,6 +29,22 @@ I run a dozen MCP servers for my own agents and needed a few things in front of 
 - **Protocol negotiation.** The gate learns which protocol version each server speaks, and keeps it across restarts. A version can also be pinned in the config.
 - **Operations.** Health and readiness endpoints, a per-server `/_status` for admins, JSON logs with one audit line per call (arguments and results are never logged), and systemd units with sandboxing.
 - **Migration tools.** `import` converts an [mcp-proxy](https://github.com/TBXark/mcp-proxy) config, and `compare` diffs the catalogs of two gateways or snapshots.
+
+## How it compares
+
+| | Endpoints | Clients | Filters | Secrets in results | Runs as |
+| --- | --- | --- | --- | --- | --- |
+| **mcp-gate** | One per server | Named tokens, global or per server; the name is in every audit line | Tools, prompts, resources | Redacted, fails closed; optional escrow; downloaded files scanned | Single binary, no database |
+| [TBXark/mcp-proxy](https://github.com/TBXark/mcp-proxy) | One per server | Unnamed token lists | Tools | Not redacted | Single binary or Docker |
+| [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | One, aggregated | One bearer token | Tools, per profile | The call is blocked if it looks like a secret | Docker, servers in containers |
+| [ContextForge](https://github.com/IBM/mcp-context-forge) | Aggregated, plus virtual servers | JWT, SSO, teams and RBAC | Tools, prompts, resources | Through plugins (PII, regex) | Python service with a database; admin UI |
+| [agentgateway](https://github.com/agentgateway/agentgateway) | Aggregated or one per server | JWT, API keys, MCP OAuth | CEL rules per caller | Through external guardrails | Single binary or Kubernetes; UI |
+| [MetaMCP](https://github.com/metatool-ai/metamcp) | Aggregated per namespace | API keys or MCP OAuth | Tools, per namespace | Not redacted | Docker Compose with Postgres; web UI |
+| [MCPJungle](https://github.com/mcpjungle/MCPJungle) | Aggregated, plus tool groups | Tokens per named client | Per-client server access; tool groups | Not redacted | Binary with SQLite or Postgres; web UI |
+
+<sub>From each project's README and docs, October 2026. Corrections are welcome.</sub>
+
+mcp-gate fits a few MCP servers on one host, where you want a URL per server, a name on every client, and results that cannot carry secrets out unredacted. If you need a web UI, all tools merged into one endpoint, SSO with per-user roles, Kubernetes or legacy SSE transport, one of the others will serve you better.
 
 ## Quick start
 

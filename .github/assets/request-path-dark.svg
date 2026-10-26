@@ -1,80 +1,77 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 990 425" width="990" height="425" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 590" width="1200" height="590" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
 <title id="t">How mcp-gate handles a call</title>
-<desc id="d">Agents call one endpoint per server with a named token. mcp-gate checks the token and the filters, forwards the call to a stdio or HTTP server, then redacts secrets, scans downloaded files and writes an audit line before the result goes back. Redacted values can be kept in an in-memory escrow that only the owner key opens.</desc>
+<desc id="d">AI agents call mcp-gate, each with its own token. The gate authenticates the caller, checks that the tool is allowed and forwards the call to one MCP server. The result comes back through redaction of secrets, a scan of downloaded files and an audit log. Denied calls go straight back. Optionally, redacted secrets are kept in memory for the owner, who reads them with a separate key.</desc>
 <defs>
-<marker id="a-req" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#4493f8"/></marker>
-<marker id="a-res" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3fb950"/></marker>
-<marker id="a-esc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#ab7df8"/></marker>
-<marker id="a-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#9198a1"/></marker>
+<marker id="a-req" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#4493f8"/></marker>
+<marker id="a-res" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3fb950"/></marker>
+<marker id="a-esc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#ab7df8"/></marker>
+<marker id="a-deny" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#f85149"/></marker>
 </defs>
-<text x="30" y="34" font-size="11.5" font-weight="600" fill="#9198a1" text-anchor="start">CLIENTS</text>
-<text x="485" y="34" font-size="11.5" font-weight="600" fill="#9198a1" text-anchor="middle">MCP-GATE</text>
-<text x="960" y="34" font-size="11.5" font-weight="600" fill="#9198a1" text-anchor="end">SERVERS</text>
-<rect x="30" y="70" width="170" height="58" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
-<text x="44" y="93" font-size="14" font-weight="600" fill="#f0f6fc" text-anchor="start">Claude Code</text>
-<text x="44" y="112" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">token: laptop</text>
-<rect x="30" y="152" width="170" height="58" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
-<text x="44" y="175" font-size="14" font-weight="600" fill="#f0f6fc" text-anchor="start">Codex</text>
-<text x="44" y="194" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">token: server</text>
-<rect x="30" y="234" width="170" height="58" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
-<text x="44" y="257" font-size="14" font-weight="600" fill="#f0f6fc" text-anchor="start">Phone agent</text>
-<text x="44" y="276" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">token: phone</text>
-<rect x="250" y="50" width="470" height="356" rx="16" fill="#0d1117" stroke="#3d444d" stroke-width="1.5"/>
-<text x="270" y="80" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">/&lt;server&gt;/mcp</text>
-<text x="700" y="80" font-size="12" font-weight="400" fill="#9198a1" text-anchor="end">one endpoint per server</text>
-<text x="270" y="102" font-size="11.5" font-weight="600" fill="#4493f8" text-anchor="start">request</text>
-<rect x="276.0" y="112" width="118" height="54" rx="8" fill="#0c2d6b" stroke="#4493f8" stroke-width="1.5"/>
-<text x="335" y="135" font-size="13.5" font-weight="600" fill="#f0f6fc" text-anchor="middle">Token</text>
-<text x="335" y="153" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">named, per client</text>
-<rect x="426.0" y="112" width="118" height="54" rx="8" fill="#0c2d6b" stroke="#4493f8" stroke-width="1.5"/>
-<text x="485" y="135" font-size="13.5" font-weight="600" fill="#f0f6fc" text-anchor="middle">Filters</text>
-<text x="485" y="153" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">tools, prompts, res.</text>
-<rect x="576.0" y="112" width="118" height="54" rx="8" fill="#0c2d6b" stroke="#4493f8" stroke-width="1.5"/>
-<text x="635" y="135" font-size="13.5" font-weight="600" fill="#f0f6fc" text-anchor="middle">Forward</text>
-<text x="635" y="153" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">stdio or HTTP</text>
-<path d="M394 139 H422" fill="none" stroke="#4493f8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
-<path d="M544 139 H572" fill="none" stroke="#4493f8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
-<text x="270" y="208" font-size="11.5" font-weight="600" fill="#3fb950" text-anchor="start">result</text>
-<rect x="576.0" y="218" width="118" height="54" rx="8" fill="#04260f" stroke="#3fb950" stroke-width="1.5"/>
-<text x="635" y="241" font-size="13.5" font-weight="600" fill="#f0f6fc" text-anchor="middle">Redact</text>
-<text x="635" y="259" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">fails closed</text>
-<rect x="426.0" y="218" width="118" height="54" rx="8" fill="#04260f" stroke="#3fb950" stroke-width="1.5"/>
-<text x="485" y="241" font-size="13.5" font-weight="600" fill="#f0f6fc" text-anchor="middle">Scan files</text>
-<text x="485" y="259" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">withhold secrets</text>
-<rect x="276.0" y="218" width="118" height="54" rx="8" fill="#04260f" stroke="#3fb950" stroke-width="1.5"/>
-<text x="335" y="241" font-size="13.5" font-weight="600" fill="#f0f6fc" text-anchor="middle">Audit</text>
-<text x="335" y="259" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">who, what, outcome</text>
-<path d="M576 245 H548" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
-<path d="M426 245 H398" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
-<rect x="555" y="340" width="160" height="48" rx="8" fill="#271052" stroke="#ab7df8" stroke-width="1.5" stroke-dasharray="5 4"/>
-<text x="635.0" y="360" font-size="13.5" font-weight="600" fill="#f0f6fc" text-anchor="middle">Escrow</text>
-<text x="635.0" y="377" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">in memory, optional</text>
-<path d="M635 272 V336" fill="none" stroke="#ab7df8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 5" marker-end="url(#a-esc)"/>
-<text x="643" y="312" font-size="11" font-weight="400" fill="#ab7df8" text-anchor="start">kept values</text>
-<path d="M865 364 H721" fill="none" stroke="#ab7df8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-esc)"/>
-<text x="871" y="360" font-size="12" font-weight="600" fill="#f0f6fc" text-anchor="start">owner key</text>
-<text x="871" y="376" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">GET /_escrow/…</text>
-<text x="270" y="360" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">Kept for the owner, released only</text>
-<text x="270" y="377" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">with a separate key, never to clients</text>
-<path d="M200 99 H226" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M200 181 H226" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M200 263 H226" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M226 99 V263" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M226 139 H272" fill="none" stroke="#4493f8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
-<path d="M276 245 H230" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
-<rect x="800" y="70" width="170" height="58" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
-<text x="814" y="93" font-size="14" font-weight="600" fill="#f0f6fc" text-anchor="start">notes</text>
-<text x="814" y="112" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">stdio</text>
-<rect x="800" y="152" width="170" height="58" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
-<text x="814" y="175" font-size="14" font-weight="600" fill="#f0f6fc" text-anchor="start">files</text>
-<text x="814" y="194" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">stdio</text>
-<rect x="800" y="234" width="170" height="58" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
-<text x="814" y="257" font-size="14" font-weight="600" fill="#f0f6fc" text-anchor="start">docs</text>
-<text x="814" y="276" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">HTTP + OAuth</text>
-<path d="M768 99 H796" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M768 181 H796" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M768 263 H796" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M768 99 V263" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M694 139 H764" fill="none" stroke="#4493f8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
-<path d="M768 245 H698" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<text x="130" y="44" font-size="18" font-weight="600" fill="#f0f6fc" text-anchor="middle">AI agents</text>
+<text x="600.0" y="44" font-size="18" font-weight="600" fill="#f0f6fc" text-anchor="middle">mcp-gate</text>
+<text x="1070" y="44" font-size="18" font-weight="600" fill="#f0f6fc" text-anchor="middle">MCP servers</text>
+<rect x="30" y="138" width="200" height="64" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
+<text x="130.0" y="177.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Claude Code</text>
+<rect x="30" y="228" width="200" height="64" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
+<text x="130.0" y="267.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Codex</text>
+<rect x="30" y="318" width="200" height="64" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
+<text x="130.0" y="357.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Cursor</text>
+<text x="130" y="416" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">each with its own token</text>
+<path d="M230 170 H262" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M230 260 H262" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M230 350 H262" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M262 170 V350" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="300" y="70" width="600" height="460" rx="18" fill="#0d1117" stroke="#3d444d" stroke-width="1.5"/>
+<text x="325" y="120" font-size="15" font-weight="600" fill="#4493f8" text-anchor="start">request →</text>
+<rect x="326.0" y="133.0" width="168" height="74" rx="10" fill="#151b23" stroke="#4493f8" stroke-width="2"/>
+<text x="410.0" y="167.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Authenticate</text>
+<text x="410.0" y="189.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">who is calling</text>
+<rect x="516.0" y="133.0" width="168" height="74" rx="10" fill="#151b23" stroke="#4493f8" stroke-width="2"/>
+<text x="600.0" y="167.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Filter</text>
+<text x="600.0" y="189.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">allowed tools only</text>
+<rect x="706.0" y="133.0" width="168" height="74" rx="10" fill="#151b23" stroke="#4493f8" stroke-width="2"/>
+<text x="790.0" y="167.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Forward</text>
+<text x="790.0" y="189.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">to that one server</text>
+<path d="M262 170 H322.0" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M494.0 170 H512.0" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M684.0 170 H702.0" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M570 207.0 V260 H268" fill="none" stroke="#f85149" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#a-deny)"/>
+<text x="410" y="250" font-size="14.5" font-weight="600" fill="#f85149" text-anchor="middle">denied</text>
+<text x="325" y="300" font-size="15" font-weight="600" fill="#3fb950" text-anchor="start">← result</text>
+<rect x="706.0" y="313.0" width="168" height="74" rx="10" fill="#151b23" stroke="#3fb950" stroke-width="2"/>
+<text x="790.0" y="347.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Redact</text>
+<text x="790.0" y="369.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">strip secrets</text>
+<rect x="516.0" y="313.0" width="168" height="74" rx="10" fill="#151b23" stroke="#3fb950" stroke-width="2"/>
+<text x="600.0" y="347.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Scan files</text>
+<text x="600.0" y="369.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">downloads too</text>
+<rect x="326.0" y="313.0" width="168" height="74" rx="10" fill="#151b23" stroke="#3fb950" stroke-width="2"/>
+<text x="410.0" y="347.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Audit log</text>
+<text x="410.0" y="369.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">who did what</text>
+<path d="M706.0 350 H688.0" fill="none" stroke="#3fb950" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<path d="M516.0 350 H498.0" fill="none" stroke="#3fb950" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<path d="M326.0 350 H268" fill="none" stroke="#3fb950" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<path d="M790 387.0 V428" fill="none" stroke="#ab7df8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 5" marker-end="url(#a-esc)"/>
+<rect x="690" y="432" width="200" height="70" rx="10" fill="#151b23" stroke="#ab7df8" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="790.0" y="464.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">Escrow</text>
+<text x="790.0" y="486.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">optional</text>
+<text x="670" y="462" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="end">redacted secrets kept in memory;</text>
+<text x="670" y="483" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="end">only your owner key reads them</text>
+<path d="M790 578 V506" fill="none" stroke="#ab7df8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-esc)"/>
+<text x="802" y="568" font-size="14.5" font-weight="600" fill="#ab7df8" text-anchor="start">owner key</text>
+<rect x="970" y="138" width="200" height="64" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
+<text x="1070.0" y="167.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">notes</text>
+<text x="1070.0" y="189.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">local</text>
+<path d="M938 170 H970" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="970" y="228" width="200" height="64" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
+<text x="1070.0" y="257.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">files</text>
+<text x="1070.0" y="279.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">local</text>
+<path d="M938 260 H970" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="970" y="318" width="200" height="64" rx="10" fill="#151b23" stroke="#3d444d" stroke-width="1.5"/>
+<text x="1070.0" y="347.0" font-size="19" font-weight="600" fill="#f0f6fc" text-anchor="middle">docs</text>
+<text x="1070.0" y="369.0" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">remote, OAuth</text>
+<path d="M938 350 H970" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M938 170 V350" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1070" y="416" font-size="14.5" font-weight="400" fill="#9198a1" text-anchor="middle">stdio or HTTP</text>
+<path d="M874.0 170 H934" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M938 350 H878.0" fill="none" stroke="#3fb950" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
 </svg>
