@@ -23,7 +23,7 @@ builds:
         # The binary smoke test (internal/smoke) against each built binary this machine can run,
         # before anything is packed or published.
         - cmd: >-
-            {{ if and (eq .Os .Runtime.Goos) (eq .Arch .Runtime.Goarch) }}go test -count=1 -run ^TestBinary$ ./internal/smoke -args -binary={{ .Path }}{{ else }}true{{ end }}
+            {{ if and (eq .Os .Runtime.Goos) (eq .Arch .Runtime.Goarch) }}go test -count=1 ./internal/smoke -args -binary={{ .Path }}{{ else }}true{{ end }}
           output: true
 
 archives:
@@ -47,7 +47,11 @@ archives:
         info: *file-info
       - src: packaging/systemd/mcp-gate.service
         info: *file-info
+      - src: packaging/systemd/mcp-gate.socket
+        info: *file-info
       - src: packaging/systemd/user/mcp-gate.service
+        info: *file-info
+      - src: packaging/systemd/user/mcp-gate.socket
         info: *file-info
 
 checksum:

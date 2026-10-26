@@ -163,47 +163,21 @@ servers:
 	}
 
 	keyHash := sha256.Sum256([]byte(escrowKey))
-	gate := exec.CommandContext(context.WithoutCancel(t.Context()), bin, "serve", cfgPath)
-	gate.Env = []string{
+	gate := startGate(t, exec.CommandContext(context.WithoutCancel(t.Context()), bin, "serve", cfgPath), []string{
 		"PATH=/usr/bin:/bin",
 		"STATE_DIRECTORY=" + stateDir,
 		"SMOKE_CLIENT_TOKEN=" + clientToken,
 		"SMOKE_ADMIN_TOKEN=" + adminToken,
 		"MCP_HUB_ESCROW_KEY_SHA256=" + hex.EncodeToString(keyHash[:]), // the deprecated name, which deployments still use
-	}
-	stderr, err := gate.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := gate.Start(); err != nil {
-		t.Fatal(err)
-	}
-	logs := &logLines{addr: make(chan string, 1)}
-	readDone := make(chan struct{})
-	go logs.read(stderr, readDone)
-	// exited is closed once the gate has exited; waitErr is then its result.
-	exited := make(chan struct{})
-	var waitErr error
-	go func() {
-		<-readDone // Wait closes the pipe; read it to the end first
-		waitErr = gate.Wait()
-		close(exited)
-	}()
-	t.Cleanup(func() {
-		select {
-		case <-exited:
-		default:
-			_ = gate.Process.Kill()
-			<-exited
-		}
 	})
+	logs := gate.logs
 
 	var base string
 	select {
 	case addr := <-logs.addr:
 		base = "http://" + addr
-	case <-exited:
-		t.Fatalf("the gate exited before listening: %v\n%s", waitErr, logs)
+	case <-gate.exited:
+		t.Fatalf("the gate exited before listening: %v\n%s", gate.waitErr, logs)
 	case <-time.After(30 * time.Second):
 		t.Fatalf("the gate did not listen\n%s", logs)
 	}
@@ -324,17 +298,7 @@ servers:
 	tr.CloseIdleConnections()
 
 	// SIGTERM: a clean shutdown, status 0, and the child's whole process group gone.
-	if err := gate.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-exited:
-		if waitErr != nil {
-			t.Errorf("exit after SIGTERM: %v\n%s", waitErr, logs)
-		}
-	case <-time.After(stopWithin):
-		t.Fatalf("the gate did not stop within %s\n%s", stopWithin, logs)
-	}
+	gate.stop(t)
 	if strings.Contains(logs.String(), "no state directory") {
 		t.Error("the gate did not take its state directory from $STATE_DIRECTORY")
 	}
@@ -361,6 +325,62 @@ servers:
 		if strings.Contains(all, leak) {
 			t.Errorf("the log holds %q", leak)
 		}
+	}
+}
+
+// process is a running gate.
+type process struct {
+	cmd  *exec.Cmd
+	logs *logLines
+	// exited is closed once the gate has exited; waitErr is then its result.
+	exited  chan struct{}
+	waitErr error
+}
+
+// startGate starts cmd, a gate, with env as its environment, collecting its stderr; the test's
+// cleanup kills it if it is still running.
+func startGate(t *testing.T, cmd *exec.Cmd, env []string) *process {
+	t.Helper()
+	cmd.Env = env
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	p := &process{cmd: cmd, logs: &logLines{addr: make(chan string, 1)}, exited: make(chan struct{})}
+	readDone := make(chan struct{})
+	go p.logs.read(stderr, readDone)
+	go func() {
+		<-readDone // Wait closes the pipe; read it to the end first
+		p.waitErr = cmd.Wait()
+		close(p.exited)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-p.exited:
+		default:
+			_ = cmd.Process.Kill()
+			<-p.exited
+		}
+	})
+	return p
+}
+
+// stop sends the gate SIGTERM and checks that it exits with status 0 within stopWithin.
+func (p *process) stop(t *testing.T) {
+	t.Helper()
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.exited:
+		if p.waitErr != nil {
+			t.Errorf("exit after SIGTERM: %v\n%s", p.waitErr, p.logs)
+		}
+	case <-time.After(stopWithin):
+		t.Fatalf("the gate did not stop within %s\n%s", stopWithin, p.logs)
 	}
 }
 

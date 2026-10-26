@@ -54,7 +54,7 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
   `mcp-gate auth login` signs in once in any browser. The gate stores the grant and refreshes it.
 
 - **Easy to run and to move to**<br>
-  Health endpoints, a `/_status` page, JSON logs that never contain arguments or answers, and systemd units. `import` converts a [TBXark/mcp-proxy](https://github.com/TBXark/mcp-proxy) config, and `compare` shows what differs between two gateways.
+  Health endpoints, a `/_status` page, JSON logs that never contain arguments or answers, and systemd units. With the socket unit, a restart or an upgrade refuses no connection and fails no call, and agents keep their sessions. `import` converts a [TBXark/mcp-proxy](https://github.com/TBXark/mcp-proxy) config, and `compare` shows what differs between two gateways.
 
 ## How it compares
 

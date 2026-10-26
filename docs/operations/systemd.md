@@ -2,12 +2,14 @@
 
 [Docs](../README.md) / [Operations](README.md) / **systemd**
 
-mcp-gate ships two units, both in the release archives:
+mcp-gate ships two services, each with a socket unit, all in the release archives:
 
 | Unit | Runs as | Config | State |
 | --- | --- | --- | --- |
-| [`packaging/systemd/mcp-gate.service`](../../packaging/systemd/mcp-gate.service) | system service, user `mcp-gate` | `/etc/mcp-gate/` | `/var/lib/mcp-gate/` (also the user's home) |
-| [`packaging/systemd/user/mcp-gate.service`](../../packaging/systemd/user/mcp-gate.service) | user service of the account that owns the stdio servers' files | `~/.config/mcp-gate/` | `~/.local/state/mcp-gate/` |
+| [`packaging/systemd/mcp-gate.service`](../../packaging/systemd/mcp-gate.service) and [`mcp-gate.socket`](../../packaging/systemd/mcp-gate.socket) | system service, user `mcp-gate` | `/etc/mcp-gate/` | `/var/lib/mcp-gate/` (also the user's home) |
+| [`packaging/systemd/user/mcp-gate.service`](../../packaging/systemd/user/mcp-gate.service) and [`mcp-gate.socket`](../../packaging/systemd/user/mcp-gate.socket) | user service of the account that owns the stdio servers' files | `~/.config/mcp-gate/` | `~/.local/state/mcp-gate/` |
+
+The socket unit is optional but recommended: systemd then holds the listening socket, so a restart or an upgrade refuses no connection (see [Restarts](#restarts)). Without it the gate opens `listen.addr` itself. Both services are `Type=notify`: the gate reports ready once every server has connected, or `startupGracePeriod` has passed, so `systemctl start` and `systemctl restart` return when it serves.
 
 Pick the user unit when stdio servers keep state in someone's home (browser profiles, token caches, credentials written by a login tool); pick the system unit when every server can live under `/var/lib/mcp-gate`.
 
@@ -71,9 +73,11 @@ sudo install -d -o mcp-gate -g mcp-gate -m 0700 /var/lib/mcp-gate   # before any
 sudo install -d -m 0755 /etc/mcp-gate
 sudo install -m 0640 -g mcp-gate gate.yaml /etc/mcp-gate/gate.yaml
 sudo install -m 0600 gate.env /etc/mcp-gate/gate.env      # root only: systemd reads it before dropping to mcp-gate
-sudo install -m 0644 packaging/systemd/mcp-gate.service /etc/systemd/system/mcp-gate.service
+sudo install -m 0644 packaging/systemd/mcp-gate.service packaging/systemd/mcp-gate.socket /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
+
+`ListenStream=` in `mcp-gate.socket` must be the config's `listen.addr`; change it with `sudo systemctl edit mcp-gate.socket` (an empty `ListenStream=` line first clears the shipped one). systemd binds the socket, so the gate needs no privilege even for a port below 1024.
 
 Check the config with the service's environment before the first start, then start it:
 
@@ -81,7 +85,7 @@ Check the config with the service's environment before the first start, then sta
 sudo systemd-run --pty --quiet --uid=mcp-gate --gid=mcp-gate \
   -p EnvironmentFile=/etc/mcp-gate/gate.env -p StateDirectory=mcp-gate -p StateDirectoryMode=0700 -p UMask=0077 \
   /usr/local/bin/mcp-gate check -connect /etc/mcp-gate/gate.yaml
-sudo systemctl enable --now mcp-gate
+sudo systemctl enable --now mcp-gate.socket mcp-gate.service
 journalctl -u mcp-gate -f
 ```
 
@@ -92,12 +96,12 @@ install -D -m 0755 mcp-gate ~/.local/bin/mcp-gate
 install -d -m 0700 ~/.local/state/mcp-gate   # before anything runs with StateDirectory=
 install -d -m 0700 ~/.config/mcp-gate
 install -m 0600 gate.yaml gate.env ~/.config/mcp-gate/
-install -D -m 0644 packaging/systemd/user/mcp-gate.service ~/.config/systemd/user/mcp-gate.service
+install -D -m 0644 -t ~/.config/systemd/user packaging/systemd/user/mcp-gate.service packaging/systemd/user/mcp-gate.socket
 systemctl --user daemon-reload
 systemd-run --user --pty --quiet -p EnvironmentFile="$HOME/.config/mcp-gate/gate.env" \
   -p StateDirectory=mcp-gate -p StateDirectoryMode=0700 -p UMask=0077 \
   ~/.local/bin/mcp-gate check -connect ~/.config/mcp-gate/gate.yaml
-systemctl --user enable --now mcp-gate
+systemctl --user enable --now mcp-gate.socket mcp-gate.service
 loginctl enable-linger "$USER"     # keep it running without a login session
 journalctl --user -u mcp-gate -f
 ```
@@ -130,11 +134,32 @@ journalctl -u mcp-gate -o cat | jq -cR 'fromjson? | select(.level == "ERROR" or 
 
 ## Stopping and restarting
 
-`KillMode=mixed` sends SIGTERM to the gate alone. The gate stops accepting connections, gives calls in flight 10 seconds, then stops every server in parallel, each stdio child's process group with SIGTERM and then SIGKILL, logging a server that takes more than 15 seconds. With the default `KillMode=control-group`, systemd would signal the children at the same moment and cut off the calls the gate is finishing. `TimeoutStopSec=40s` leaves room for both phases; when the gate exits, or the timeout passes, systemd sends SIGKILL to whatever is left in the unit's cgroup.
+`KillMode=mixed` sends SIGTERM to the gate alone. The gate stops accepting connections, and for up to a second still answers requests that arrive on connections already open, each with `Connection: close`, so that a client that sends just then gets an answer rather than a closed connection. It gives calls in flight 10 seconds from the SIGTERM, then stops every server in parallel, each stdio child's process group with SIGTERM and then SIGKILL, logging a server that takes more than 15 seconds. With the default `KillMode=control-group`, systemd would signal the children at the same moment and cut off the calls the gate is finishing. `TimeoutStopSec=40s` leaves room for both phases; when the gate exits, or the timeout passes, systemd sends SIGKILL to whatever is left in the unit's cgroup.
 
-`Restart=on-failure` restarts the gate 5 seconds after it fails; a config that does not load fails at once, so `StartLimitBurst` stops the retries after five tries in five minutes (`systemctl reset-failed mcp-gate` after fixing it). A restart forgets every escrowed secret and reconnects every server; learned protocol pins and OAuth grants stay in the state directory.
+`Restart=on-failure` restarts the gate 5 seconds after it fails; a config that does not load fails at once, so `StartLimitBurst` stops the retries after five tries in five minutes (`systemctl reset-failed mcp-gate` after fixing it).
+
+With the socket unit, a connection made while the service is stopped starts it. To stop the gate for good, stop both: `systemctl stop mcp-gate.socket mcp-gate.service`.
 
 The gate has no reload: a config change needs `systemctl restart`.
+
+### Restarts
+
+With `mcp-gate.socket`, `systemctl restart mcp-gate` and an upgrade (install the new binary, then restart) drop no client:
+
+- **No refused connection.** systemd keeps the socket open while the gate restarts. The old gate stops accepting when it gets SIGTERM; connections that arrive from then on wait in the socket's queue until the new gate accepts them.
+- **No failed call.** Calls in flight finish within the 10 second grace. Requests that wait in the queue, and requests that reach the new gate before their server is up again, are held until it is (at most `startupGracePeriod`) instead of being answered 503.
+- **Sessions go on.** The gate keeps no session: every request is served on its own (the SDK's stateless mode) and carries what the gate needs, the token and the protocol version. A client that initialized with the old gate goes on calling the new one without initializing again, and gets no 404 for an unknown session.
+
+The cost is the time to restart: the calls left in flight (up to 10 seconds), stopping the stdio servers, starting the gate and connecting each server again; calls made meanwhile wait for that long. A client whose own request timeout is shorter fails the call. What does not survive a restart:
+
+| Lost | Effect |
+| --- | --- |
+| `subscriptions/listen` streams | End at the SIGTERM. A client that opens its stream again, as after any dropped stream, hears of later catalog changes; one that does not misses them until it reconnects. |
+| Escrowed secrets | Kept in memory only; their handles no longer resolve. |
+| stdio servers | Restarted with the gate, so their own state (open browser pages, caches) is gone and each costs one cold start. HTTP servers are unaffected. |
+| A call longer than the grace | Cut off after 10 seconds. |
+
+Learned protocol pins and OAuth grants stay in the state directory. Without the socket unit a restart still keeps sessions and holds early calls, but connections made while no gate listens are refused.
 
 ## Hardening and its trade-offs
 

@@ -31,13 +31,15 @@ Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `han
 
 [`internal/smoke`](../../internal/smoke/smoke_test.go) runs a built `mcp-gate` binary as a separate process, the way systemd does: the state directory from `$STATE_DIRECTORY`, the tokens and the escrow key hash in the environment under its deprecated name `MCP_HUB_ESCROW_KEY_SHA256`, as older deployments set it, a config listening on a free loopback port. Behind it are a stdio fake with a grandchild and an HTTP fake. It checks `/_healthz` and `/_readyz`, lists the tools and calls one on both routes, checks that a secret in a result is redacted and released by the escrow (the escrow contract below), that the child inherits neither the key hash nor the secrets, `/_status`, the one deprecation warning, and that SIGTERM ends the gate with status 0 within 20 seconds, with the child's whole process group gone and no secret, token or argument in the log.
 
+`TestRestartUnderTraffic` restarts the binary the way systemd does with the socket unit: the test holds a listening socket and passes it to each gate as descriptor 3 with `LISTEN_FDS` and `LISTEN_PID`, reads `READY=1` and `STOPPING=1` from a `NOTIFY_SOCKET` of its own, and stops one gate and starts the next while clients call without pause and with retries off (sessions opened before the restart, one with a `subscriptions/listen` stream, and a client that connects anew for every call) and a slow call is in flight. It fails on any refused connection or failed call.
+
 Without flags it builds the binary from the checkout, so `make test` runs it. `-binary` names a built one instead; a relative path is read from the repository root:
 
 ```sh
 go test -count=1 ./internal/smoke -args -binary=dist/mcp-gate_linux_amd64_v1/mcp-gate
 ```
 
-GoReleaser runs it that way as a post-build hook on every binary the build machine can run, in CI's Release config job and in the release before anything is packed or published (see [Releasing](releasing.md)).
+GoReleaser runs the package that way, both tests, as a post-build hook on every binary the build machine can run, in CI's Release config job and in the release before anything is packed or published (see [Releasing](releasing.md)).
 
 ## Escrow contract
 

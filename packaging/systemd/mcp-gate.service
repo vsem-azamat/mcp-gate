@@ -11,7 +11,11 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
-Type=exec
+# The gate tells systemd it is ready once every server has connected or startupGracePeriod has
+# passed, so `systemctl restart` returns when the new gate serves. Keep TimeoutStartSec= (90 s by
+# default) above startupGracePeriod. With mcp-gate.socket installed, the gate serves the socket
+# systemd holds instead of opening listen.addr itself.
+Type=notify
 User=mcp-gate
 Group=mcp-gate
 # /var/lib/mcp-gate: learned pins (pins.json) and OAuth grants (oauth/). The gate reads it from
@@ -30,10 +34,10 @@ UMask=0077
 
 Restart=on-failure
 RestartSec=5s
-# SIGTERM to the gate only: it gives calls in flight 10 s, then stops each child's process group
-# itself (SIGTERM, then SIGKILL), within 15 s. Sending SIGTERM to the children at the same time,
-# as KillMode=control-group does, would cut off the calls the gate is still finishing. Whatever
-# is left when the gate exits, or at the timeout, gets SIGKILL.
+# SIGTERM to the gate only: it stops accepting, gives calls in flight 10 s, then stops each
+# child's process group itself (SIGTERM, then SIGKILL), within 15 s. Sending SIGTERM to the
+# children at the same time, as KillMode=control-group does, would cut off the calls the gate is
+# still finishing. Whatever is left when the gate exits, or at the timeout, gets SIGKILL.
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=40s

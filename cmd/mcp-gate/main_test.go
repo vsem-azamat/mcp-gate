@@ -59,11 +59,14 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func TestWithoutEscrowKey(t *testing.T) {
+func TestChildEnviron(t *testing.T) {
 	t.Parallel()
-	in := []string{"PATH=/bin", "MCP_HUB_ESCROW_KEY_SHA256=abc", "MCP_OTHER=1", "MCP_GATE_ESCROW_KEY_SHA256=abc", "HASH=abc"}
-	got := withoutEscrowKey(in, "HASH")
+	in := []string{
+		"PATH=/bin", "MCP_HUB_ESCROW_KEY_SHA256=abc", "MCP_OTHER=1", "MCP_GATE_ESCROW_KEY_SHA256=abc", "HASH=abc",
+		"LISTEN_PID=1", "LISTEN_FDS=1", "LISTEN_FDNAMES=mcp-gate.socket", "NOTIFY_SOCKET=/run/notify",
+	}
+	got := childEnviron(in, "HASH")
 	if len(got) != 2 || got[0] != "PATH=/bin" || got[1] != "MCP_OTHER=1" || in[1] != "MCP_HUB_ESCROW_KEY_SHA256=abc" {
-		t.Errorf("withoutEscrowKey = %v (input %v)", got, in)
+		t.Errorf("childEnviron = %v (input %v)", got, in)
 	}
 }
