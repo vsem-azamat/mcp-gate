@@ -93,12 +93,11 @@ func TestHandlersCheckThePolicy(t *testing.T) {
 	cfg := &config.Config{Policies: map[string]*config.TokenPolicy{"phone": {Servers: map[string]*config.ServerPolicy{
 		"s": {Tools: &config.PolicyFilter{Allow: []string{"echo"}}, Resources: &config.PolicyFilter{None: true}},
 	}}}}
-	m := New(Options{
+	calls := 0
+	m := newMirror(Options{
 		Name: "s", Policy: policy.New(&config.Server{}), Tokens: policy.NewTokens(cfg, "s"),
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
-	})
-	calls := 0
-	m.Attach(countingDown{calls: &calls})
+	}, countingDown{calls: &calls})
 	extra := &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "phone"}}
 	_, err := m.callTool(t.Context(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "ghost"}, Extra: extra})
 	if err == nil || err.Error() != errUnknownTool("ghost").Error() {

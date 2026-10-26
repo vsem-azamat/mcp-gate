@@ -52,7 +52,7 @@ func (m *Mirror) begin(ctx context.Context, method string, extra *mcp.RequestExt
 	if reached, ok := ctx.Value(reachedKey{}).(*bool); ok {
 		*reached = true
 	}
-	m.stats.calls.Add(1)
+	m.src.stats.calls.Add(1)
 	principal := ""
 	if extra != nil {
 		principal = upstream.Principal(extra.TokenInfo)
@@ -66,7 +66,7 @@ func (m *Mirror) begin(ctx context.Context, method string, extra *mcp.RequestExt
 // end writes the audit line. Arguments and results are never logged.
 func (c *call) end() {
 	if c.outcome != outcomeOK && c.outcome != outcomeToolError {
-		c.m.stats.failed.Add(1)
+		c.m.src.stats.failed.Add(1)
 	}
 	attrs := append([]any{
 		"principal", c.principal, "method", c.method,
@@ -97,15 +97,15 @@ func (c *call) downstreamError(ctx context.Context, err error) error {
 	}
 	var rpc *jsonrpc.Error
 	if !errors.As(err, &rpc) || rpc == nil {
-		return errors.New(c.m.down.ErrorText(err))
+		return errors.New(c.m.src.down.ErrorText(err))
 	}
 	r := c.m.opts.Redaction
 	if r == nil {
-		return &jsonrpc.Error{Code: rpc.Code, Message: c.m.down.ErrorText(err)}
+		return &jsonrpc.Error{Code: rpc.Code, Message: c.m.src.down.ErrorText(err)}
 	}
-	fresh := &jsonrpc.Error{Code: rpc.Code, Message: c.m.down.HideURL(err.Error())}
+	fresh := &jsonrpc.Error{Code: rpc.Code, Message: c.m.src.down.HideURL(err.Error())}
 	if direct, ok := err.(*jsonrpc.Error); ok && direct == rpc { //nolint:errorlint // only an unwrapped error reply carries its data to the wire
-		fresh.Data = json.RawMessage(c.m.down.HideURL(string(rpc.Data)))
+		fresh.Data = json.RawMessage(c.m.src.down.HideURL(string(rpc.Data)))
 	}
 	return r.results.Error(fresh, c.replacer())
 }
@@ -290,7 +290,7 @@ func (m *Mirror) scrub(s string) string {
 	if r := m.opts.Redaction; r != nil {
 		return r.engine.RedactText(s, redact.Marker{})
 	}
-	return m.down.ErrorText(errors.New(s))
+	return m.src.down.ErrorText(errors.New(s))
 }
 
 // logText makes a value from a request fit for the log: scrubbed and cut at 256 bytes.
@@ -306,15 +306,15 @@ func (m *Mirror) forward(ctx context.Context, ss *mcp.ServerSession, meta mcp.Me
 ) error {
 	down := downstreamMeta(meta, m.opts.ForwardMeta)
 	if token := progressToken(meta); token != nil && ss != nil {
-		sink := m.progress.open(ctx, ss, token, m.logger)
-		defer m.progress.close(sink)
+		sink := m.src.progress.open(ctx, ss, token, m.scrub, m.logger)
+		defer m.src.progress.close(sink)
 		if down == nil {
 			down = mcp.Meta{}
 		}
 		down["progressToken"] = sink.id
 	}
 	setMeta(down)
-	return m.down.Call(ctx, fn)
+	return m.src.down.Call(ctx, fn)
 }
 
 // progressToken returns the upstream request's progress token, if it has a usable one.

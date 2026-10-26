@@ -9,7 +9,7 @@ mcp-gate ships two services, each with a socket unit, all in the release archive
 | [`packaging/systemd/mcp-gate.service`](../../packaging/systemd/mcp-gate.service) and [`mcp-gate.socket`](../../packaging/systemd/mcp-gate.socket) | system service, user `mcp-gate` | `/etc/mcp-gate/` | `/var/lib/mcp-gate/` (also the user's home) |
 | [`packaging/systemd/user/mcp-gate.service`](../../packaging/systemd/user/mcp-gate.service) and [`mcp-gate.socket`](../../packaging/systemd/user/mcp-gate.socket) | user service of the account that owns the stdio servers' files | `~/.config/mcp-gate/` | `~/.local/state/mcp-gate/` |
 
-The socket unit is optional but recommended: systemd then holds the listening socket, so a restart or an upgrade refuses no connection (see [Restarts](#restarts)). Without it the gate opens `listen.addr` itself. Both services are `Type=notify`: the gate reports ready once every server has connected, or `startupGracePeriod` has passed, so `systemctl start` and `systemctl restart` return when it serves.
+The socket unit is optional but recommended: systemd then holds the listening socket, so a restart or an upgrade refuses no connection (see [Restarts](#restarts)). Without it the gate opens `listen.addr` itself. Both services are `Type=notify`: the gate reports ready once every server has connected, or `startupGracePeriod` has passed, so `systemctl start` and `systemctl restart` return when it serves. `systemctl reload` applies a changed `gate.yaml` without a restart (see [Reloads](#reloads)).
 
 Pick the user unit when stdio servers keep state in someone's home (browser profiles, token caches, credentials written by a login tool); pick the system unit when every server can live under `/var/lib/mcp-gate`.
 
@@ -140,7 +140,16 @@ journalctl -u mcp-gate -o cat | jq -cR 'fromjson? | select(.level == "ERROR" or 
 
 With the socket unit, a connection made while the service is stopped starts it. To stop the gate for good, stop both: `systemctl stop mcp-gate.socket mcp-gate.service`.
 
-The gate has no reload: a config change needs `systemctl restart`.
+### Reloads
+
+`systemctl reload mcp-gate` sends SIGHUP (`ExecReload=`) and returns; the gate then reads `gate.yaml` again; see [serve](../commands/serve.md#reload) for what a reload changes. A config that does not load is logged (`journalctl -u mcp-gate`) and the running one stays, so check it first:
+
+```sh
+sudo systemd-run --pty --quiet --uid=mcp-gate --gid=mcp-gate -p EnvironmentFile=/etc/mcp-gate/gate.env \
+  /usr/local/bin/mcp-gate check /etc/mcp-gate/gate.yaml && sudo systemctl reload mcp-gate
+```
+
+The gate reads `${VAR}` values from the environment it started with, and systemd reads `gate.env` only at the start: a new or changed token in `gate.env` needs `systemctl restart`, which with the socket unit drops no client either.
 
 ### Restarts
 

@@ -65,10 +65,10 @@ This repository is public. Before every commit and PR, check that nothing privat
 | `internal/downstream/` | Supervisor of one downstream server: stdio line connection, size-limited HTTP client, probes, restarts, version pin, notifications |
 | `internal/escrow/` | Secret escrow: key hash sources, in-memory store, replacer that keeps findings, kept files, the frozen `/_escrow/` HTTP API, its failed-auth limit, the unix socket with peer credentials |
 | `internal/filescan/` | Scanning of the files download tools write: paths, safe opening under roots, withholding, failing closed |
-| `internal/gate/` | `mcp-gate serve` assembled: supervisors, mirrors and routes per server, the aggregate route, its token check and its views per access and token policy, readiness, `/_status`, learned pins file, shutdown |
+| `internal/gate/` | `mcp-gate serve` assembled: per-server runtimes, mirrors and routes in a snapshot per config, the aggregate route, its token check and its views per access and token policy, readiness, `/_status`, learned pins file, reloads and the classification of config fields, shutdown |
 | `internal/oauth/` | OAuth client of HTTP servers: discovery, registration and login for `mcp-gate auth`, the grant store, the token source that refreshes |
 | `internal/policy/` | Server filters and token policy filters, their decisions, the one algorithm for which resource URIs may be read, URI normalization |
-| `internal/proxy/` | Catalog mirror of one server and its per-token servers, call forwarding, progress, notification queue, result redaction, the errors of hidden entries, audit line; the aggregate catalog of several mirrors and its per-access views |
+| `internal/proxy/` | Source of one server (catalog sync, counters, progress, notification queue) and its mirror under one config with its per-token servers, call forwarding, result redaction, the errors of hidden entries, audit line; the aggregate catalog of several mirrors and its per-access views |
 | `internal/procutil/` | Child processes: clean environment, process groups, stderr line log, OOM score, non-dumpable gate, subreaper |
 | `internal/redact/` | Redaction engine: rules with priorities, findings, replacers (no MCP or HTTP imports) |
 | `internal/redact/mcpredact/` | Redaction of MCP SDK results and errors, failing closed |

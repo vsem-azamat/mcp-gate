@@ -1,11 +1,11 @@
 // Package gate assembles mcp-gate from its config: a supervisor and a mirror for every server,
-// the HTTP routes in front of them, readiness after the startup grace period, and shutdown.
+// the HTTP routes in front of them, readiness after the startup grace period, reloads of the
+// config, and shutdown.
 package gate
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -13,21 +13,15 @@ import (
 	"net/netip"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/escrow"
-	"github.com/vsem-azamat/mcp-gate/internal/filescan"
 	"github.com/vsem-azamat/mcp-gate/internal/oauth"
-	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/systemd"
@@ -68,34 +62,50 @@ type Options struct {
 	// Notify, if set, is told the gate's state in sd_notify form: systemd.Ready once startup is
 	// over, systemd.Stopping when shutdown begins.
 	Notify func(state string)
+	// Level, if set, is the level of Logger's handler, which a reload sets from logLevel.
+	Level *slog.LevelVar
 }
 
-// Gate is a configured mcp-gate.
+// Gate is a configured mcp-gate. What a reload can change is in an immutable snapshot that every
+// request takes once, when it arrives; the rest is fixed at the start.
 type Gate struct {
-	opts    Options
-	cfg     *config.Config
-	logger  *slog.Logger
-	names   []string // enabled servers, sorted
-	servers map[string]*server
-	escrow  *escrow.Escrow // nil when off
-	mux     *http.ServeMux
-	srv     *upstream.Server
-	sock    *upstream.Server // serves the escrow socket; nil without one
-	pins    *pinStore
-	started atomic.Bool
+	opts Options
+	// boot is the config the gate started with: listen.addr, the escrow and startupGracePeriod
+	// stay as it says until a restart.
+	boot   *config.Config
+	logger *slog.Logger
+	escrow *escrow.Escrow // nil when off
+	// escrowAPI is the escrow API that every snapshot mounts at /_escrow/; nil when the escrow
+	// is off or not served on the listener.
+	escrowAPI http.Handler
+	srv       *upstream.Server
+	sock      *upstream.Server // serves the escrow socket; nil without one
+	pins      *pinStore
+	started   atomic.Bool
 	// startupOver is closed when the startup watcher returns: started, or shutting down first.
 	startupOver chan struct{}
 	// drain is closed when shutdown begins; it ends the subscriptions/listen streams, which
 	// would otherwise hold the shutdown for its whole grace.
 	drain     chan struct{}
 	drainOnce sync.Once
-}
 
-type server struct {
-	name   string
-	cfg    *config.Server
-	sup    *downstream.Supervisor
-	mirror *proxy.Mirror
+	snap atomic.Pointer[snapshot]
+
+	// running is closed once Run has started the servers.
+	running chan struct{}
+	// mu serializes reloads with the start and the shutdown, and guards closing and retired.
+	mu      sync.Mutex
+	closing bool
+	// retired are the routes that reloads replaced and that still have requests in flight.
+	retired []*route
+	// retireCtx is cancelled when shutdown begins, which ends the waits of reloads for calls in
+	// flight; drained is closed once the shutdown has drained the listener, after which the
+	// mirrors of replaced routes are closed; retiring counts those not closed yet.
+	retireCtx    context.Context
+	stopRetiring context.CancelFunc
+	drained      chan struct{}
+	drainedOnce  sync.Once
+	retiring     sync.WaitGroup
 }
 
 // New builds a gate from its config. It starts nothing.
@@ -104,39 +114,27 @@ func New(opts Options) (*Gate, error) {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
 	cfg := opts.Config
-	g := &Gate{opts: opts, cfg: cfg, logger: opts.Logger, servers: map[string]*server{}, mux: http.NewServeMux()}
-	g.drain = make(chan struct{})
-	g.startupOver = make(chan struct{})
+	g := &Gate{
+		opts: opts, boot: cfg, logger: opts.Logger, drain: make(chan struct{}), startupOver: make(chan struct{}),
+		running: make(chan struct{}), drained: make(chan struct{}),
+	}
+	g.retireCtx, g.stopRetiring = context.WithCancel(context.Background())
 	var err error
 	if g.pins, err = loadPins(opts.StateDir); err != nil {
 		g.logger.Warn("cannot read the learned protocol pins; starting without them", "error", err.Error())
-	}
-	trusted := make([]netip.Prefix, 0, len(cfg.Listen.TrustedProxies))
-	for _, p := range cfg.Listen.TrustedProxies {
-		if pp, err := netip.ParsePrefix(p); err == nil {
-			trusted = append(trusted, pp)
-		}
-	}
-	remote := upstream.NewRemote(cfg.Listen.BehindProxy, trusted)
-	if cfg.Listen.BehindProxy && len(cfg.Listen.AllowedHosts) == 0 {
-		g.logger.Warn("listen.behindProxy is set without listen.allowedHosts: no Host is checked, so the proxy must check it")
-	}
-	for _, w := range cfg.Warnings {
-		g.logger.Warn("config: " + w)
-	}
-	if cfg.FileRootsUnchecked {
-		g.logger.Warn("$HOME is unset or relative, so redact.files.roots were not checked against the home directory")
 	}
 	if opts.EscrowKey != nil {
 		// The API answers on the listener ahead of every MCP route check (Host, tokens), as the
 		// contract it keeps was served; its own key and failed-auth limit guard it.
 		g.escrow = escrow.New(escrow.Options{
 			KeyHash: opts.EscrowKey.Hash, MaxEntries: cfg.Escrow.MaxEntries, SourceArguments: cfg.Escrow.SourceArguments,
-			AllowUIDs: socketUIDs(cfg.Escrow.Socket), Remote: remote, Logger: g.logger,
+			AllowUIDs: socketUIDs(cfg.Escrow.Socket), Logger: g.logger,
+			// The client address under the current listen settings, which a reload may change.
+			Remote: func(r *http.Request) string { return g.snap.Load().remote(r) },
 		})
 		api := upstream.Recover(g.logger, "_escrow", g.escrow.Handler())
 		if *cfg.Escrow.TCP {
-			g.mux.Handle(escrow.Route, api)
+			g.escrowAPI = api
 			if !cfg.Listen.BehindProxy && loopbackListen(cfg.Listen.Addr) {
 				g.logger.Warn("the escrow API is on a loopback listener without listen.behindProxy: behind a reverse proxy " +
 					"on this host every client is 127.0.0.1 and shares one failed-auth budget; set behindProxy and trustedProxies")
@@ -168,94 +166,30 @@ func New(opts Options) (*Gate, error) {
 			g.logger.Warn("escrow.socket is set but the escrow is off: no socket is opened")
 		}
 	}
-	all := make([]string, 0, len(cfg.Servers))
-	for name := range cfg.Servers {
-		all = append(all, name)
+	sn, err := g.build(cfg, nil)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(all)
-	for _, name := range all {
-		s := cfg.Servers[name]
-		if s.Disabled {
-			g.logger.Info("server disabled", "server", name)
-			continue
-		}
-		srv, err := g.newServer(name, s)
-		if err != nil {
-			return nil, fmt.Errorf("servers.%s: %w", name, err)
-		}
-		g.servers[name] = srv
-		g.names = append(g.names, name)
-		g.mux.Handle("/"+name+"/mcp", g.route(srv, remote))
-	}
-	if cfg.Aggregate != nil {
-		h, err := g.aggregateRoute(remote)
-		if err != nil {
-			return nil, fmt.Errorf("aggregate: %w", err)
-		}
-		g.mux.Handle(config.AggregatePath, h)
-	}
-	info := upstream.HealthInfo{Name: cfg.Name, Version: opts.Version, ServerCount: len(g.names)}
-	g.mux.Handle("GET /_healthz", upstream.Recover(g.logger, "_healthz", upstream.HealthHandler(info, nil)))
-	g.mux.Handle("GET /_readyz", upstream.Recover(g.logger, "_readyz", upstream.HealthHandler(info, g.Readiness)))
-	if len(cfg.Admin.Tokens) > 0 {
-		admin := upstream.NewTokens(cfg.Admin.Tokens)
-		g.mux.Handle("GET /_status", upstream.Recover(g.logger, "_status",
-			upstream.StatusHandler(admin, func() any { return g.Status() })))
-	}
-	g.srv = upstream.NewServer(cfg.Listen.Addr, g.mux, g.logger)
+	g.snap.Store(sn)
+	g.srv = upstream.NewServer(cfg.Listen.Addr, http.HandlerFunc(g.serveHTTP), g.logger)
 	g.srv.RegisterOnShutdown(func() { g.drainOnce.Do(func() { close(g.drain) }) })
 	return g, nil
 }
 
-func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
-	var redaction *proxy.Redaction
-	var engine *redact.Engine
-	if *s.Redact.Enabled {
-		var err error
-		engine, err = redact.New(redact.Options{Russian: s.Redact.RU, HighEntropy: s.Redact.HighEntropy, DisableRules: s.Redact.DisableRules})
-		if err != nil {
-			return nil, err
-		}
-		redaction = proxy.NewRedaction(engine, g.replacer(name, s), int(*s.MaxMessageBytes))
-	}
-	var files proxy.FileScanner
-	if f := s.Redact.Files; f != nil && engine != nil {
-		o := filescan.Options{
-			Server: name, Tools: f.Tools, Roots: f.Roots, MaxBytes: int64(*f.MaxBytes),
-			TTL: s.Redact.EscrowTTL.D(), Engine: engine, Logger: g.logger.With("server", name),
-		}
-		if g.escrowFor(s) {
-			o.Keep = g.escrow.KeepFile
-		}
-		sc := filescan.New(o)
-		if missing := sc.MissingRoots(); len(missing) > 0 {
-			g.logger.Warn("file roots do not exist yet; files written elsewhere are not scanned", "server", name, "roots", len(missing))
-		}
-		files = sc
-	}
-	mirror := proxy.New(proxy.Options{
-		Name: name, Version: g.opts.Version, Policy: policy.New(s), Tokens: policy.NewTokens(g.cfg, name), ForwardMeta: s.ForwardMeta,
-		Redaction: redaction, Files: files, Logger: g.logger,
-	})
-	o := DownstreamOptions(g.cfg, name, s, g.opts.Environ, g.opts.Version, oauth.NewStore(g.opts.StateDir), g.logger)
-	o.Redactor = engine
-	o.Notifications = mirror.Notifications()
-	o.OnSession = mirror.OnSession
-	o.LearnedPin = g.pins.get(name)
-	o.OnPinLearned = func(v string) {
-		if err := g.pins.set(name, v); err != nil {
-			g.logger.Warn("cannot store the learned protocol pin", "server", name, "error", err.Error())
+// remoteOf returns how the client address of a request is read under a listen config.
+func remoteOf(l config.Listen) upstream.RemoteFunc {
+	trusted := make([]netip.Prefix, 0, len(l.TrustedProxies))
+	for _, p := range l.TrustedProxies {
+		if pp, err := netip.ParsePrefix(p); err == nil {
+			trusted = append(trusted, pp)
 		}
 	}
-	if g.opts.Tune != nil {
-		g.opts.Tune(&o)
-	}
-	sup, err := downstream.New(o)
-	if err != nil {
-		return nil, err
-	}
-	mirror.Attach(sup)
-	return &server{name: name, cfg: s, sup: sup, mirror: mirror}, nil
+	return upstream.NewRemote(l.BehindProxy, trusted)
+}
+
+// serveHTTP serves a request from the current snapshot.
+func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	g.snap.Load().mux.ServeHTTP(w, r)
 }
 
 // replacer returns what replaces the findings in a server's results: the test hook, the escrow's
@@ -323,73 +257,13 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 	return o
 }
 
-// route builds the handler chain of a server's /<name>/mcp: recover, the request log, the Host
-// check, the token check, cross-origin protection, 503 until the server has connected once (a
-// request held during startup), the body limit, and the SDK's stateless streamable handler over
-// the mirror's server for the request's token.
-func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
-	mirror := s.mirror
-	var authorize func(http.Handler) http.Handler
-	if tokens := g.cfg.EffectiveTokens(s.name); tokens != nil {
-		t := upstream.NewTokens(tokens)
-		authorize = func(h http.Handler) http.Handler { return upstream.RequireToken(t, h) }
-	}
-	return g.chain(s.name, s.cfg.Log.Requests, remote, authorize,
-		func(*http.Request) (bool, bool) {
-			// A server waiting for a login does not connect without someone.
-			return mirror.Ready(), s.sup.Status().State != downstream.NeedsLogin
-		},
-		func(r *http.Request) *mcp.Server {
-			return mirror.ServerFor(upstream.Principal(auth.TokenInfoFromContext(r.Context())))
-		})
-}
-
-// chain builds an MCP route around the SDK's stateless streamable handlers for the servers
-// getServer returns: recover, the request log when logRequests, the Host check, authorize when
-// set, cross-origin protection, 503 while ready is false (see awaitReady), the body limit, and
-// respond choosing between an event stream and plain JSON.
-func (g *Gate) chain(name string, logRequests bool, remote upstream.RemoteFunc, authorize func(http.Handler) http.Handler,
-	ready func(*http.Request) (ok, pending bool), getServer func(*http.Request) *mcp.Server,
-) http.Handler {
-	opts := mcp.StreamableHTTPOptions{
-		Stateless:                    true,
-		PropagateRequestCancellation: true,
-		DisableLocalhostProtection:   g.cfg.Listen.BehindProxy,
-		MaxRequestBodyBytes:          upstream.MaxBodyBytes,
-		Logger:                       upstream.SDKLogger(g.logger.With("server", name)),
-	}
-	plainOpts := opts
-	plainOpts.JSONResponse = true
-	stream := mcp.NewStreamableHTTPHandler(getServer, &opts)
-	plain := mcp.NewStreamableHTTPHandler(getServer, &plainOpts)
-	h := upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, g.respond(stream, plain))
-	inner := h
-	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !g.awaitReady(r, ready) {
-			w.Header().Set("Retry-After", upstream.RetryAfter)
-			http.Error(w, "Service Unavailable: the server has not connected yet", http.StatusServiceUnavailable)
-			return
-		}
-		inner.ServeHTTP(w, r)
-	})
-	h = http.NewCrossOriginProtection().Handler(h)
-	if authorize != nil {
-		h = authorize(h)
-	}
-	h = upstream.AllowHosts(g.cfg.Listen.AllowedHosts, h)
-	if logRequests {
-		h = upstream.LogRequests(g.logger, name, remote, h)
-	}
-	return upstream.Recover(g.logger, name, h)
-}
-
 // Handler is the gate's HTTP handler.
-func (g *Gate) Handler() http.Handler { return g.mux }
+func (g *Gate) Handler() http.Handler { return http.HandlerFunc(g.serveHTTP) }
 
 // Listen opens the configured listen address.
 func (g *Gate) Listen(ctx context.Context) (net.Listener, error) {
 	var lc net.ListenConfig
-	return lc.Listen(ctx, "tcp", g.cfg.Listen.Addr)
+	return lc.Listen(ctx, "tcp", g.boot.Listen.Addr)
 }
 
 // Run starts every server and serves ln, and the escrow socket when there is one, until ctx is
@@ -398,7 +272,7 @@ func (g *Gate) Listen(ctx context.Context) (net.Listener, error) {
 func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	var sockServed chan error
 	if g.sock != nil {
-		s := g.cfg.Escrow.Socket
+		s := g.boot.Escrow.Socket
 		sl, err := escrow.ListenSocket(ctx, s.Path, fs.FileMode(*s.Mode))
 		if err != nil {
 			_ = ln.Close()
@@ -408,13 +282,13 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 		go func() { sockServed <- g.sock.Serve(sl) }()
 		g.logger.Info("escrow socket listening", "path", s.Path, "allowUIDs", socketUIDs(s))
 	}
-	for _, name := range g.names {
-		s := g.servers[name]
-		// The mirror outlives ctx: calls finishing during the shutdown grace still get their
-		// progress. shutdown closes it.
-		s.mirror.Start(context.WithoutCancel(ctx))
-		s.sup.Start(ctx)
+	g.mu.Lock()
+	sn := g.snap.Load()
+	for _, name := range sn.names {
+		sn.servers[name].rt.start(ctx)
 	}
+	close(g.running)
+	g.mu.Unlock()
 	var sweeper sync.WaitGroup
 	defer sweeper.Wait()
 	sweep, stopSweep := context.WithCancel(ctx)
@@ -424,9 +298,9 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	}
 	served := make(chan error, 1)
 	go func() { served <- g.srv.Serve(ln) }()
-	g.logger.Info("listening", "addr", ln.Addr().String(), "servers", len(g.names))
+	g.logger.Info("listening", "addr", ln.Addr().String(), "servers", len(sn.names))
 
-	startup, cancelStartup := context.WithTimeout(ctx, g.cfg.StartupGracePeriod.D())
+	startup, cancelStartup := context.WithTimeout(ctx, g.boot.StartupGracePeriod.D())
 	defer cancelStartup()
 	startupDone := make(chan struct{})
 	go func() {
@@ -463,8 +337,9 @@ func (g *Gate) awaitStartup(ctx context.Context) {
 	defer t.Stop()
 	for {
 		all := true
-		for _, name := range g.names {
-			s := g.servers[name]
+		sn := g.snap.Load()
+		for _, name := range sn.names {
+			s := sn.servers[name]
 			// A server waiting for a login does not connect without someone; it does not hold
 			// the startup.
 			all = all && (s.mirror.Ready() || s.sup.Status().State == downstream.NeedsLogin)
@@ -478,7 +353,7 @@ func (g *Gate) awaitStartup(ctx context.Context) {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				g.markStarted()
-				g.logger.Warn("reporting ready while servers are still connecting", "grace", g.cfg.StartupGracePeriod.D().String())
+				g.logger.Warn("reporting ready while servers are still connecting", "grace", g.boot.StartupGracePeriod.D().String())
 			}
 			return
 		case <-t.C:
@@ -528,6 +403,8 @@ func (g *Gate) awaitReady(r *http.Request, ready func(*http.Request) (ok, pendin
 // shutdown stops the listener and the servers; parent carries values only, it is never cancelled.
 // It returns only the listener's errors.
 func (g *Gate) shutdown(parent context.Context) error {
+	// A reload waiting for calls in flight stops waiting.
+	g.stopRetiring()
 	ctx, cancel := context.WithTimeout(parent, ShutdownGrace)
 	defer cancel()
 	var errs []error
@@ -550,21 +427,27 @@ func (g *Gate) shutdown(parent context.Context) error {
 			errs = append(errs, err)
 		}
 	}
+	g.drainedOnce.Do(func() { close(g.drained) })
+	g.mu.Lock()
+	g.closing = true
+	sn := g.snap.Load()
+	g.mu.Unlock()
 	// A server that does not stop in time is logged; it does not fail the shutdown, which the
 	// signal asked for.
 	var wg sync.WaitGroup
-	for _, name := range g.names {
-		s := g.servers[name]
+	for _, name := range sn.names {
+		s := sn.servers[name]
 		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(parent, stopTimeout)
 			defer cancel()
 			if err := s.sup.Stop(ctx); err != nil {
 				g.logger.Error("server did not stop", "server", s.name, "error", err.Error())
 			}
-			s.mirror.Close()
+			s.rt.src.Close()
 		})
 	}
 	wg.Wait()
+	g.retiring.Wait()
 	return errors.Join(errs...)
 }
 
@@ -576,8 +459,9 @@ func (g *Gate) Readiness() upstream.Readiness {
 	if !r.Started {
 		return r
 	}
-	for _, name := range g.names {
-		s := g.servers[name]
+	sn := g.snap.Load()
+	for _, name := range sn.names {
+		s := sn.servers[name]
 		st := s.sup.Status().State
 		if st == downstream.NeedsLogin {
 			r.NeedsLogin = append(r.NeedsLogin, name)

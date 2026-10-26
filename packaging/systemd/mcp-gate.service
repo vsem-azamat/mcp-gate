@@ -30,6 +30,9 @@ ConfigurationDirectory=mcp-gate
 EnvironmentFile=/etc/mcp-gate/gate.env
 WorkingDirectory=/var/lib/mcp-gate
 ExecStart=/usr/local/bin/mcp-gate serve /etc/mcp-gate/gate.yaml
+# SIGHUP reloads gate.yaml: `systemctl reload mcp-gate`. Values of gate.env are read at the
+# start only, so a change there needs a restart.
+ExecReload=/bin/kill -HUP $MAINPID
 UMask=0077
 
 Restart=on-failure

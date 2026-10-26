@@ -83,6 +83,7 @@ type Aggregate struct {
 	listed    map[string]bool // the members whose listed catalog the views hold
 	skipped   map[string]bool
 	views     []*View
+	unwatch   []func()
 }
 
 // routed is an entry of the aggregate catalog and where it came from.
@@ -91,7 +92,7 @@ type routed[T any] struct {
 	entry        *T
 }
 
-// NewAggregate returns an aggregate of opts.Members. It must be made before the members start.
+// NewAggregate returns an aggregate of opts.Members, which it follows until Close.
 func NewAggregate(opts AggregateOptions) (*Aggregate, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
@@ -108,12 +109,19 @@ func NewAggregate(opts AggregateOptions) (*Aggregate, error) {
 	}
 	for _, m := range opts.Members {
 		a.members[m.Name()] = m
-		m.Watch(a.refresh)
+		a.unwatch = append(a.unwatch, m.Watch(a.refresh))
 	}
 	a.mu.Lock()
 	a.rebuild()
 	a.mu.Unlock()
 	return a, nil
+}
+
+// Close stops following the members' catalogs.
+func (a *Aggregate) Close() {
+	for _, f := range a.unwatch {
+		f()
+	}
 }
 
 // Listed reports whether the views hold a listed catalog of the member server. A mirror reports

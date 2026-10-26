@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -133,9 +134,9 @@ func TestValidTool(t *testing.T) {
 }
 
 func TestQueueIsBounded(t *testing.T) {
-	m := New(Options{Name: "s", Policy: policy.New(&config.Server{})})
+	m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{})}, nil)
 	for range eventQueue + 5 {
-		m.enqueue(event{progress: &mcp.ProgressNotificationParams{}})
+		m.src.enqueue(event{progress: &mcp.ProgressNotificationParams{}})
 	}
 	if got := m.Stats().DroppedNotifications; got != 5 {
 		t.Errorf("dropped %d, want 5", got)
@@ -153,7 +154,7 @@ func TestProgressForUnknownTokenIsDropped(t *testing.T) {
 }
 
 func TestInvalidUpdateKeepsPrevious(t *testing.T) {
-	m := New(Options{Name: "s", Policy: policy.New(&config.Server{})})
+	m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{})}, nil)
 	good := &mcp.Tool{Name: "a", InputSchema: map[string]any{"type": "object"}}
 	m.tools = m.applyTools([]*mcp.Tool{good})
 	m.tools = m.applyTools([]*mcp.Tool{{Name: "a", InputSchema: map[string]any{"type": "string"}}})
@@ -168,14 +169,13 @@ func TestInvalidUpdateKeepsPrevious(t *testing.T) {
 
 func TestReceiveRecoversAndAuditsRefusals(t *testing.T) {
 	var logs strings.Builder
-	m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{}), Logger: slog.New(slog.NewJSONHandler(&logs, nil))}, stubDown{})
 	panics := m.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) { panic("secret-value") })
 	res, err := panics(t.Context(), "tools/list", &mcp.ListToolsRequest{})
 	var rpc *jsonrpc.Error
 	if res != nil || !errors.As(err, &rpc) || rpc.Code != jsonrpc.CodeInternalError {
 		t.Errorf("panic: %v %v", res, err)
 	}
-	m.Attach(stubDown{})
 	refuses := m.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) { return nil, errors.New("unknown tool") })
 	_, _ = refuses(t.Context(), "tools/call", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "env"}})
 	out := logs.String()
@@ -236,8 +236,7 @@ func TestDownstreamErrorHidesURL(t *testing.T) {
 		{"reply, escrow", escrow, reply, -32000, true, kept},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Redaction: c.redaction})
-			m.Attach(urlDown{})
+			m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{}), Redaction: c.redaction}, urlDown{})
 			call := m.begin(t.Context(), "tools/call", nil, keyTool, "x")
 			out := call.downstreamError(t.Context(), c.err)
 			var rpc *jsonrpc.Error
@@ -267,10 +266,10 @@ func TestRejectedEntryLogIsRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs strings.Builder
-	m := New(Options{
+	m := newMirror(Options{
 		Name: "s", Policy: policy.New(&config.Server{}), Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 		Redaction: NewRedaction(engine, nil, 1<<20),
-	})
+	}, nil)
 	m.templates = m.applyTemplates([]*mcp.ResourceTemplate{{Name: "t", URITemplate: "https://example.com/{x?token=" + token}})
 	if len(m.templates) != 0 {
 		t.Fatalf("the SDK took an invalid template: %v", m.templates)
@@ -287,11 +286,11 @@ func TestServerLogMessageIsRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs strings.Builder
-	m := New(Options{
+	m := newMirror(Options{
 		Name: "s", Policy: policy.New(&config.Server{}),
 		Logger:    slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Redaction: NewRedaction(engine, nil, 1<<20),
-	})
+	}, nil)
 	m.logMessage(t.Context(), &mcp.LoggingMessageParams{Level: "info", Logger: "auth " + token, Data: "token " + token}) //nolint:staticcheck // servers of older protocol versions still send log messages
 	if out := logs.String(); !strings.Contains(out, "server log message") || strings.Contains(out, token) {
 		t.Errorf("logs %s", out)
@@ -299,10 +298,66 @@ func TestServerLogMessageIsRedacted(t *testing.T) {
 }
 
 func TestLogTextKeepsCharacters(t *testing.T) {
-	m := New(Options{Name: "s", Policy: policy.New(&config.Server{})})
-	m.Attach(stubDown{})
+	m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{})}, stubDown{})
 	got := m.logText(strings.Repeat("a", 255) + "é")
 	if !utf8.ValidString(got) || got != strings.Repeat("a", 255)+"…" {
 		t.Errorf("logText = %q", got)
 	}
+}
+
+// newMirror returns a mirror of a source of its own, attached to down.
+func newMirror(opts Options, down Downstream) *Mirror {
+	src := NewSource(opts.Name, opts.Logger)
+	src.Attach(down)
+	opts.Source = src
+	return New(opts)
+}
+
+// TestMirrorsOfOneSource checks that a mirror made after a listing serves it at once under its own
+// policy, that a listing reaches every attached mirror, and that a detached one hears no more.
+func TestMirrorsOfOneSource(t *testing.T) {
+	src := NewSource("s", nil)
+	src.Attach(stubDown{})
+	all := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Source: src})
+	tool := func(name string) *mcp.Tool {
+		return &mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}}
+	}
+	l := listing{tools: []*mcp.Tool{tool("a"), tool("b")}}
+	src.mu.Lock()
+	src.raw, src.listed = l, kindTools
+	src.mu.Unlock()
+	src.ready.Store(true)
+	all.apply(kindTools, &l, time.Now())
+
+	deny := New(Options{Name: "s", Policy: policy.New(&config.Server{Tools: &config.Filter{Deny: []string{"b"}}}), Source: src})
+	if !deny.Ready() || len(catalogOf(deny).Tools) != 1 || catalogOf(deny).Tools["a"] == nil {
+		t.Fatalf("a new mirror: ready %v, tools %v", deny.Ready(), catalogOf(deny).Tools)
+	}
+	changed := 0
+	cancel := deny.Watch(func() { changed++ })
+	all.Close()
+	next := listing{tools: []*mcp.Tool{tool("a"), tool("b"), tool("c")}}
+	src.mu.Lock()
+	mirrors := slices.Clone(src.mirrors)
+	src.mu.Unlock()
+	for _, m := range mirrors {
+		m.apply(kindTools, &next, time.Now())
+	}
+	if got := len(catalogOf(deny).Tools); got != 2 || changed != 1 {
+		t.Errorf("after a listing: %d tools, %d changes", got, changed)
+	}
+	if got := len(catalogOf(all).Tools); got != 2 {
+		t.Errorf("a detached mirror took a listing: %d tools", got)
+	}
+	cancel()
+	deny.apply(kindTools, &l, time.Now())
+	if changed != 1 {
+		t.Error("a cancelled watcher was called")
+	}
+}
+
+// catalogOf returns what a mirror serves to tokens without a policy.
+func catalogOf(m *Mirror) Catalog {
+	all, _ := m.Catalogs()
+	return all
 }

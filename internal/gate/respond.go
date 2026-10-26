@@ -38,9 +38,9 @@ const bothAccepted = "application/json, text/event-stream"
 // carries a progress token (a stateless server makes no requests of the client, and list-changed
 // notifications go to subscriptions/listen streams), so a single message without one is answered
 // with plain JSON when the client accepts it. A client that accepts only one of the two types gets
-// that one. A subscriptions/listen request is also cancelled when shutdown begins. ReadBody must
-// have read the body.
-func (g *Gate) respond(stream, plain http.Handler) http.Handler {
+// that one. A subscriptions/listen request is also cancelled when shutdown begins or ended is
+// closed. ReadBody must have read the body.
+func (g *Gate) respond(stream, plain http.Handler, ended <-chan struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		kind := bodyStream
 		if body, ok := upstream.BodyBytes(r); ok {
@@ -52,6 +52,8 @@ func (g *Gate) respond(stream, plain http.Handler) http.Handler {
 			go func() {
 				select {
 				case <-g.drain:
+					cancel()
+				case <-ended:
 					cancel()
 				case <-ctx.Done():
 				}

@@ -9,7 +9,7 @@ mcp-gate check gate.yaml        # validate first
 mcp-gate serve -state-dir /var/lib/mcp-gate gate.yaml
 ```
 
-The config is validated as `check` does; an invalid one exits with status 2 before anything starts. Logs are JSON lines on stderr, at `logLevel` and above. SIGINT and SIGTERM shut the gate down: it stops accepting connections, gives calls in flight 10 seconds, and stops the servers. Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate cannot listen.
+The config is validated as `check` does; an invalid one exits with status 2 before anything starts. Logs are JSON lines on stderr, at `logLevel` and above. SIGINT and SIGTERM shut the gate down: it stops accepting connections, gives calls in flight 10 seconds, and stops the servers. SIGHUP reloads the config (see [Reload](#reload)). Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate cannot listen.
 
 Under systemd the gate serves the listening socket that a socket unit passes it (`LISTEN_FDS`), instead of opening `listen.addr`, and reports `READY=1` once startup is over and `STOPPING=1` at shutdown (`NOTIFY_SOCKET`). With the socket held by systemd, a restart refuses no connection and fails no call; see [systemd](../operations/systemd.md#restarts) for the units and what a restart keeps.
 
@@ -137,3 +137,17 @@ Every forwarded call writes one `call` line with the server, the token name (`pr
 A call a token's policy hides is a line with outcome `denied` and `tokenPolicy` `deny`.
 
 With `log.requests`, each HTTP request to the route also writes a `request` line with its method, status, duration and remote address; `aggregate.log.requests` does the same for `/mcp`, with `server` `/mcp`. A call the aggregate endpoint refuses before any server sees it (a name of a server the token does not reach, say) is a `call` line with outcome `denied` and an empty `server`.
+
+## Reload
+
+SIGHUP (`systemctl reload mcp-gate`) makes the gate read its config file again. A config that does not load or pass validation is logged as an error and the gate goes on with the one it has; `mcp-gate check` accepts exactly the configs a reload applies, so run it first. A valid one replaces the running config at one instant: requests that arrive from then on are served under it, and requests already in flight finish under the old one, so a call never runs with half of each.
+
+| Change | Effect |
+| --- | --- |
+| A server's `stdio` or `http` (command, arguments, environment, URL, headers, OAuth), `callTimeout`, `maxMessageBytes`, `protocolVersion`, `probeInterval`, `restart`, `disabled`, or the config's `name` | The server restarts once the requests in flight on the routes that reach it have ended (at most 10 seconds); meanwhile its calls fail as during any restart of the server. Added servers start after that |
+| A server's `tools`, `prompts`, `resources`, `redact`, `forwardMeta`; the token policies on it; `escrow.ttl` | At once, the server keeps running; the `subscriptions/listen` streams of its routes end |
+| Tokens (`auth`, a server's `auth`), a server's `log`, `aggregate`, `listen.allowedHosts`, `listen.behindProxy`, `listen.trustedProxies` | At once: a removed token gets 401 from its next request, and a call it began before completes. Only the routes whose tokens or settings changed are replaced, ending their listen streams |
+| `logLevel`, `admin` | At once |
+| `listen.addr`, `escrow` (but `escrow.ttl`), `startupGracePeriod` | Only at the next restart; the reload logs a warning |
+
+`${VAR}` values come from the environment the gate started with, so a token added to the environment needs a restart. Each reload logs `config reloaded` with the servers added, restarted, removed and kept. Under systemd, once startup is over, the gate reports `RELOADING=1` and then `READY=1`; `systemctl reload` itself returns as soon as the signal is sent, so the outcome of a reload is in the log. A SIGHUP during startup is applied without a report.

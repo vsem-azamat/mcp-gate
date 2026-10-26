@@ -33,13 +33,15 @@ Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `han
 
 `TestRestartUnderTraffic` restarts the binary the way systemd does with the socket unit: the test holds a listening socket and passes it to each gate as descriptor 3 with `LISTEN_FDS` and `LISTEN_PID`, reads `READY=1` and `STOPPING=1` from a `NOTIFY_SOCKET` of its own, and stops one gate and starts the next while clients call without pause and with retries off (sessions opened before the restart, one with a `subscriptions/listen` stream, and a client that connects anew for every call) and a slow call is in flight. It fails on any refused connection or failed call.
 
+`TestReload` sends the binary SIGHUP twice, as `systemctl reload` does: first with a config that fails validation, which must be rejected while the old one keeps serving, then with one that revokes a token and lowers the log level, which must apply without restarting the unchanged server. Each reload must be reported as `RELOADING=1` and then `READY=1`.
+
 Without flags it builds the binary from the checkout, so `make test` runs it. `-binary` names a built one instead; a relative path is read from the repository root:
 
 ```sh
 go test -count=1 ./internal/smoke -args -binary=dist/mcp-gate_linux_amd64_v1/mcp-gate
 ```
 
-GoReleaser runs the package that way, both tests, as a post-build hook on every binary the build machine can run, in CI's Release config job and in the release before anything is packed or published (see [Releasing](releasing.md)).
+GoReleaser runs the package that way, every test, as a post-build hook on every binary the build machine can run, in CI's Release config job and in the release before anything is packed or published (see [Releasing](releasing.md)).
 
 ## Escrow contract
 

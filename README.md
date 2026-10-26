@@ -166,7 +166,7 @@ The [configuration reference](docs/configuration/README.md) lists every key. To 
 
 ## Status
 
-Version 0.1. I use it every day with about a dozen servers. The config has a version number (`version: 1`), and an unknown key is an error. The gate does not reload its config yet, so restart it after a change. Missing something? [Open an issue](https://github.com/vsem-azamat/mcp-gate/issues).
+Version 0.1. I use it every day with about a dozen servers. The config has a version number (`version: 1`), and an unknown key is an error. `systemctl reload` applies a changed config without a restart. Missing something? [Open an issue](https://github.com/vsem-azamat/mcp-gate/issues).
 
 ## Contributing
 

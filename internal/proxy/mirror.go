@@ -1,9 +1,10 @@
 // Package proxy mirrors one downstream server's catalog into an upstream-facing MCP server and
 // forwards calls to it.
 //
-// A Mirror keeps the last catalog it listed, filtered by the server's policy, registered on its
-// *mcp.Server; a restart or a failed listing leaves it in place. It resyncs on every new session
-// and on list-changed notifications, and changes only the entries that differ. Calls go through
+// A Source lists the server's catalog on every new session and on list-changed notifications,
+// and keeps the last listing; a restart or a failed listing leaves it in place. A Mirror is the
+// server under one config: it registers the Source's catalog, filtered by the server's policy, on
+// its *mcp.Server, changing only the entries that differ. Calls go through
 // the server's supervisor with a downstream _meta holding only the keys in the server's
 // forwardMeta, progress remapped to the upstream request, and results redacted, failing closed.
 // A token with a policy on the server is served an *mcp.Server of its own that holds only what
@@ -29,7 +30,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 
-	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -69,6 +69,11 @@ type Options struct {
 	// Files, if set, scans the files tool calls write, after their results are redacted.
 	Files  FileScanner
 	Logger *slog.Logger
+	// Source is the server's source, which the mirror serves the catalog of and sends calls
+	// through.
+	Source *Source
+	// OnChange, if set, is called, outside the mirror's lock, after a listing was applied.
+	OnChange func()
 }
 
 // kinds of catalog entries, as bits.
@@ -79,32 +84,23 @@ const (
 	kindAll = kindTools | kindPrompts | kindResources
 )
 
-// Mirror is the upstream face of one downstream server.
+// Mirror is the upstream face of one downstream server under one config.
 type Mirror struct {
 	opts   Options
 	logger *slog.Logger
 	server *mcp.Server
-	down   Downstream
-
-	ready atomic.Bool // the tools were listed once
+	src    *Source
 
 	mu        sync.Mutex
-	dirty     int
 	tools     map[string]*mcp.Tool
 	prompts   map[string]*mcp.Prompt
 	resources map[string]*mcp.Resource
 	templates map[string]*mcp.ResourceTemplate
 	lastSync  time.Time
-	kick      chan struct{}
 
-	progress *progressTable
-	events   chan event
-	stats    stats
-
-	cancel context.CancelFunc // set by Start; ends the workers and the listings
-	wg     sync.WaitGroup
-
-	watchers []func() // told after the catalog changed; set before Start
+	watchMu  sync.Mutex
+	watchers map[int]func()
+	nextW    int
 
 	served served // what reads reach; guarded by mu
 
@@ -137,19 +133,18 @@ type stats struct {
 	calls, failed, dropped atomic.Int64
 }
 
-// New returns a mirror. Attach connects it to its supervisor and Start starts its workers.
+// New returns a mirror of opts.Source, which it serves at once with what the source has listed.
+// Close detaches it.
 func New(opts Options) *Mirror {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
 	logger := opts.Logger.With("server", opts.Name)
 	m := &Mirror{
-		opts: opts, logger: logger,
+		opts: opts, logger: logger, src: opts.Source,
 		tools: map[string]*mcp.Tool{}, prompts: map[string]*mcp.Prompt{},
 		resources: map[string]*mcp.Resource{}, templates: map[string]*mcp.ResourceTemplate{},
-		kick:     make(chan struct{}, 1),
-		progress: newProgressTable(),
-		events:   make(chan event, eventQueue),
+		watchers: map[int]func(){},
 	}
 	// The mirror's own server serves tokens without a policy; while any token has one, the
 	// lists depend on the token, so its results are private too.
@@ -167,6 +162,10 @@ func New(opts Options) *Mirror {
 			resources: map[string]*mcp.Resource{}, templates: map[string]*mcp.ResourceTemplate{},
 		}
 	}
+	if opts.OnChange != nil {
+		m.Watch(opts.OnChange)
+	}
+	m.src.attach(m)
 	return m
 }
 
@@ -215,96 +214,26 @@ func (m *Mirror) ServerFor(token string) *mcp.Server {
 	return m.server
 }
 
+// shows returns the kinds the mirror's policy lets through.
+func (m *Mirror) shows() int {
+	kinds := kindTools
+	if !m.opts.Policy.Prompts.ExposesNothing() {
+		kinds |= kindPrompts
+	}
+	if !m.opts.Policy.Resources.ExposesNothing() {
+		kinds |= kindResources
+	}
+	return kinds
+}
+
 // Ready reports whether the catalog was listed once, so the route can serve.
-func (m *Mirror) Ready() bool { return m.ready.Load() }
+func (m *Mirror) Ready() bool { return m.src.Ready() }
 
-// Attach sets the supervisor calls go to. It is called once, before Start.
-func (m *Mirror) Attach(d Downstream) { m.down = d }
+// Source is the source the mirror serves.
+func (m *Mirror) Source() *Source { return m.src }
 
-// Notifications are the handlers to give the supervisor.
-func (m *Mirror) Notifications() downstream.Notifications {
-	return downstream.Notifications{
-		ToolsChanged:     func() { m.markDirty(kindTools) },
-		PromptsChanged:   func() { m.markDirty(kindPrompts) },
-		ResourcesChanged: func() { m.markDirty(kindResources) },
-		Progress:         func(p *mcp.ProgressNotificationParams) { m.enqueue(event{progress: p}) },
-		Log:              func(p *mcp.LoggingMessageParams) { m.enqueue(event{log: p}) }, //nolint:staticcheck // servers of older protocol versions still send log messages
-	}
-}
-
-// OnSession is the supervisor's OnSession hook: a new session lists the whole catalog again.
-func (m *Mirror) OnSession(*mcp.ClientSession) { m.markDirty(kindAll) }
-
-// Start starts the catalog sync and the notification worker. They run until ctx ends or Close
-// is called.
-func (m *Mirror) Start(ctx context.Context) {
-	ctx, m.cancel = context.WithCancel(ctx)
-	m.wg.Add(2)
-	go m.syncLoop(ctx)
-	go m.notifyLoop(ctx)
-}
-
-// Close stops the workers. Calls in flight are not affected.
-func (m *Mirror) Close() {
-	if m.cancel != nil {
-		m.cancel()
-	}
-	m.wg.Wait()
-}
-
-func (m *Mirror) markDirty(kinds int) {
-	m.mu.Lock()
-	m.dirty |= kinds
-	m.mu.Unlock()
-	select {
-	case m.kick <- struct{}{}:
-	default:
-	}
-}
-
-// syncLoop lists what is dirty whenever it is kicked, and retries failed listings with backoff
-// while the session lasts.
-func (m *Mirror) syncLoop(ctx context.Context) {
-	defer m.wg.Done()
-	retry := retryFirst
-	var timer *time.Timer
-	var timerC <-chan time.Time
-	for {
-		select {
-		case <-ctx.Done():
-			if timer != nil {
-				timer.Stop()
-			}
-			return
-		case <-m.kick:
-		case <-timerC:
-			timerC = nil
-		}
-		m.mu.Lock()
-		kinds := m.dirty
-		m.dirty = 0
-		m.mu.Unlock()
-		if kinds == 0 {
-			continue
-		}
-		failed, notReady := m.sync(ctx, kinds)
-		if failed == 0 || notReady {
-			// Without a session the next one marks everything dirty again.
-			retry = retryFirst
-			continue
-		}
-		m.mu.Lock()
-		m.dirty |= failed
-		m.mu.Unlock()
-		if timer == nil {
-			timer = time.NewTimer(retry)
-		} else {
-			timer.Reset(retry)
-		}
-		timerC = timer.C
-		retry = min(retry*2, retryLast)
-	}
-}
+// Close detaches the mirror from its source. Calls in flight are not affected.
+func (m *Mirror) Close() { m.src.detach(m) }
 
 // listing is one catalog read.
 type listing struct {
@@ -315,35 +244,32 @@ type listing struct {
 	failed    int
 }
 
-// sync lists the given kinds and applies them. It returns the kinds that failed, and whether the
-// server had no session.
-func (m *Mirror) sync(ctx context.Context, kinds int) (failed int, notReady bool) {
-	ctx, cancel := context.WithTimeout(ctx, listTimeout)
-	defer cancel()
-	var l listing
-	err := m.down.Call(ctx, func(ctx context.Context, cs *mcp.ClientSession) error {
-		l = m.list(ctx, cs, kinds)
-		return nil
-	})
-	var nr *downstream.NotReadyError
-	if errors.As(err, &nr) {
-		return kinds, true
+// Watch registers fn to be called, outside the mirror's lock, after a listing was applied to the
+// catalog, and returns the function that unregisters it.
+func (m *Mirror) Watch(fn func()) (cancel func()) {
+	m.watchMu.Lock()
+	defer m.watchMu.Unlock()
+	id := m.nextW
+	m.nextW++
+	m.watchers[id] = fn
+	return func() {
+		m.watchMu.Lock()
+		defer m.watchMu.Unlock()
+		delete(m.watchers, id)
 	}
-	if err != nil {
-		return kinds, false
-	}
-	if applied := kinds &^ l.failed; applied != 0 {
-		m.apply(applied, &l)
-		for _, w := range m.watchers {
-			w()
-		}
-	}
-	return l.failed, false
 }
 
-// Watch registers fn to be called, outside the mirror's lock, after a listing was applied to
-// the catalog. It is called before Start.
-func (m *Mirror) Watch(fn func()) { m.watchers = append(m.watchers, fn) }
+func (m *Mirror) notifyWatchers() {
+	m.watchMu.Lock()
+	fns := make([]func(), 0, len(m.watchers))
+	for _, fn := range m.watchers {
+		fns = append(fns, fn)
+	}
+	m.watchMu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+}
 
 // Catalog is a snapshot of the entries a mirror serves, keyed as registered: tools and prompts
 // by name, resources by URI, templates by URI template. The entries are shared and read-only.
@@ -370,38 +296,6 @@ func (m *Mirror) Catalogs() (all Catalog, byToken map[string]Catalog) {
 // Name is the server's name in the config.
 func (m *Mirror) Name() string { return m.opts.Name }
 
-// list reads the kinds the server advertises; a kind it does not advertise is empty.
-func (m *Mirror) list(ctx context.Context, cs *mcp.ClientSession, kinds int) listing {
-	caps := cs.InitializeResult().Capabilities
-	if caps == nil {
-		caps = &mcp.ServerCapabilities{}
-	}
-	var l listing
-	fail := func(kind int, what string, err error) {
-		l.failed |= kind
-		m.logger.Warn("listing the catalog failed; keeping the last one", "list", what, "error", m.down.ErrorText(err))
-	}
-	var err error
-	if kinds&kindTools != 0 && caps.Tools != nil {
-		if l.tools, err = collect(cs.Tools(ctx, nil)); err != nil {
-			fail(kindTools, "tools", err)
-		}
-	}
-	if kinds&kindPrompts != 0 && caps.Prompts != nil && !m.opts.Policy.Prompts.ExposesNothing() {
-		if l.prompts, err = collect(cs.Prompts(ctx, nil)); err != nil {
-			fail(kindPrompts, "prompts", err)
-		}
-	}
-	if kinds&kindResources != 0 && caps.Resources != nil && !m.opts.Policy.Resources.ExposesNothing() {
-		if l.resources, err = collect(cs.Resources(ctx, nil)); err != nil {
-			fail(kindResources, "resources", err)
-		} else if l.templates, err = collect(cs.ResourceTemplates(ctx, nil)); err != nil && !methodNotFound(err) {
-			fail(kindResources, "resource templates", err)
-		}
-	}
-	return l
-}
-
 // methodNotFound reports whether a server answered that it has no such method, as servers that
 // list resources but implement no templates answer resources/templates/list.
 func methodNotFound(err error) bool {
@@ -421,13 +315,20 @@ func collect[T any](seq func(func(*T, error) bool)) ([]*T, error) {
 }
 
 // apply registers the listed kinds, changing only the entries that differ from the mirrored
-// ones.
-func (m *Mirror) apply(kinds int, l *listing) {
+// ones, then tells the watchers.
+func (m *Mirror) apply(kinds int, l *listing, at time.Time) {
+	if kinds == 0 {
+		return
+	}
+	m.applyLocked(kinds, l, at)
+	m.notifyWatchers()
+}
+
+func (m *Mirror) applyLocked(kinds int, l *listing, at time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if kinds&kindTools != 0 {
 		m.tools = m.applyTools(l.tools)
-		m.ready.Store(true)
 	}
 	if kinds&kindPrompts != 0 {
 		m.prompts = m.applyPrompts(l.prompts)
@@ -440,9 +341,7 @@ func (m *Mirror) apply(kinds int, l *listing) {
 		m.templates = m.applyTemplates(l.templates)
 		m.served = newServed(m.resources, m.templates)
 	}
-	if kinds != 0 {
-		m.lastSync = time.Now()
-	}
+	m.lastSync = at
 	for _, v := range m.views {
 		m.syncView(v, kinds)
 	}
@@ -665,13 +564,14 @@ type Stats struct {
 	Calls, Failed, DroppedNotifications  int64
 }
 
-// Stats returns a snapshot.
+// Stats returns a snapshot: the counts of the mirror's catalog and the source's counters.
 func (m *Mirror) Stats() Stats {
+	src := m.src.Stats()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return Stats{
-		Ready: m.ready.Load(), Tools: len(m.tools), Prompts: len(m.prompts),
-		Resources: len(m.resources), Templates: len(m.templates), LastSync: m.lastSync,
-		Calls: m.stats.calls.Load(), Failed: m.stats.failed.Load(), DroppedNotifications: m.stats.dropped.Load(),
+		Ready: src.Ready, Tools: len(m.tools), Prompts: len(m.prompts),
+		Resources: len(m.resources), Templates: len(m.templates), LastSync: src.LastSync,
+		Calls: src.Calls, Failed: src.Failed, DroppedNotifications: src.DroppedNotifications,
 	}
 }

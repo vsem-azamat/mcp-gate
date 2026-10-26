@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"strconv"
+
+	"golang.org/x/sys/unix"
 )
 
 // Environment variables of the protocol. None of them is meant for the gate's children.
@@ -30,6 +32,16 @@ const (
 	Ready    = "READY=1"
 	Stopping = "STOPPING=1"
 )
+
+// Reloading is the notification that a reload of the config begins, with the time on the
+// monotonic clock that systemd asks for; READY=1 tells it the reload is over.
+func Reloading() string {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return "RELOADING=1"
+	}
+	return "RELOADING=1\nMONOTONIC_USEC=" + strconv.FormatInt(ts.Nano()/1000, 10)
+}
 
 // Listener returns the TCP listening socket systemd passed to this process, or nil when it passed
 // none: LISTEN_FDS unset, or LISTEN_PID naming another process (a parent that did not clear the

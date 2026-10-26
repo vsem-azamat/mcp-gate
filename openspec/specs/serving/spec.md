@@ -8,7 +8,7 @@
 
 ### Requirement: serve
 
-`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid, and also when the escrow key hash cannot be resolved (see the escrow spec). Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server (OAuth servers with the grants in the `oauth` directory of the state directory, see the oauth spec), listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. When systemd passes it a socket (`LISTEN_FDS` set and `LISTEN_PID` naming the gate's process), it SHALL serve that socket instead of opening `listen.addr`, logging a warning when the socket is on another address; more than one socket, or one that is not a listening TCP socket, SHALL make it exit with status 2. When `NOTIFY_SOCKET` is set it SHALL send `READY=1` there once startup is over (see Health) and `STOPPING=1` when it begins to shut down. Neither these variables nor the passed socket SHALL reach the stdio servers. On SIGINT or SIGTERM it SHALL stop accepting connections, leaving those that wait on a socket systemd holds to the next process, end the `subscriptions/listen` streams, and for up to 1 second still serve the requests that arrive on open connections, answering each request from then on with `Connection: close`; it SHALL then close the connections that are idle or on which no request has arrived, give calls in flight up to 10 seconds from the start of the shutdown (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
+`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid, and also when the escrow key hash cannot be resolved (see the escrow spec). Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server (OAuth servers with the grants in the `oauth` directory of the state directory, see the oauth spec), listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. When systemd passes it a socket (`LISTEN_FDS` set and `LISTEN_PID` naming the gate's process), it SHALL serve that socket instead of opening `listen.addr`, logging a warning when the socket is on another address; more than one socket, or one that is not a listening TCP socket, SHALL make it exit with status 2. When `NOTIFY_SOCKET` is set it SHALL send `READY=1` there once startup is over (see Health) and `STOPPING=1` when it begins to shut down. SIGHUP reloads the config (see Reload). Neither these variables nor the passed socket SHALL reach the stdio servers. On SIGINT or SIGTERM it SHALL stop accepting connections, leaving those that wait on a socket systemd holds to the next process, end the `subscriptions/listen` streams, and for up to 1 second still serve the requests that arrive on open connections, answering each request from then on with `Connection: close`; it SHALL then close the connections that are idle or on which no request has arrived, give calls in flight up to 10 seconds from the start of the shutdown (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
 
 #### Scenario: Shutdown with a listening client
 
@@ -39,6 +39,65 @@
 
 - **WHEN** `serve` is given a config whose server accepts no token
 - **THEN** it exits with status 2, naming `servers.<name>.auth`
+
+### Requirement: Reload
+
+On SIGHUP `serve` SHALL load its config file again, with the environment it started with, and apply it without a restart; a SIGHUP that arrives before the servers were started SHALL be applied once they are. With `NOTIFY_SOCKET` set, once startup is over (see Health), it SHALL send `RELOADING=1` with `MONOTONIC_USEC` when a reload begins and `READY=1` when it is over, whether or not the config was applied; a reload during startup SHALL send neither, and one after the shutdown began SHALL be skipped. A config that does not load or pass validation SHALL be rejected with an error line, and the gate SHALL go on with the config it has; `check` SHALL accept exactly the configs a reload applies.
+
+A valid config SHALL be applied as a whole, at one instant: every request that arrives from then on SHALL be served under the new config, and a request in flight SHALL finish under the config it arrived under, its tokens, filters, redaction and request logging, so that no request sees part of one config and part of another. What a change of each config key does SHALL be one of:
+
+- **Restart of the server**: the server's `stdio` or `http` with every key under them, `callTimeout`, `maxMessageBytes`, `protocolVersion`, `probeInterval`, `restart` and `disabled`, and the config's `name`, which servers get as the client name. The server SHALL be stopped once the requests in flight on the routes that reach it, under this or an earlier config, have ended, at most 10 seconds after the reload, and then started with the new settings; meanwhile its calls SHALL fail as while a server restarts, and its catalog stays listed. A removed or disabled server SHALL be stopped the same way. A server that is new SHALL start only after those stops, so that two processes of a stdio server never run together.
+- **In place, new mirror**: a server's `tools`, `prompts`, `resources`, `redact`, `forwardMeta` and `maxMessageBytes`, the token policies on the server (`policies`), and `escrow.ttl`. The server SHALL keep running, its catalog served under the new settings at once (prompts or resources that were hidden by every policy until then once they have been listed), and the `subscriptions/listen` streams of the routes that reach it SHALL end.
+- **In place, new routes**: `auth`, a server's `auth` and `log`, `aggregate`, `listen.behindProxy`, `listen.trustedProxies` and `listen.allowedHosts`. The routes whose inputs change SHALL be replaced and their `subscriptions/listen` streams SHALL end; routes whose inputs do not change SHALL keep their streams.
+- **In place**: `logLevel`, `admin`, and `name` for the health endpoints.
+- **At the next restart only**: `listen.addr`, `startupGracePeriod`, and `escrow` but `escrow.ttl`; a reload that changes them SHALL log a warning naming them.
+
+The gate SHALL log one `config reloaded` line naming the servers added, restarted, removed and kept.
+
+#### Scenario: Invalid config on reload
+
+- **WHEN** the config file is replaced by one that fails validation and the gate gets SIGHUP
+- **THEN** it logs an error, keeps serving under the old config, and sends `RELOADING=1` then `READY=1`
+
+#### Scenario: Token revoked by a reload
+
+- **WHEN** a reload removes a token while a call made with it is in flight
+- **THEN** the call completes, and every request with the token from then on gets 401, while other tokens keep working
+
+#### Scenario: Server kept by a reload
+
+- **WHEN** a reload adds a `tools.deny` entry and turns redaction off for a server whose `stdio` is unchanged
+- **THEN** the server keeps its process, the denied tool is no longer listed, and a result holding a password is no longer redacted
+
+#### Scenario: Server changed by a reload
+
+- **WHEN** a reload changes a stdio server's `env` while a call to it is in flight
+- **THEN** the call completes, and the server is then restarted with the new environment and serves calls again
+
+#### Scenario: Token policy changed by a reload
+
+- **WHEN** a token has a policy on a server allowing one tool, and a reload changes it to allow another
+- **THEN** the token lists and calls only the newly allowed tool from then on, on the server's route and on `/mcp`, while other tokens keep the server's whole catalog and the server keeps its process
+
+#### Scenario: Route kept by a reload
+
+- **WHEN** a client listens for changes on one server's route and a reload changes only another server's filters
+- **THEN** the client's stream goes on, and it is told of a later change of its server's catalog
+
+#### Scenario: Call under an older config
+
+- **WHEN** a call is in flight on a route that a first reload replaced, and a second reload changes the server's environment
+- **THEN** the server is restarted only after the call completes
+
+#### Scenario: Reload during startup
+
+- **WHEN** the gate gets SIGHUP while its server is still starting, and again after startup
+- **THEN** the first reload applies without a notification, `READY=1` follows the end of startup, and the second reload sends `RELOADING=1` and then `READY=1`
+
+#### Scenario: Servers added and removed by a reload
+
+- **WHEN** a reload removes one server and adds another
+- **THEN** the removed server's process ends, its route answers 404 and `/_status` no longer lists it, and the added server starts and serves calls
 
 ### Requirement: Routes
 

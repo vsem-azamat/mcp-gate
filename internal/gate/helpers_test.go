@@ -91,11 +91,7 @@ type gateOpts struct {
 // ends.
 func startGate(t *testing.T, doc string, o gateOpts) *running {
 	t.Helper()
-	env := map[string]string{"LAPTOP": laptopToken, "PHONE": phoneToken, "ADMIN": adminToken}
-	cfg, err := config.Parse([]byte(doc), func(k string) (string, bool) { v, ok := env[k]; return v, ok })
-	if err != nil {
-		t.Fatalf("config: %v", err)
-	}
+	cfg := parseConfig(t, doc)
 	logs := &logBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	tune := func(opts *downstream.Options) {
@@ -138,6 +134,17 @@ func startGate(t *testing.T, doc string, o gateOpts) *running {
 	}
 	t.Cleanup(stop)
 	return &running{g: g, base: "http://" + ln.Addr().String(), logs: logs, stop: stop}
+}
+
+// parseConfig parses doc, with the test tokens in its environment.
+func parseConfig(t *testing.T, doc string) *config.Config {
+	t.Helper()
+	env := map[string]string{"LAPTOP": laptopToken, "PHONE": phoneToken, "ADMIN": adminToken}
+	cfg, err := config.Parse([]byte(doc), func(k string) (string, bool) { v, ok := env[k]; return v, ok })
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	return cfg
 }
 
 // waitReady waits until server answers something other than 503 on its route.
