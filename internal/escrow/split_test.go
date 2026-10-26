@@ -2,11 +2,30 @@ package escrow
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
 )
+
+// restorable matches what a consumer replaces when it restores a text: the marker of a kept
+// value, with its handle in group 1, or the continuation marker of a split token.
+var restorable = regexp.MustCompile(`\[REDACTED:[a-z_]+ #(k[a-z2-7]{10})\]|` + regexp.QuoteMeta(redact.ContinuationMarker))
+
+// restore is the restore procedure of the escrow spec: each marker whose handle value knows
+// becomes its value, and each continuation marker is dropped.
+func restore(text string, value func(handle string) (string, bool)) string {
+	return restorable.ReplaceAllStringFunc(text, func(m string) string {
+		if m == redact.ContinuationMarker {
+			return ""
+		}
+		if v, ok := value(restorable.FindStringSubmatch(m)[1]); ok {
+			return v
+		}
+		return m
+	})
+}
 
 // A token split across two JSON strings is kept whole under the first part's handle: restoring
 // puts it back where it started and drops the continuation marker, so the restored parts join
@@ -44,7 +63,7 @@ func TestRestoreSplitToken(t *testing.T) {
 	}
 	var restored []string
 	for _, part := range got.Parts {
-		restored = append(restored, Restore(part, value))
+		restored = append(restored, restore(part, value))
 	}
 	want := []string{"use " + token, " now", parts[2]}
 	for i := range want {
@@ -55,7 +74,7 @@ func TestRestoreSplitToken(t *testing.T) {
 	if strings.Join(restored, "") != strings.Join(parts, "") {
 		t.Error("the restored parts do not join to the original")
 	}
-	if unknown := "[REDACTED:password #kaaaaaaaaaa]"; Restore(unknown, value) != unknown {
+	if unknown := "[REDACTED:password #kaaaaaaaaaa]"; restore(unknown, value) != unknown {
 		t.Error("a marker with an unknown handle was changed")
 	}
 }

@@ -41,6 +41,11 @@ func TestNamesUnderSecretMembers(t *testing.T) {
 			want: `{"credentials":{"enabled":true,"tokenType":{},"TOKEN_TYPE":null,"token-type":"","TokenType":false,"expires_in":3600,"type":"Bearer","userID":7}}`,
 		},
 		{
+			name: "identifiers with digits stay, a word with digits does not",
+			in:   `{"credentials":{"oauth2":{},"auth_provider_x509_cert_url":"","sha256Hash":null,"hunter2":true,"pass1234":false}}`,
+			want: `{"credentials":{"oauth2":{},"auth_provider_x509_cert_url":"","sha256Hash":null,"[REDACTED:secret]":true,"[REDACTED:secret]#2":false}}`,
+		},
+		{
 			name: "in an array under a secret member",
 			in:   `{"password":[{"hunter2":true}]}`,
 			want: `{"password":[{"[REDACTED:password]":true}]}`,
@@ -85,6 +90,7 @@ func TestTokensSplitAcrossStrings(t *testing.T) {
 	bot := "7123456789:" + fake("AA", 33)
 	long := fake("", 400)
 	oa := fake("sk-proj-", 120)
+	longJWT := "eyJ" + fake("", 40) + ".eyJ" + fake("", 700) + "." + fake("", 300)
 	const cont = ContinuationMarker
 	for _, tc := range []struct{ name, in, want string }{
 		{
@@ -156,6 +162,11 @@ func TestTokensSplitAcrossStrings(t *testing.T) {
 			name: "strings that are not adjacent",
 			in:   `[["` + gh[:10] + `"],"` + gh[10:] + `"]`,
 			want: `[["` + gh[:10] + `"],"` + gh[10:] + `"]`,
+		},
+		{
+			name: "a long JWT split after its first 256 bytes",
+			in:   `["Bearer ` + longJWT[:600] + `","` + longJWT[600:] + `"]`,
+			want: `["Bearer [REDACTED:jwt]","` + cont + `"]`,
 		},
 		{
 			name: "ordinary strings",

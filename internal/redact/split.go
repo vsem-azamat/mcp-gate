@@ -58,27 +58,44 @@ const telegramTokenRun = 35
 // the digits of a Telegram bot token (at most 16), or after "sk_" or "https://".
 const maySplitReach = 16
 
-// maySplit is the cheap check of a window that joins a and b: whether it holds, in any letter
-// case and starting in a or at most maySplitReach bytes into b, a prefilter word of a split rule,
-// or a digit, a colon and telegramTokenRun token bytes (a Telegram bot token, the split rule with
-// a precheck instead).
+// minSplitToken is the length of the shortest token a split rule matches (a Slack token);
+// minTelegramToken that of a Telegram bot token, the digits, the colon and telegramTokenRun.
+const (
+	minSplitToken     = 15
+	minTelegramDigits = 6
+	minTelegramToken  = minTelegramDigits + 1 + telegramTokenRun
+)
+
+// maySplit is the cheap check of a window that joins a and b, the runs of splitBytes that end the
+// first string and start the second: whether it is long enough for a token, and holds, in any
+// letter case and starting in a or at most maySplitReach bytes into b, a prefilter word of a
+// split rule, or a digit, a colon and telegramTokenRun token bytes (a Telegram bot token, the
+// split rule with a precheck instead).
 func maySplit[B string | []byte](a string, b B) bool {
+	n := len(a) + len(b)
+	if n < minSplitToken {
+		return false
+	}
+	telegram := n >= minTelegramToken
 	at := func(i int) byte {
 		if i < len(a) {
 			return a[i]
 		}
 		return b[i-len(a)]
 	}
-	n := len(a) + len(b)
 	end := min(n-1, len(a)+maySplitReach)
 	for i := range end {
-		c := at(i)
+		var c, d byte
+		if i+1 < len(a) {
+			c, d = a[i], a[i+1]
+		} else {
+			c, d = at(i), at(i+1)
+		}
 		starts := splitStarts[c]
 		if starts == 0 {
 			continue
 		}
-		d := at(i + 1)
-		if starts&startsDigit != 0 && d == ':' {
+		if telegram && starts&startsDigit != 0 && d == ':' {
 			run := 0
 			for j := i + 2; j < n && isTokenByte(at(j)); j++ {
 				run++
@@ -106,6 +123,96 @@ func maySplit[B string | []byte](a string, b B) bool {
 	}
 	return false
 }
+
+// The hints splitHintOf gives about a run that may start a split token.
+const (
+	// hintWord: two bytes in a row start a prefilter word of a split rule.
+	hintWord = 1 << iota
+	// hintReach: the run holds the first byte of a token whose prefilter word may begin in the
+	// second string ("sk" before "_live_", "https://" before "hooks.slack.com").
+	hintReach
+	// hintDigit: the run holds the digits a Telegram bot token starts with.
+	hintDigit
+	// hintLong: the run is longer than splitWindow, so a JWT may start further back.
+	hintLong
+)
+
+// splitHintOf looks once at the run of splitBytes that ends a, back to at most splitWindow bytes
+// and not before from; next is the first byte of the second string. It returns where the run
+// starts, and 0 as the hint when no split token can start in it, so that most boundaries cost
+// one pass over a short run.
+func splitHintOf(a string, from int, next byte) (left, hint int) {
+	d := next
+	i := len(a) - 1
+	digits := 0
+	stop := max(from, len(a)-splitWindow)
+	for ; i >= stop; i-- {
+		c := a[i]
+		class := splitClass[c]
+		if class&classSplit == 0 {
+			break
+		}
+		if class&classWord != 0 {
+			pair := uint16(lowerASCII(c))<<8 | uint16(lowerASCII(d))
+			if splitPairs[pair/64]&(1<<(pair%64)) != 0 {
+				hint |= hintWord
+			}
+		}
+		hint |= int(class & hintReach)
+		// The digits of a Telegram bot token: at least minTelegramDigits in a row, or digits
+		// that end a and may go on in the second string.
+		if class&hintDigit != 0 {
+			digits++
+			if digits >= minTelegramDigits || digits == len(a)-i {
+				hint |= hintDigit
+			}
+		} else {
+			digits = 0
+		}
+		d = c
+	}
+	if i >= from && i < stop && isSplitByte(a[i]) {
+		hint |= hintLong // a JWT may start further back
+	}
+	return i + 1, hint
+}
+
+// splitClass classifies each byte for splitHintOf: classSplit for splitBytes, and hintDigit,
+// hintReach and classWord for the bytes that may start a token (see the hints).
+var splitClass = func() *[256]uint8 {
+	var class [256]uint8
+	for c := range 256 {
+		if isSplitByte(byte(c)) {
+			class[c] |= classSplit
+		}
+		if splitStarts[c]&startsDigit != 0 {
+			class[c] |= hintDigit
+		}
+		if splitStarts[c]&startsWord != 0 {
+			class[c] |= classWord
+		}
+		if splitReach[c] {
+			class[c] |= hintReach
+		}
+	}
+	return &class
+}()
+
+// The classes of splitClass beside the hints.
+const (
+	classSplit = 1 << (iota + 5)
+	classWord
+)
+
+// splitReach marks the first bytes of tokens whose prefilter word does not start the token:
+// Stripe's "sk_" and "rk_" before "_live_" or "_test_", and the "https://" of a Slack webhook.
+var splitReach = func() *[256]bool {
+	var reach [256]bool
+	for _, c := range "srhSRH" {
+		reach[c] = true
+	}
+	return &reach
+}()
 
 // splitStarts marks, for each byte, whether it is a digit (it may start the digits of a Telegram
 // bot token) or starts a prefilter word of a split rule in either letter case.
@@ -138,13 +245,33 @@ type splitCut struct {
 }
 
 // splitLeft returns where the window of a split token starts in a: at the start of the run of
-// splitBytes that ends a, but at most splitWindow bytes back and not before from.
-func splitLeft(a string, from int) int {
-	left := len(a)
+// splitBytes that ends a, but at most splitWindow bytes back and not before from. When the run
+// goes on further, the window reaches back over JWT bytes, up to jwtWindow bytes, to the first
+// "eyJ" there, so that a long JWT split after its start is found; jwt is then that start.
+func splitLeft(a string, from int) (left int, jwt bool) {
+	left = len(a)
 	for left > from && len(a)-left < splitWindow && isSplitByte(a[left-1]) {
 		left--
 	}
-	return left
+	if left == from || !isSplitByte(a[left-1]) {
+		return left, false
+	}
+	far := left
+	for far > from && len(a)-far < jwtWindow && isJWTByte(a[far-1]) {
+		far--
+	}
+	if i := strings.Index(a[far:min(left+2, len(a))], "eyJ"); i >= 0 && far+i < left {
+		return far + i, true
+	}
+	return left, false
+}
+
+// jwtWindow bounds how far back a window reaches for the start of a JWT.
+const jwtWindow = 8 << 10
+
+// isJWTByte reports whether c can be part of a JWT.
+func isJWTByte(c byte) bool {
+	return isTokenByte(c) || c == '.'
 }
 
 // splitToken looks for a match of a split rule that starts in a, at or after from, and ends in
@@ -155,7 +282,12 @@ func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
 	if len(a) <= from || b == "" || !isSplitByte(a[len(a)-1]) || !isSplitByte(b[0]) {
 		return splitCut{}, false
 	}
-	left := splitLeft(a, from)
+	left, jwt := splitLeft(a, from)
+	// Before the usual window, only a JWT may start.
+	jwtOnly := left
+	if jwt {
+		jwtOnly = len(a) - splitWindow
+	}
 	right := 0
 	for right < len(b) && right < splitWindow && isSplitByte(b[right]) {
 		right++
@@ -163,7 +295,7 @@ func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
 	window := a[left:] + b[:right]
 	boundary := len(a) - left
 	for _, s := range e.splitSpans(window) {
-		if s.start >= boundary || s.end <= boundary {
+		if s.start >= boundary || s.end <= boundary || (left+s.start < jwtOnly && s.kind != "jwt") {
 			continue
 		}
 		// A whole token that ends a ({"<token>": "repo"}, ["<token>", "general"]) is found
@@ -178,7 +310,7 @@ func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
 			}
 		}
 		tail, head := left+s.start, s.end-boundary
-		if s.start == 0 {
+		if s.start == 0 && !jwt {
 			for tail > from && isSplitByte(a[tail-1]) {
 				tail--
 			}

@@ -165,17 +165,23 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 			}
 			// A token may start at the end of this string and go on in the adjacent one: its
 			// rest there is cut off when that string is reached.
-			c := cuts{head: heads[i]}
+			var c cuts
+			if heads != nil {
+				c.head = heads[i]
+			}
 			// A value that already continues a token from the value before it is not joined to
 			// its name as well, so that each string continues at most one token.
 			isName := len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectKey
-			if next := adjacentString(data, end, stack); next >= 0 && (!isName || heads[next] == 0) {
-				if cut, ok := e.splitAfter(decoded, c.head, data, next); ok {
-					c.tail = &cut
-					if heads == nil {
-						heads = map[int]int{}
+			// The checks that rule out most boundaries come first and cost no call.
+			if len(decoded) > c.head && splitClass[decoded[len(decoded)-1]]&classSplit != 0 {
+				if next := adjacentString(data, end, stack); next >= 0 && (!isName || heads == nil || heads[next] == 0) {
+					if cut, ok := e.splitAfter(decoded, c.head, data, next); ok {
+						c.tail = &cut
+						if heads == nil {
+							heads = map[int]int{}
+						}
+						heads[next] = max(heads[next], cut.head)
 					}
-					heads[next] = max(heads[next], cut.head)
 				}
 			}
 			if isName {
@@ -385,32 +391,52 @@ func skipJSONSpace(data []byte, i int) int {
 	return i
 }
 
+// splitLeftOnly is the start of the window of a split token in a (see splitLeft).
+func splitLeftOnly(a string, from int) int {
+	left, _ := splitLeft(a, from)
+	return left
+}
+
 // splitAfter looks for a token that starts in the decoded string a, at or after from, and goes
 // on in the string literal at data[next] (see splitToken). The literal is decoded only when the
-// window passes maySplit, checked on its raw bytes as far as they hold no escape.
+// window passes splitHintOf and maySplit on its raw bytes; maySplit is checked again on the
+// decoded run, which differs when an escape is in it.
 func (e *Engine) splitAfter(a string, from int, data []byte, next int) (splitCut, bool) {
 	if len(a) <= from || !isSplitByte(a[len(a)-1]) || next+1 >= len(data) || (!isSplitByte(data[next+1]) && data[next+1] != '\\') {
 		return splitCut{}, false
 	}
-	run := next + 1
-	for run < len(data) && run-next <= splitWindow && isSplitByte(data[run]) {
-		run++
-	}
-	if data[run] != '\\' && !maySplit(a[splitLeft(a, from):], data[next+1:run]) {
-		return splitCut{}, false
+	if data[next+1] != '\\' {
+		// Most boundaries are ruled out by one look at the run that ends a.
+		left, hint := splitHintOf(a, from, data[next+1])
+		if hint == 0 {
+			return splitCut{}, false
+		}
+		run := next + 1
+		for run < len(data) && run-next <= splitWindow && splitClass[data[run]]&classSplit != 0 {
+			run++
+		}
+		if data[run] != '\\' {
+			if hint == hintDigit && len(a)-left+run-next-1 < minTelegramToken {
+				return splitCut{}, false
+			}
+			if hint&hintLong != 0 {
+				left = splitLeftOnly(a, from)
+			}
+			if !maySplit(a[left:], data[next+1:run]) {
+				return splitCut{}, false
+			}
+		}
 	}
 	b, err := decodeJSONString(data[next:jsonStringEnd(data, next)])
 	if err != nil {
 		return splitCut{}, false
 	}
-	if data[run] == '\\' {
-		head := 0
-		for head < len(b) && head < splitWindow && isSplitByte(b[head]) {
-			head++
-		}
-		if !maySplit(a[splitLeft(a, from):], b[:head]) {
-			return splitCut{}, false
-		}
+	head := 0
+	for head < len(b) && head < splitWindow && isSplitByte(b[head]) {
+		head++
+	}
+	if !maySplit(a[splitLeftOnly(a, from):], b[:head]) {
+		return splitCut{}, false
 	}
 	return e.splitToken(a, from, b)
 }
@@ -444,8 +470,13 @@ func nameShapeOf(name string) nameShape {
 }
 
 // plainIdentifier matches the names of members as code writes them: "expires_in", "token-type",
-// "tokenType", "TokenType", "userID", "TOKEN_TYPE".
-var plainIdentifier = regexp.MustCompile(`^(?:_?[a-z]+(?:[_-][a-z]+)*|_?[A-Z]+(?:_[A-Z]+)*|[A-Za-z][a-z]+(?:[A-Z][a-z]+)*[A-Z]*)$`)
+// "tokenType", "TokenType", "userID", "TOKEN_TYPE". A part may end in up to four digits when the
+// name has more than one part ("auth_provider_x509_cert_url", "oauth2Token"), and a few
+// well-known words hold digits ("oauth2", "sha256"); a single word with digits ("hunter2") is no
+// plain identifier.
+var plainIdentifier = regexp.MustCompile(`^(?:_?[a-z]+(?:[_-][a-z]+)*|_?[A-Z]+(?:_[A-Z]+)*|[A-Za-z][a-z]+(?:[A-Z][a-z]+)*[A-Z]*` +
+	`|_?[a-z]+[0-9]{0,4}(?:[_-][a-z]+[0-9]{0,4})+|[A-Z]+[0-9]{0,4}(?:_[A-Z]+[0-9]{0,4})+|[A-Za-z][a-z]+[0-9]{0,4}(?:[A-Z][a-z]+[0-9]{0,4})+[A-Z]*` +
+	`|oauth[12]|sha(?:1|224|256|384|512)|md5|base(?:32|64)|x509|utf8|utf16|ipv[46]|http[23])$`)
 
 // The length and Shannon entropy, in bits per byte, from which a name of letters only counts as
 // random rather than as an identifier.

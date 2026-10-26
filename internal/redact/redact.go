@@ -204,9 +204,17 @@ func (e *Engine) Find(text string) []Span {
 		return lowered
 	}
 	var kept []span
+	// Rules that share a prefilter (the Russian label rules) check it once.
+	var lastPrefilter *string
+	lastFound := false
 	for _, r := range e.rules {
-		if len(r.prefilter) > 0 && !containsAny(lower(), r.prefilter) {
-			continue
+		if len(r.prefilter) > 0 {
+			if &r.prefilter[0] != lastPrefilter {
+				lastPrefilter, lastFound = &r.prefilter[0], containsAny(lower(), r.prefilter)
+			}
+			if !lastFound {
+				continue
+			}
 		}
 		if r.precheck != nil && !r.precheck(masked) {
 			continue
