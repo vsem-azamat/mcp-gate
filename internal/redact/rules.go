@@ -39,9 +39,9 @@ type rule struct {
 	// jsonEscaped marks a value written inside a JSON string literal; a Replacer gets it
 	// decoded.
 	jsonEscaped bool
-	// rescan makes the search go on from the start of each candidate's value rather than from
-	// its end, so that a value cannot hide a match that starts inside it ("пароль от почты:
-	// токен: X", where "токен:" is rejected as the first value).
+	// rescan makes the search go on from the end of each match's first group (its label) rather
+	// than from the end of the match, so that the rest of a match cannot hide a match that starts
+	// inside it ("пароль от почты: токен: X", where "токен:" is rejected as the first value).
 	rescan bool
 	// split marks a vendor-format rule, which also runs over the boundary of two adjacent JSON
 	// strings (see splitToken). Its matches hold only splitBytes, and it has a prefilter or a

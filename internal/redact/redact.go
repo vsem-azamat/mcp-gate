@@ -264,8 +264,8 @@ const (
 )
 
 // rescanSpans returns the accepted matches of a rule with rescan: after each match the search
-// goes on from where its candidate value started, so that a label inside a value, rejected or
-// not, is matched with its own value. Accepted spans that overlap are merged. The values read
+// goes on from the end of its first group (the label), so that a label inside the rest of the
+// match (a qualifier or a value, rejected or not) is matched with its own value. Accepted spans that overlap are merged. The values read
 // again share a budget, since a text made of labels would make that quadratic; past it, the
 // search goes on after each match.
 func (e *Engine) rescanSpans(r *rule, text string) []span {
@@ -291,14 +291,9 @@ func (e *Engine) rescanSpans(r *rule, text string) []span {
 			}
 		}
 		next := match[1]
-		for _, group := range r.groups {
-			if g := match[2*group]; g >= 0 {
-				if budget >= match[1]-g {
-					budget -= match[1] - g
-					next = g
-				}
-				break
-			}
+		if g := match[3]; g > match[0] && budget >= match[1]-g {
+			budget -= match[1] - g
+			next = g
 		}
 		for _, s := range e.matchSpans(r, text, [][]int{match}, nil) {
 			if n := len(spans); n > 0 && s.start < spans[n-1].end {
