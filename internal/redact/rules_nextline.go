@@ -186,7 +186,7 @@ var proseKeyValueAccept = keyValueAccept(proseKeyKind, 3)
 // does, unless the key line opens a block of code, or an unquoted value is the structure of the
 // text rather than a value (see isNextLineStructure).
 func nextLineValueAccept(text string, match []int, start, end int) (int, int, string, bool) {
-	if opensBlock(text[strings.LastIndexByte(text[:match[2]], '\n')+1 : match[2]]) {
+	if opensBlock(text[strings.LastIndexByte(text[:match[2]], '\n')+1 : match[3]]) {
 		return 0, 0, "", false
 	}
 	if g := nextLineUnquotedGroup; match[2*g] >= 0 && isNextLineStructure(text[match[2*g]:match[2*g+1]]) {
@@ -195,17 +195,36 @@ func nextLineValueAccept(text string, match []int, start, end int) (int, int, st
 	return proseKeyValueAccept(text, match, start, end)
 }
 
-// opensBlock reports whether a line, or its start up to the key, starts after its indentation
-// with one of blockHeaders. keyLineRegions skips such key lines before matching, and
-// nextLineValueAccept rejects them, so that both ways of matching agree.
+// opensBlock reports whether a key line, up to its key or its separator, is a line of code that
+// opens a block: after its indentation, one of blockHeaders, then only an optional "not" and
+// the key ("if token", "if not token", "case 'token'", "if(token)"), or any number of words
+// when one before the key is an operator word or holds an operator character ("while retries
+// and token", "if len(token)"). A header word in prose ("for the staging db password") opens
+// no block. keyLineRegions skips such key lines before matching, and nextLineValueAccept rejects
+// them; both pass the line without what follows the key, so that they agree.
 func opensBlock(line string) bool {
 	line = strings.TrimLeft(line, " \t")
 	n := 0
 	for n < len(line) && (line[n] >= 'a' && line[n] <= 'z') {
 		n++
 	}
-	return n < len(line) && blockHeaders[line[:n]] && !isKeyByte(line[n])
+	if n == len(line) || !blockHeaders[line[:n]] || isKeyByte(line[n]) {
+		return false
+	}
+	words := strings.Fields(trimRightSet(line, keyLineEndSpace+`:=>："'`))
+	if len(words) <= 2 || (len(words) == 3 && words[1] == "not") {
+		return true
+	}
+	for _, word := range words[1 : len(words)-1] {
+		if operatorWords[word] || strings.ContainsAny(word, "()[]=!<>&|") {
+			return true
+		}
+	}
+	return false
 }
+
+// operatorWords are the words of a condition in code ("while retries and token:").
+var operatorWords = map[string]bool{"and": true, "or": true, "not": true, "in": true, "is": true}
 
 // isNextLineStructure reports whether an unquoted next line is the structure of the text rather
 // than a value: a Markdown code fence, a URL ("Reset your password:\nhttps://…"), a control

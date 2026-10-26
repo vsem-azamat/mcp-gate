@@ -39,6 +39,10 @@ type rule struct {
 	// jsonEscaped marks a value written inside a JSON string literal; a Replacer gets it
 	// decoded.
 	jsonEscaped bool
+	// split marks a vendor-format rule, which also runs over the boundary of two adjacent JSON
+	// strings (see splitToken). Its matches hold only splitBytes, and it has a prefilter or a
+	// precheck.
+	split bool
 }
 
 type acceptFunc func(text string, match []int, start, end int) (newStart, newEnd int, kind string, ok bool)
@@ -80,30 +84,31 @@ func sortRules(rules []*rule) []*rule {
 // that no other finding on its line can split it and leave the password visible; the Russian
 // label rule runs last.
 const (
-	priorityRussianPair      = 10
-	priorityPrivateKey       = 100
-	priorityAWSAccessKey     = 110
-	priorityAWSSecretKey     = 120
-	priorityGitHubToken      = 130
-	priorityGitLabToken      = 140
-	priorityAnthropicAPIKey  = 150
-	priorityOpenAIAPIKey     = 160
-	priorityGoogleAPIKey     = 170
-	priorityGoogleOAuthToken = 180
-	prioritySlackToken       = 190
-	prioritySlackWebhook     = 200
-	priorityTelegramBotToken = 210
-	priorityStripeKey        = 220
-	priorityJWT              = 230
-	priorityAuthHeader       = 240
-	priorityURLPassword      = 250
-	priorityEnvAssignment    = 300
-	priorityKeyValue         = 310
-	priorityKeyValueNextLine = 315
-	priorityCLIFlag          = 320
-	priorityJSONFragment     = 330
-	priorityHighEntropy      = 900
-	priorityRussianLabel     = 910
+	priorityRussianPair          = 10
+	priorityPrivateKey           = 100
+	priorityAWSAccessKey         = 110
+	priorityAWSSecretKey         = 120
+	priorityGitHubToken          = 130
+	priorityGitLabToken          = 140
+	priorityAnthropicAPIKey      = 150
+	priorityOpenAIAPIKey         = 160
+	priorityGoogleAPIKey         = 170
+	priorityGoogleOAuthToken     = 180
+	prioritySlackToken           = 190
+	prioritySlackWebhook         = 200
+	priorityTelegramBotToken     = 210
+	priorityStripeKey            = 220
+	priorityJWT                  = 230
+	priorityAuthHeader           = 240
+	priorityURLPassword          = 250
+	priorityEnvAssignment        = 300
+	priorityKeyValue             = 310
+	priorityKeyValueNextLine     = 315
+	priorityCLIFlag              = 320
+	priorityJSONFragment         = 330
+	priorityHighEntropy          = 900
+	priorityRussianLabel         = 910
+	priorityRussianLabelNextLine = 920
 )
 
 // zeroWidthChars are the invisible characters sometimes used to break up a label
@@ -141,6 +146,7 @@ var coreRules = []*rule{
 	{
 		kind:      "aws_access_key",
 		priority:  priorityAWSAccessKey,
+		split:     true,
 		re:        regexp.MustCompile(`\b((?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\b`),
 		groups:    []int{1},
 		prefilter: []string{"akia", "asia", "abia", "acca"},
@@ -155,6 +161,7 @@ var coreRules = []*rule{
 	{
 		kind:      "github_token",
 		priority:  priorityGitHubToken,
+		split:     true,
 		re:        regexp.MustCompile(`\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b`),
 		groups:    []int{1},
 		prefilter: []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"},
@@ -162,6 +169,7 @@ var coreRules = []*rule{
 	{
 		kind:      "gitlab_token",
 		priority:  priorityGitLabToken,
+		split:     true,
 		re:        regexp.MustCompile(`\b((?:glpat|gloas|gldt|glrt|glrtr|glcbt|glptt|glft|glimt|glagent|glsoat|glffct|glwt)-[A-Za-z0-9_.\-]{20,}|GR1348941[A-Za-z0-9_\-]{20,})`),
 		groups:    []int{1},
 		prefilter: []string{"glpat-", "gloas-", "gldt-", "glrt-", "glrtr-", "glcbt-", "glptt-", "glft-", "glimt-", "glagent-", "glsoat-", "glffct-", "glwt-", "gr1348941"},
@@ -169,6 +177,7 @@ var coreRules = []*rule{
 	{
 		kind:      "anthropic_api_key",
 		priority:  priorityAnthropicAPIKey,
+		split:     true,
 		re:        regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9]{2,12}-[A-Za-z0-9_\-]{20,})`),
 		groups:    []int{1},
 		prefilter: []string{"sk-ant-"},
@@ -176,6 +185,7 @@ var coreRules = []*rule{
 	{
 		kind:      "openai_api_key",
 		priority:  priorityOpenAIAPIKey,
+		split:     true,
 		re:        regexp.MustCompile(`\b(sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}|sk-[A-Za-z0-9]{32,})\b`),
 		groups:    []int{1},
 		prefilter: []string{"sk-"},
@@ -183,6 +193,7 @@ var coreRules = []*rule{
 	{
 		kind:      "google_api_key",
 		priority:  priorityGoogleAPIKey,
+		split:     true,
 		re:        regexp.MustCompile(`\b(AIza[0-9A-Za-z_\-]{35})`),
 		groups:    []int{1},
 		prefilter: []string{"aiza"},
@@ -190,6 +201,7 @@ var coreRules = []*rule{
 	{
 		kind:      "google_oauth_token",
 		priority:  priorityGoogleOAuthToken,
+		split:     true,
 		re:        regexp.MustCompile(`\b(ya29\.[A-Za-z0-9_\-]{20,}|GOCSPX-[A-Za-z0-9_\-]{20,}|1//0[A-Za-z0-9_\-]{40,})`),
 		groups:    []int{1},
 		prefilter: []string{"ya29.", "gocspx-", "1//0"},
@@ -197,6 +209,7 @@ var coreRules = []*rule{
 	{
 		kind:      "slack_token",
 		priority:  prioritySlackToken,
+		split:     true,
 		re:        regexp.MustCompile(`\b(xox[abposre]-[A-Za-z0-9\-]{10,}|xapp-\d-[A-Za-z0-9\-]{10,})`),
 		groups:    []int{1},
 		prefilter: []string{"xox", "xapp-"},
@@ -204,6 +217,7 @@ var coreRules = []*rule{
 	{
 		kind:      "slack_webhook",
 		priority:  prioritySlackWebhook,
+		split:     true,
 		re:        regexp.MustCompile(`(https://hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9_/\-]{20,})`),
 		groups:    []int{1},
 		prefilter: []string{"hooks.slack.com"},
@@ -211,6 +225,7 @@ var coreRules = []*rule{
 	{
 		kind:     "telegram_bot_token",
 		priority: priorityTelegramBotToken,
+		split:    true,
 		re:       regexp.MustCompile(`\b(?:bot)?(\d{6,16}:[A-Za-z0-9_\-]{35})(?:[^A-Za-z0-9_\-]|$)`),
 		groups:   []int{1},
 		precheck: hasDigitColonRun,
@@ -218,6 +233,7 @@ var coreRules = []*rule{
 	{
 		kind:      "stripe_key",
 		priority:  priorityStripeKey,
+		split:     true,
 		re:        regexp.MustCompile(`\b((?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,})`),
 		groups:    []int{1},
 		prefilter: []string{"_live_", "_test_"},
@@ -225,6 +241,7 @@ var coreRules = []*rule{
 	{
 		kind:      "jwt",
 		priority:  priorityJWT,
+		split:     true,
 		re:        regexp.MustCompile(`\b(eyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})`),
 		groups:    []int{1},
 		prefilter: []string{"eyj"},

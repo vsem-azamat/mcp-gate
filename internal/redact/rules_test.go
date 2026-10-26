@@ -38,6 +38,12 @@ func TestRussianLabels(t *testing.T) {
 		"пароль -- dash-Pw-2":                                       "dash-Pw-2",
 		"пароль: `tick-Pw-3`":                                       "tick-Pw-3",
 		"логин/пароль: admin / Qwerty123, ключ " + fake("AKIA", 16): "Qwerty123",
+		// A label line after a label is matched with its own value.
+		"пароль:\nтокен: Abc12345xyz":     "Abc12345xyz",
+		"пароль:\nтокен:\nAbc12345xyz":    "Abc12345xyz",
+		"Пароль:\r\nCrlf-Pw-77\r\nдальше": "Crlf-Pw-77",
+		"пароль:\nQwerty-123 и ещё текст": "Qwerty-123",
+		"пароль: \n  «spaced pw 1»":       "spaced pw 1",
 	}
 	negatives := []string{
 		"пароль был изменён",
@@ -59,6 +65,10 @@ func TestRussianLabels(t *testing.T) {
 		"токен — Telegram выдаёт",
 		"логин/пароль - пришлю позже в личку",
 		"пароль от почты сменили",
+		// A next line that is a key-value pair of its own.
+		"пароль:\nusername: alice",
+		"пароль:\nlogin = alice",
+		"токен —\nимя: бот",
 	}
 	for _, highEntropy := range []bool{false, true} {
 		e := newEngine(t, Options{Russian: true, HighEntropy: highEntropy})
@@ -116,6 +126,7 @@ func TestRuleOrder(t *testing.T) {
 		{"secret", setCore}, // "key": "value" fragment
 		{"high_entropy", setHighEntropy},
 		{"password", setRussian}, // the Russian label
+		{"password", setRussian}, // the Russian label and the value on the next line
 	}
 	e := newEngine(t, Options{Russian: true, HighEntropy: true})
 	if len(e.rules) != len(want) {

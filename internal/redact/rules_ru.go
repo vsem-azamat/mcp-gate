@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Russian credential labels, for chats in Russian (Options.Russian).
@@ -16,8 +17,21 @@ const russianLabelSeparators = ":=：—–-"
 // credential.
 var russianTechValue = regexp.MustCompile(`^(?:[A-Z0-9][A-Z0-9-]{1,11}|\d{1,2}:\d{2}|\d{1,5}%?|ssh-[a-z0-9-]+)$`)
 
-// russianLabelValueGroup is the capture group of an unquoted value in the label rule.
+// russianLabelValueGroup is the capture group of an unquoted value in the label rules.
 const russianLabelValueGroup = 8
+
+// The parts of the label rules: the label (group 1) with its qualifier (group 2), the explicit
+// separator, and the value (groups 4 to 8, the last unquoted). Group 3 is the separator with its
+// space, which each rule writes around russianLabelSeparator.
+const (
+	russianLabelPattern = `(?i)(?:^|[^\p{L}\p{N}_])(пароль|пароля|паролем|пароли|токен|токена|ключ|ключа|апи[\s\-]*ключ|секрет|код\s+доступа)` +
+		`((?:[ \t]+(?:от|к|для|на|доступа)(?:[ \t]+[^\s:=：—–\-]{1,30}){0,2})?)` + zeroWidth
+	russianLabelSeparator = `(?:[:=：]|--?|[—–])`
+	russianLabelValue     = "(?:\"([^\"\\r\\n]+)\"|«([^»\\r\\n]+)»|'([^'\\r\\n]+)'|`([^`\\r\\n]+)`|([^\\s\"«»'`]+))"
+)
+
+// russianLabelPrefilter holds the substrings one of which a Russian label contains.
+var russianLabelPrefilter = []string{"пароль", "парол", "токен", "ключ", "секрет", "код"}
 
 var russianRules = []*rule{
 	{
@@ -31,18 +45,27 @@ var russianRules = []*rule{
 		accept:    russianPairAccept,
 	},
 	{
-		// "пароль: X", "пароль от почты: X", "токен — X", "ключ = X", "Пароль:\nX",
-		// "пароль Qwerty-123".
-		kind:     kindPassword,
-		priority: priorityRussianLabel,
-		set:      setRussian,
-		re: regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}_])(пароль|пароля|паролем|пароли|токен|токена|ключ|ключа|апи[\s\-]*ключ|секрет|код\s+доступа)` +
-			`((?:[ \t]+(?:от|к|для|на|доступа)(?:[ \t]+[^\s:=：—–\-]{1,30}){0,2})?)` + zeroWidth +
-			`([ \t]*(?:[:=：]|--?|[—–])(?:[ \t]*\r?\n)?[ \t]*|[ \t]+)` +
-			"(?:\"([^\"\\r\\n]+)\"|«([^»\\r\\n]+)»|'([^'\\r\\n]+)'|`([^`\\r\\n]+)`|([^\\s\"«»'`]+))"),
+		// "пароль: X", "пароль от почты: X", "токен — X", "ключ = X", "пароль Qwerty-123".
+		kind:      kindPassword,
+		priority:  priorityRussianLabel,
+		set:       setRussian,
+		re:        regexp.MustCompile(russianLabelPattern + `([ \t]*` + russianLabelSeparator + `[ \t]*|[ \t]+)` + russianLabelValue),
 		groups:    []int{4, 5, 6, 7, 8},
-		prefilter: []string{"пароль", "парол", "токен", "ключ", "секрет", "код"},
+		prefilter: russianLabelPrefilter,
 		accept:    russianLabelAccept,
+	},
+	{
+		// "Пароль:" at the end of a line and the value at the start of the next one. A separate
+		// rule, matched on each such line and the line after it, so that a next line it rejects
+		// ("токен: X", "username: alice") is still matched by the rule above.
+		kind:      kindPassword,
+		priority:  priorityRussianLabelNextLine,
+		set:       setRussian,
+		re:        regexp.MustCompile(russianLabelPattern + `([ \t]*` + russianLabelSeparator + `[ \t]*\r?\n[ \t]*)` + russianLabelValue),
+		groups:    []int{4, 5, 6, 7, 8},
+		prefilter: russianLabelPrefilter,
+		regions:   russianKeyLineRegions,
+		accept:    russianNextLineAccept,
 	},
 }
 
@@ -87,6 +110,81 @@ func russianLabelAccept(text string, match []int, start, end int) (int, int, str
 		kind = kindPassword
 	}
 	return start, end, kind, true
+}
+
+// russianNextLineAccept accepts a value at the start of the line after a Russian label as
+// russianLabelAccept does, unless that line is a key-value pair of its own ("username: alice",
+// "токен: X"): an unquoted value that ends with a separator, or is followed by one, with more
+// text after it on its line.
+func russianNextLineAccept(text string, match []int, start, end int) (int, int, string, bool) {
+	if g := russianLabelValueGroup; match[2*g] >= 0 && opensPair(text, match[2*g], match[2*g+1]) {
+		return 0, 0, "", false
+	}
+	return russianLabelAccept(text, match, start, end)
+}
+
+// opensPair reports whether the unquoted run text[start:end] is the key of a pair on its line:
+// it holds no escaped line break, ends with, or is followed by space and, one of ":", "=" or
+// "：", and more than space follows on the line.
+func opensPair(text string, start, end int) bool {
+	lineEnd := len(text)
+	if i := strings.IndexByte(text[end:], '\n'); i >= 0 {
+		lineEnd = end + i
+	}
+	rest := trimLeftSet(text[end:lineEnd], " \t")
+	run := text[start:end]
+	if strings.IndexByte(run, maskedBreak) >= 0 {
+		return false // the run goes on over an escaped line break, after which a pair may start
+	}
+	switch {
+	case strings.HasSuffix(run, ":") || strings.HasSuffix(run, "=") || strings.HasSuffix(run, "："):
+	case strings.HasPrefix(rest, ":") || strings.HasPrefix(rest, "="):
+		rest = rest[1:]
+	case strings.HasPrefix(rest, "："):
+		rest = rest[len("："):]
+	default:
+		return false
+	}
+	return strings.TrimSpace(rest) != ""
+}
+
+// russianKeyLineRegions returns, for the Russian next-line rule, each line that ends, before
+// spaces and a carriage return, with a label separator and holds a Russian label in its last
+// maxKeyLineWindow bytes, together with the line after it.
+func russianKeyLineRegions(text string) []region {
+	var regions []region
+	for lineStart := 0; lineStart < len(text); {
+		i := strings.IndexByte(text[lineStart:], '\n')
+		if i < 0 {
+			break
+		}
+		start, lineEnd := lineStart, lineStart+i
+		lineStart = lineEnd + 1
+		key := trimRightSet(text[start:lineEnd], " \t\r")
+		if !hasRussianSeparatorSuffix(key) {
+			continue
+		}
+		windowStart := max(start, start+len(key)-maxKeyLineWindow)
+		for windowStart < len(text) && !utf8.RuneStart(text[windowStart]) {
+			windowStart++
+		}
+		if !containsAny(strings.ToLower(text[windowStart:start+len(key)]), russianLabelPrefilter) {
+			continue
+		}
+		valueEnd := len(text)
+		if j := strings.IndexByte(text[lineStart:], '\n'); j >= 0 {
+			valueEnd = lineStart + j
+		}
+		regions = append(regions, region{start: windowStart, end: valueEnd})
+	}
+	return regions
+}
+
+// hasRussianSeparatorSuffix reports whether line ends with a separator of the Russian label
+// rules.
+func hasRussianSeparatorSuffix(line string) bool {
+	r, _ := utf8.DecodeLastRuneInString(line)
+	return r != utf8.RuneError && strings.ContainsRune(russianLabelSeparators, r)
 }
 
 func onlyCyrillicLetters(value string) bool {

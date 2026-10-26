@@ -68,3 +68,33 @@ func BenchmarkRedactNextLineEdgeCases(b *testing.B) {
 func BenchmarkRedactCoreRulesOnly(b *testing.B) {
 	benchmarkRedactString(b, Options{}, messageList(5000))
 }
+
+// BenchmarkRedactJSONStringBoundaries is a JSON document of many short adjacent strings that end
+// and start with token characters, so that each boundary is checked for a split token.
+func BenchmarkRedactJSONStringBoundaries(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString(`{"ids":[`)
+	for i := range 20000 {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `"item-%d-abc","user_%d"`, i, i)
+	}
+	sb.WriteString(`]}`)
+	benchmarkRedactString(b, Options{Russian: true, HighEntropy: true}, sb.String())
+}
+
+// BenchmarkRedactSecretMemberNames is a list of secret objects whose members are a mix of
+// identifiers and names that are values.
+func BenchmarkRedactSecretMemberNames(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString(`[`)
+	for i := range 5000 {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `{"credentials":{"type":"basic","enabled":true,"user%d":true,"expires_in":3600}}`, i)
+	}
+	sb.WriteString(`]`)
+	benchmarkRedactString(b, Options{Russian: true, HighEntropy: true}, sb.String())
+}

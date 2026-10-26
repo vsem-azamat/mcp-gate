@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"unicode"
 )
 
 // maxJSONDepth bounds how far JSON nested inside JSON strings is followed.
@@ -65,29 +67,36 @@ const (
 // errBadString reports a string literal that does not decode; it cannot happen for valid JSON.
 var errBadString = errors.New("redact: undecodable JSON string")
 
+// frame is an open object or array while rewriteJSON walks a document.
+type frame struct {
+	object    bool
+	expectKey bool
+	key       string
+	// inherited is the secret kind of an enclosing secret member: every value below it is
+	// secret unless its own name says otherwise.
+	inherited string
+	// start is the offset of an object's opening brace; taken holds the names of its
+	// members as written and those given to replaced names, once a name is replaced.
+	start int
+	taken map[string]bool
+	// next is the suffix to try next for each replacement, so that many names replaced
+	// alike cost linear time.
+	next map[string]int
+}
+
 // rewriteJSON rewrites the string values of data, which is valid JSON. inherited is the secret
 // kind of the member the whole document sits under, or "" at the top level.
 func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited string) ([]byte, error) {
-	type frame struct {
-		object    bool
-		expectKey bool
-		key       string
-		// inherited is the secret kind of an enclosing secret member: every value below it is
-		// secret unless its own name says otherwise.
-		inherited string
-		// start is the offset of an object's opening brace; taken holds the names of its
-		// members as written and those given to replaced names, once a name is replaced.
-		start int
-		taken map[string]bool
-		// next is the suffix to try next for each replacement, so that many names replaced
-		// alike cost linear time.
-		next map[string]int
-	}
 	stack := make([]frame, 0, 8)
 	// scanBudget bounds the bytes objectNames reads, which nested objects with replaced names
 	// would otherwise make quadratic.
 	scanBudget := namesScanFactor*len(data) + namesScanSlack
 	cleanNames := map[string]struct{}{}
+	// secretNames remembers the shape of the names met under secret members.
+	secretNames := map[string]nameShape{}
+	// heads maps the offset of a string literal to the end of the rest of a token split from the
+	// string before it (see splitAfter).
+	var heads map[int]int
 	currentKey := func() string {
 		if len(stack) == 0 {
 			return ""
@@ -154,18 +163,52 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 			if err != nil {
 				return nil, errBadString
 			}
+			// A token may start at the end of this string and go on in the adjacent one: its
+			// rest there is cut off when that string is reached.
+			c := cuts{head: heads[i]}
+			if next := adjacentString(data, end, stack); next >= 0 {
+				if cut, ok := e.splitAfter(decoded, c.head, data, next); ok {
+					c.tail = &cut
+					if heads == nil {
+						heads = map[int]int{}
+					}
+					heads[next] = max(heads[next], cut.head)
+				}
+			}
 			if len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectKey {
 				top := &stack[len(stack)-1]
 				// The name as written marks the value; a name that holds a secret itself
-				// ({"<token>": "repo"}) is replaced as a string value would be.
+				// ({"<token>": "repo"}) is replaced as a string value would be, and a name
+				// under a secret member that looks like a value rather than an identifier
+				// ({"password": {"hunter2": true}}) is replaced as a whole (see nameShapeOf).
 				top.key = decoded
+				whole := false
+				if top.inherited != "" && !e.disabled[top.inherited] {
+					shape, ok := secretNames[decoded]
+					if !ok {
+						shape = nameShapeOf(decoded)
+						secretNames[decoded] = shape
+					}
+					whole = shape == shapeValue || (shape == shapeWord && onlyFlag(data, end))
+				}
 				// Most documents repeat a few clean names many times; they are scanned once.
-				if _, clean := cleanNames[decoded]; clean {
+				if _, clean := cleanNames[decoded]; clean && !whole && c.none() {
 					i = end
 					continue
 				}
-				if redacted := e.redactJSONValue("", decoded, r, depth); redacted == decoded {
-					cleanNames[decoded] = struct{}{}
+				var redacted string
+				switch {
+				case whole:
+					redacted = e.redactCut(top.inherited, decoded, c, r)
+				case !c.none():
+					redacted = e.redactCut("", decoded, c, r)
+				default:
+					redacted = e.redactJSONValue("", decoded, r, depth)
+				}
+				if redacted == decoded {
+					if !whole && c.none() {
+						cleanNames[decoded] = struct{}{}
+					}
 				} else {
 					out.Write(data[last:i])
 					if top.taken == nil {
@@ -180,10 +223,18 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 					out.Write(encodeJSONString(uniqueName(top.taken, top.next, redacted)))
 					last = end
 				}
-			} else if redacted := e.redactJSONValue(secretKind(), decoded, r, depth); redacted != decoded {
-				out.Write(data[last:i])
-				out.Write(encodeJSONString(redacted))
-				last = end
+			} else {
+				var redacted string
+				if c.none() {
+					redacted = e.redactJSONValue(secretKind(), decoded, r, depth)
+				} else {
+					redacted = e.redactCut(secretKind(), decoded, c, r)
+				}
+				if redacted != decoded {
+					out.Write(data[last:i])
+					out.Write(encodeJSONString(redacted))
+					last = end
+				}
 			}
 			i = end
 		default:
@@ -290,4 +341,146 @@ func encodeJSONString(s string) []byte {
 		panic(err) // a string always encodes
 	}
 	return bytes.TrimRight(b.Bytes(), "\n")
+}
+
+// adjacentString returns the offset of the string literal adjacent to the one that ends at
+// data[end], or -1: for a member name, its value; for a member value, the value of the next
+// member; for an array element, the next element. stack is that of rewriteJSON.
+func adjacentString(data []byte, end int, stack []frame) int {
+	if len(stack) == 0 {
+		return -1
+	}
+	top := stack[len(stack)-1]
+	i := skipJSONSpace(data, end)
+	if top.object && top.expectKey {
+		return stringAfter(data, i, ':')
+	}
+	i = stringAfter(data, i, ',')
+	if i < 0 || !top.object {
+		return i
+	}
+	return stringAfter(data, skipJSONSpace(data, jsonStringEnd(data, i)), ':')
+}
+
+// stringAfter returns the offset of the string literal that follows sep at data[i] and space,
+// or -1.
+func stringAfter(data []byte, i int, sep byte) int {
+	if i >= len(data) || data[i] != sep {
+		return -1
+	}
+	i = skipJSONSpace(data, i+1)
+	if i >= len(data) || data[i] != '"' {
+		return -1
+	}
+	return i
+}
+
+func skipJSONSpace(data []byte, i int) int {
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// splitAfter looks for a token that starts in the decoded string a, at or after from, and goes
+// on in the string literal at data[next] (see splitToken). The literal is decoded only when the
+// window passes maySplit, checked on its raw bytes as far as they hold no escape.
+func (e *Engine) splitAfter(a string, from int, data []byte, next int) (splitCut, bool) {
+	if len(a) <= from || !isSplitByte(a[len(a)-1]) || next+1 >= len(data) || (!isSplitByte(data[next+1]) && data[next+1] != '\\') {
+		return splitCut{}, false
+	}
+	run := next + 1
+	for run < len(data) && run-next <= splitWindow && isSplitByte(data[run]) {
+		run++
+	}
+	if data[run] != '\\' && !maySplit(a[splitLeft(a, from):], data[next+1:run]) {
+		return splitCut{}, false
+	}
+	b, err := decodeJSONString(data[next:jsonStringEnd(data, next)])
+	if err != nil {
+		return splitCut{}, false
+	}
+	if data[run] == '\\' {
+		head := 0
+		for head < len(b) && head < splitWindow && isSplitByte(b[head]) {
+			head++
+		}
+		if !maySplit(a[splitLeft(a, from):], b[:head]) {
+			return splitCut{}, false
+		}
+	}
+	return e.splitToken(a, from, b)
+}
+
+// nameShape is what a member name under a secret member looks like, as nameShapeOf finds it.
+type nameShape uint8
+
+const (
+	// shapeKept is a plain identifier, a name in nestedSafeKeys or a placeholder: never replaced.
+	shapeKept nameShape = iota + 1
+	// shapeWord is a name of letters, not random, that is no plain identifier: replaced when its
+	// value is only a flag.
+	shapeWord
+	// shapeValue holds a digit or a symbol or is random: always replaced.
+	shapeValue
+)
+
+// nameShapeOf classifies a member name under a secret member: it is replaced as a whole when it
+// is not in nestedSafeKeys, not a plain identifier (lower-case, snake, kebab, camel or upper
+// snake case), and either holds a digit or a symbol or has high entropy, or its value is only a
+// flag (see onlyFlag).
+func nameShapeOf(name string) nameShape {
+	switch {
+	case plainIdentifier.MatchString(name) || isPlaceholderValue(name) || slices.Contains(nestedSafeKeys, normalizeKey(name)):
+		return shapeKept
+	case identifierShaped(name):
+		return shapeWord
+	default:
+		return shapeValue
+	}
+}
+
+// plainIdentifier matches the names of members as code writes them: "expires_in", "token-type",
+// "tokenType", "TokenType", "userID", "TOKEN_TYPE".
+var plainIdentifier = regexp.MustCompile(`^(?:_?[a-z]+(?:[_-][a-z]+)*|_?[A-Z]+(?:_[A-Z]+)*|[A-Za-z][a-z]+(?:[A-Z][a-z]+)*[A-Z]*)$`)
+
+// The length and Shannon entropy, in bits per byte, from which a name of letters only counts as
+// random rather than as an identifier.
+const (
+	minRandomNameLength  = 12
+	minRandomNameEntropy = 3.5
+)
+
+// identifierShaped reports whether a name that is not a plain identifier still looks like one:
+// letters only, and not random.
+func identifierShaped(name string) bool {
+	for _, r := range name {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return len(name) < minRandomNameLength || shannonEntropy(name) < minRandomNameEntropy
+}
+
+// onlyFlag reports whether the value after the member name that ends at data[end] is only a
+// flag: true, false, null, a number, {}, [] or "".
+func onlyFlag(data []byte, end int) bool {
+	i := skipJSONSpace(data, end)
+	if i >= len(data) || data[i] != ':' {
+		return false
+	}
+	i = skipJSONSpace(data, i+1)
+	if i >= len(data) {
+		return false
+	}
+	switch c := data[i]; {
+	case c == 't' || c == 'f' || c == 'n' || c == '-' || (c >= '0' && c <= '9'):
+		return true
+	case c == '"':
+		return i+1 < len(data) && data[i+1] == '"'
+	case c == '{' || c == '[':
+		j := skipJSONSpace(data, i+1)
+		return j < len(data) && (data[j] == '}' || data[j] == ']')
+	}
+	return false
 }

@@ -259,6 +259,9 @@ func TestValueOnTheNextLine(t *testing.T) {
 		pw + ":\ntoken:\nabc12345": pw + ":\ntoken:\n[REDACTED:secret]",
 		// An escaped line break after the value ends it, as on the key's own line.
 		pw + ":\nhunter22\\nnext": pw + ":\n[REDACTED:password]\\nnext",
+		// A block header word in prose opens no block.
+		"for the staging db " + pw + ":\nhunter22": "for the staging db " + pw + ":\n[REDACTED:password]",
+		"with this " + pw + ":\nhunter22":          "with this " + pw + ":\n[REDACTED:password]",
 		// A JSON string is scanned decoded, so its \n is a real line break.
 		`{"note":"` + pw + `:\nhunter22"}`: `{"note":"` + pw + `:\n[REDACTED:password]"}`,
 	} {
@@ -286,6 +289,9 @@ func TestValueOnTheNextLine(t *testing.T) {
 		"if not api_key:\n    usage()",
 		"    elif secret:\n        x",
 		"for token:\n  Abc12345",
+		"while retries and token:\n    refresh()",
+		"if len(x) > 0 or token:\n    go()",
+		"if x is not None and token:\n    go()",
 		"API_TOKEN=\nelse",
 		// .env templates.
 		"DB_PASSWORD=\nDB_HOST=\nDB_PORT=5432",
