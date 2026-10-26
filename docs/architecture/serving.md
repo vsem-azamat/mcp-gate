@@ -10,7 +10,7 @@ How `mcp-gate serve` puts the downstream servers behind one listener. The behavi
 | --- | --- |
 | [`internal/gate`](../../internal/gate/gate.go) | Assembles the gate from the config: a supervisor and a mirror per server, the routes, readiness after the startup grace period, `/_status`, the learned pins file, shutdown |
 | [`internal/upstream`](../../internal/upstream/http.go) | The HTTP side: listener limits, body limit, Host check, named tokens, request log, panic recovery, `/_healthz`, `/_readyz` and `/_status` handlers |
-| [`internal/proxy`](../../internal/proxy/mirror.go) | `Mirror`: the upstream MCP server of one downstream, its catalog sync, call forwarding, progress, notifications, redaction of results and the audit line |
+| [`internal/proxy`](../../internal/proxy/mirror.go) | `Mirror`: the upstream MCP server of one downstream, its catalog sync, call forwarding, progress, notifications, redaction of results and the audit line; `Aggregate` and `View`: the catalogs of several mirrors at `/mcp` |
 | [`internal/policy`](../../internal/policy/policy.go) | Tool, prompt and resource filters, and the URI check for resource reads |
 
 ## Request path
@@ -43,6 +43,22 @@ Results go through `mcpredact` with the server's engine and the replacer that th
 A failed call's error is rebuilt by `call.downstreamError`, never passed on: the SDK reports an HTTP request that could not be sent as a JSON-RPC error (`ErrRejected`, code -32005) whose message quotes the full URL, so every message first goes through `HideURL`. A JSON-RPC error keeps its code; its message and, for an unwrapped error reply, its data are then redacted with the call's replacer, or with results not redacted the message goes through `ErrorText` and the data is dropped.
 
 The mirror's receiving middleware recovers panics in request handling, which the SDK runs on goroutines of its own, and writes the audit line of a tool call or prompt get that the SDK refuses before a handler runs (an unknown or filtered name); a context value tells whether a handler was reached. The notification worker and the progress sinks recover their own panics.
+
+## Aggregate endpoint
+
+With `aggregate` set, [`gate.aggregateRoute`](../../internal/gate/aggregate.go) mounts `/mcp` through the same `chain` as a server route, with its own token check in place of `RequireToken`:
+
+```
+client ─POST /mcp─▶ Recover ─▶ LogRequests ─▶ AllowHosts ─▶ aggregate.authorize ─▶ CrossOriginProtection
+   ─▶ 503 until started or its servers listed (or waiting for a login) ─▶ ReadBody ─▶ endListenOnDrain ─▶ SDK StreamableHTTPHandler (stateless)
+   ─▶ the View's mcp.Server ─▶ View.receive ─▶ View handler (access checked again) ─▶ Mirror handler
+```
+
+`authorize` runs the request's credential through every member's own `upstream.Tokens` (a public member takes any request) and gets the members it reaches, each with the token name it knows. That set picks the request's `View`; tokens do not change while the gate runs, so the views are made at start, one per distinct set. The access travels to the MCP handlers in `TokenInfo.Extra` (`proxy.AccessInfo`); the request's own header never does.
+
+[`proxy.Aggregate`](../../internal/proxy/aggregate.go) watches the members (`Mirror.Watch`, called after each applied listing) and, on a change, reads their `Catalog` snapshots, names the tools and prompts `<server>__<name>` (dropping names over `config.AggregateMaxName` characters or outside `[A-Za-z0-9_.-]`), and syncs every view with the same `syncSet` the mirror uses, so the SDK tells listening clients what changed. A view registers only its servers' entries, leaving out, and logging once, a resource URI or template that two of them list, and keeps per server the URIs it lists and its compiled templates to route reads.
+
+A view's handler checks that the request's access names the entry's server, then calls that mirror's own handler (`callTool`, `getPrompt`, `readResource`) with the server's own name for the entry and a `TokenInfo` holding the token name that server knows. From there the call is exactly a call on the server's route, audit line included. `View.receive` does what the mirror's middleware does for refusals the SDK makes before a handler runs: a name whose server the request reaches is audited by that mirror (`Mirror.refused`), anything else by the aggregate with an empty `server`.
 
 ## Shutdown
 

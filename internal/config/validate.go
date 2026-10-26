@@ -124,6 +124,36 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 		}
 		c.validateServerAuth(name, path+".auth", add)
 	}
+	c.validateAggregate(add)
+}
+
+func (c *Config) validateAggregate(add func(path, format string, args ...any)) {
+	a := c.Aggregate
+	if a == nil {
+		return
+	}
+	if a.Servers != nil && len(a.Servers) == 0 {
+		add("aggregate.servers", "must name at least one server; leave it out to serve every server")
+	}
+	seen := map[string]bool{}
+	for i, name := range a.Servers {
+		p := fmt.Sprintf("aggregate.servers[%d]", i)
+		switch {
+		case c.Servers[name] == nil:
+			add(p, "is not a server in servers")
+		case seen[name]:
+			add(p, "is listed twice")
+		}
+		seen[name] = true
+	}
+	for _, name := range c.AggregateMembers() {
+		switch {
+		case strings.Contains(name, AggregateSeparator) || strings.HasSuffix(name, "_"):
+			add("servers."+name, "a server on the aggregate endpoint cannot have %q in its name or end in '_', since %q separates it from tool names there; rename it or leave it out of aggregate.servers", AggregateSeparator, AggregateSeparator)
+		case len(name)+len(AggregateSeparator)+1 > AggregateMaxName:
+			add("servers."+name, "a server on the aggregate endpoint has a name of at most %d characters, so that its prefixed tool names fit in %d; rename it or leave it out of aggregate.servers", AggregateMaxName-len(AggregateSeparator)-1, AggregateMaxName)
+		}
+	}
 }
 
 func (e *Escrow) validate(add func(path, format string, args ...any)) {

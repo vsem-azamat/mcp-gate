@@ -76,6 +76,8 @@ An `http` server MAY have an `oauth` block (see the oauth spec), whose keys are 
 
 The config MAY set `escrow.ttl` (positive, default `24h`), `escrow.maxEntries` (default 1000, at most 100000), at most one of `escrow.keyHash` (a hex SHA-256) and `escrow.keyHashFile` (an absolute path), `escrow.sourceArguments` (a list of argument names, non-empty and distinct; see the escrow spec for its default), `escrow.tcp` (default `true`; `false` SHALL need `escrow.socket`) and `escrow.socket` with a required `path` (absolute, at most 103 bytes), `allowUIDs` (distinct user IDs; default none) and `mode` (octal permission bits, at most `0777`, default `0600`), `listen.addr` (`host:port`, default `127.0.0.1:9090`), `listen.behindProxy` (default `false`), `listen.trustedProxies` (CIDRs, default `127.0.0.1/32` and `::1/128`), `listen.allowedHosts` (host names, optionally with a port), `startupGracePeriod` (positive, default `30s`), `logLevel` (`debug`, `info`, `warn` or `error`, default `info`), `auth.tokens` and `admin.tokens`. A server MAY set `tools`, `prompts` and `resources`, each with exactly one of `allow` and `deny`, lists of non-empty entries; `auth.inherit` (default `true`), `auth.tokens` and `auth.public`; `log.requests`; `redact.enabled` (default `true`), `redact.ru`, `redact.highEntropy` and `redact.disableRules`, whose entries SHALL be redaction kinds; `redact.escrow` (default `true`); `redact.escrowTTL` (positive, default `escrow.ttl`); `redact.files` with `tools` (at least one, non-empty and distinct), `roots` (at least one absolute path other than `/`, and none that is `$HOME` of the gate's environment or a directory containing it, as written or with symlinks resolved; when `$HOME` is unset or relative the check SHALL be skipped and `serve` SHALL log a warning) and `maxBytes` (default `20MiB`, between `1KiB` and `1GiB`), which SHALL need `redact.enabled`; and `forwardMeta`, a list of `_meta` keys (default empty) whose entries SHALL be non-empty and distinct and SHALL NOT be `progressToken` or a key whose prefix before `/` has a label `mcp` or `modelcontextprotocol`, which the gate sets itself.
 
+The config MAY set `aggregate`, which turns on the aggregate endpoint (see the serving spec), with `servers`, a list of distinct names of servers in `servers` that SHALL NOT be empty (default: every enabled server), and `log.requests`. A disabled server listed SHALL be left out of it. The name of a server the aggregate endpoint serves SHALL NOT contain `__` or end in `_`, so that a prefixed name splits one way only, and SHALL be at most 61 characters, so that a prefixed name fits in 64. `aggregate` written without a value SHALL fail loading, with a hint to write `aggregate: {}`.
+
 Tokens SHALL be maps from a name matching `[a-z0-9][a-z0-9._-]{0,62}` to a non-empty value without spaces or control characters. Every server that is not `public` SHALL accept at least one token, from `auth.tokens` (unless `inherit` is `false`) or its own; `public` SHALL exclude `tokens` and `inherit`. With `inherit`, a server's own token names SHALL differ from the global ones, and no two tokens a server accepts SHALL have the same value.
 
 #### Scenario: Server without a token
@@ -97,6 +99,11 @@ Tokens SHALL be maps from a name matching `[a-z0-9][a-z0-9._-]{0,62}` to a non-e
 
 - **WHEN** the config sets both `escrow.keyHash` and `escrow.keyHashFile`
 - **THEN** loading fails naming `escrow.keyHashFile`
+
+#### Scenario: Aggregate member with the separator in its name
+
+- **WHEN** `aggregate: {}` is set and a server is named `a__b`
+- **THEN** loading fails naming `servers.a__b`, and with `aggregate: {servers: [c]}` it loads
 
 #### Scenario: Shared token value
 

@@ -35,6 +35,9 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 - **A URL per server**<br>
   Local (stdio) and remote (Streamable HTTP) servers are served at `/<server>/mcp`. The gate starts local servers, checks that they respond and restarts them when they crash. While a server restarts, agents can still list its tools.
 
+- **Or one URL for all of them**<br>
+  Optional. With `aggregate: {}` in the config, `/mcp` serves the tools of many servers at once, named `<server>__<tool>`, so a client needs one entry. Each token sees only the servers that accept it, plus the public ones.
+
 - **A token per agent**<br>
   Each token has a name, and the log line for every call says which token made it. A token can work for all servers or for one, and a server can be open without a token.
 
@@ -64,7 +67,7 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 | Secret vault for the owner | ✅ | ❌ | ❌ | ❌ | ❌ |
 | OAuth to remote servers | ✅ | ✅ | ✅ | ✅ | ➖ |
 | One binary, no database | ✅ | ✅ | ❌ | ❌ | ✅ |
-| All tools behind one URL | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/28) | ❌ | ✅ | ✅ | ✅ |
+| All tools behind one URL | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Different tools for different agents | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/32) | ❌ | ❌ | ✅ | ✅ |
 | Web UI | ❌ | ❌ | ➖ | ✅ | ✅ |
 | SSO and roles | ❌ | ❌ | ❌ | ✅ | ✅ |

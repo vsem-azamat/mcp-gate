@@ -167,6 +167,13 @@ func New(opts Options) (*Gate, error) {
 		g.names = append(g.names, name)
 		g.mux.Handle("/"+name+"/mcp", g.route(srv, remote))
 	}
+	if cfg.Aggregate != nil {
+		h, err := g.aggregateRoute(remote)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate: %w", err)
+		}
+		g.mux.Handle(config.AggregatePath, h)
+	}
 	info := upstream.HealthInfo{Name: cfg.Name, Version: opts.Version, ServerCount: len(g.names)}
 	g.mux.Handle("GET /_healthz", upstream.Recover(g.logger, "_healthz", upstream.HealthHandler(info, nil)))
 	g.mux.Handle("GET /_readyz", upstream.Recover(g.logger, "_readyz", upstream.HealthHandler(info, g.Readiness)))
@@ -301,18 +308,34 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 // body limit, and the SDK's stateless streamable handler.
 func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 	mirror := s.mirror
-	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mirror.Server() },
+	var authorize func(http.Handler) http.Handler
+	if tokens := g.cfg.EffectiveTokens(s.name); tokens != nil {
+		t := upstream.NewTokens(tokens)
+		authorize = func(h http.Handler) http.Handler { return upstream.RequireToken(t, h) }
+	}
+	return g.chain(s.name, s.cfg.Log.Requests, remote, authorize,
+		func(*http.Request) bool { return mirror.Ready() },
+		func(*http.Request) *mcp.Server { return mirror.Server() })
+}
+
+// chain builds an MCP route around the SDK's stateless streamable handler for the servers
+// getServer returns: recover, the request log when logRequests, the Host check, authorize when
+// set, cross-origin protection, 503 while ready is false, and the body limit.
+func (g *Gate) chain(name string, logRequests bool, remote upstream.RemoteFunc, authorize func(http.Handler) http.Handler,
+	ready func(*http.Request) bool, getServer func(*http.Request) *mcp.Server,
+) http.Handler {
+	var h http.Handler = mcp.NewStreamableHTTPHandler(getServer,
 		&mcp.StreamableHTTPOptions{
 			Stateless:                    true,
 			PropagateRequestCancellation: true,
 			DisableLocalhostProtection:   g.cfg.Listen.BehindProxy,
 			MaxRequestBodyBytes:          upstream.MaxBodyBytes,
-			Logger:                       upstream.SDKLogger(g.logger.With("server", s.name)),
+			Logger:                       upstream.SDKLogger(g.logger.With("server", name)),
 		})
 	h = upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, g.endListenOnDrain(h))
 	inner := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !mirror.Ready() {
+		if !ready(r) {
 			w.Header().Set("Retry-After", upstream.RetryAfter)
 			http.Error(w, "Service Unavailable: the server has not connected yet", http.StatusServiceUnavailable)
 			return
@@ -320,14 +343,14 @@ func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 		inner.ServeHTTP(w, r)
 	})
 	h = http.NewCrossOriginProtection().Handler(h)
-	if tokens := g.cfg.EffectiveTokens(s.name); tokens != nil {
-		h = upstream.RequireToken(upstream.NewTokens(tokens), h)
+	if authorize != nil {
+		h = authorize(h)
 	}
 	h = upstream.AllowHosts(g.cfg.Listen.AllowedHosts, h)
-	if s.cfg.Log.Requests {
-		h = upstream.LogRequests(g.logger, s.name, remote, h)
+	if logRequests {
+		h = upstream.LogRequests(g.logger, name, remote, h)
 	}
-	return upstream.Recover(g.logger, s.name, h)
+	return upstream.Recover(g.logger, name, h)
 }
 
 // endListenOnDrain cancels a subscriptions/listen request when shutdown begins. The body has

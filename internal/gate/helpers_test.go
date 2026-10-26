@@ -169,8 +169,10 @@ type clientOpts struct {
 	version  string // protocol version to offer; "" for the latest
 	header   string // Authorization header; "" sends "Bearer <laptopToken>"
 	noHeader bool
-	progress func(*mcp.ProgressNotificationClientRequest)
-	changed  func()
+	// aggregate connects to the aggregate endpoint; the server name is then ignored.
+	aggregate bool
+	progress  func(*mcp.ProgressNotificationClientRequest)
+	changed   func()
 }
 
 // connect opens a client session to server on the gate.
@@ -201,6 +203,10 @@ func (r *running) dial(t *testing.T, server string, o clientOpts) (*mcp.ClientSe
 		copts.ToolListChangedHandler = func(context.Context, *mcp.ToolListChangedRequest) { f() }
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1"}, copts)
+	endpoint := r.base + "/" + server + "/mcp"
+	if o.aggregate {
+		endpoint = r.base + config.AggregatePath
+	}
 	var sopts *mcp.ClientSessionOptions
 	if o.version != "" {
 		sopts = &mcp.ClientSessionOptions{ProtocolVersion: o.version}
@@ -208,7 +214,7 @@ func (r *running) dial(t *testing.T, server string, o clientOpts) (*mcp.ClientSe
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:             r.base + "/" + server + "/mcp",
+		Endpoint:             endpoint,
 		HTTPClient:           &http.Client{Transport: tokenTransport{header: header, next: base}},
 		MaxRetries:           -1,
 		DisableStandaloneSSE: true,

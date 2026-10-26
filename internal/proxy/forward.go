@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/yosida95/uritemplate/v3"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
@@ -339,6 +340,22 @@ func (m *Mirror) mirrored(key, name string) bool {
 	return ok
 }
 
+// serves reports whether the mirrored catalog lists the resource URI or has a template that
+// matches it, as the SDK checks before a read on the server's route.
+func (m *Mirror) serves(uri string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.resources[uri]; ok {
+		return true
+	}
+	for ut := range m.templates {
+		if t, err := uritemplate.New(ut); err == nil && t.Regexp().MatchString(uri) {
+			return true
+		}
+	}
+	return false
+}
+
 // reachedKey marks, in a request's context, whether the request reached a mirror handler.
 type reachedKey struct{}
 
@@ -372,13 +389,20 @@ func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
 		reached := new(bool)
 		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
 		if err != nil && !*reached {
-			c := m.begin(ctx, method, req.GetExtra(), key, m.logText(name))
-			c.outcome = outcomeError
-			if !m.mirrored(key, name) {
-				c.outcome = outcomeDenied
-			}
-			c.end()
+			m.refused(ctx, method, req.GetExtra(), key, name, false)
 		}
 		return res, err
 	}
+}
+
+// refused writes the audit line of a tool call, prompt get or resource read (key "tool",
+// "prompt" or "uri") that did not reach a handler: denied when the name is not in the mirrored catalog or hidden is set, an
+// error otherwise.
+func (m *Mirror) refused(ctx context.Context, method string, extra *mcp.RequestExtra, key, name string, hidden bool) {
+	c := m.begin(ctx, method, extra, key, m.logText(name))
+	c.outcome = outcomeError
+	if hidden || !m.mirrored(key, name) {
+		c.outcome = outcomeDenied
+	}
+	c.end()
 }
