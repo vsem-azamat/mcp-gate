@@ -25,7 +25,7 @@ escrow:
   ttl: 24h
   maxEntries: 1000
   sourceArguments: [chat_id, message_id, ticket]
-  socket: {path: /run/mcp-gate/escrow.sock}   # keyless for the gate's own user
+  socket: {path: /run/mcp-gate/escrow.sock, allowUIDs: [1001]}   # user 1001 needs no key
 servers:
   notes:
     stdio:
@@ -90,7 +90,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `escrow.sourceArguments` | `chat_id message_id message_ids topic_id reply_to space space_name message_name thread_name attachment_name conversation_id conversationId channel_id chat peer messageId threadId account` | Call arguments copied into an entry's `source` in the API's meta, to tell where a secret came from. Only short single-line strings, numbers, booleans and short lists are copied; `[]` copies none |
 | `escrow.tcp` | `true` | Serve the API at `/_escrow/` on `listen.addr`. `false` leaves it only on `escrow.socket` (which it then needs); `/_escrow/` on the listener is 404 |
 | `escrow.socket.path` | required with `socket` | Absolute path of a unix socket that serves the same API, at most 103 bytes. The parent directory is created 0700 if missing; a stale socket file is replaced, anything else there stops the start; the file is removed at shutdown |
-| `escrow.socket.allowUIDs` | the gate's user | User IDs served on the socket without a key, read from the kernel (`SO_PEERCRED`, `LOCAL_PEERCRED`). Other users need the key, as on the listener; `[]` makes everyone need it |
+| `escrow.socket.allowUIDs` | none | User IDs served on the socket without a key, read from the kernel (`SO_PEERCRED`, `LOCAL_PEERCRED`). Every process of a listed user outside the gate's tree is trusted; on Linux the gate and its descendants (the stdio servers) still need the key, on macOS they do not (see [serve](../commands/serve.md#escrow-socket)). Other users need the key, as on the listener |
 | `escrow.socket.mode` | `0600` | Permission bits of the socket file, in octal. Wider modes let other users connect; they still need the key |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |

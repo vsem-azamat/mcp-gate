@@ -107,9 +107,9 @@ type Escrow struct {
 type EscrowSocket struct {
 	// Path is the absolute path of the socket.
 	Path string `yaml:"path"`
-	// AllowUIDs are the user IDs of peers served without a key; nil means the gate's own user
-	// and an empty list none.
-	AllowUIDs []int `yaml:"allowUIDs"`
+	// AllowUIDs are the user IDs of peers served without a key, unless the peer is the gate or
+	// its descendant (on Linux); nil or empty means none.
+	AllowUIDs []int `yaml:"allowUIDs,omitempty"`
 	// Mode is the socket file's permission bits; nil means DefaultEscrowSocketMode.
 	Mode *FileMode `yaml:"mode,omitempty"`
 }

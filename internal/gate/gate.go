@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -241,14 +240,10 @@ func (g *Gate) replacer(name string, s *config.Server) proxy.ReplacerFunc {
 	return nil
 }
 
-// socketUIDs returns the user IDs the escrow socket serves without a key: the configured ones,
-// or the gate's own user.
+// socketUIDs returns the user IDs the escrow socket serves without a key: only those listed.
 func socketUIDs(s *config.EscrowSocket) []int {
-	switch {
-	case s == nil:
-		return nil
-	case s.AllowUIDs == nil:
-		return []int{os.Geteuid()}
+	if s == nil || s.AllowUIDs == nil {
+		return []int{}
 	}
 	return s.AllowUIDs
 }

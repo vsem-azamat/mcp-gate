@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -93,11 +94,14 @@ func TestSocketPeerAuth(t *testing.T) {
 			sock := filepath.Join(shortDir(t), "escrow.sock")
 			serveSocket(t, e, sock)
 
+			// The client is the gate's own process: on Linux it needs the key even when its user
+			// ID is allowed (see TestSocketProcessTree); macOS does not check the process tree.
+			keyless := c.keyless && runtime.GOOS == "darwin"
 			code, body := socketGet(t, sock, http.MethodGet, "/_escrow/"+handle, "")
-			if c.keyless && (code != http.StatusOK || body != "Qwerty-12345") {
+			if keyless && (code != http.StatusOK || body != "Qwerty-12345") {
 				t.Errorf("without a key = %d %q, want the value", code, body)
 			}
-			if !c.keyless && code != http.StatusUnauthorized {
+			if !keyless && code != http.StatusUnauthorized {
 				t.Errorf("without a key = %d, want 401", code)
 			}
 			if code, body := socketGet(t, sock, http.MethodGet, "/_escrow/"+handle, testKey); code != http.StatusOK || body != "Qwerty-12345" {

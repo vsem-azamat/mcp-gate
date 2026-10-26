@@ -80,8 +80,9 @@ func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		client = e.remote(r)
 	}
-	// A socket peer whose user ID the kernel reported and that is allowed needs no key.
-	keyless := viaSocket && sp.known && e.allowed[sp.uid]
+	// A socket peer whose user ID the kernel reported, that is allowed and that is not the gate
+	// or one of its descendants needs no key.
+	keyless := viaSocket && sp.known && sp.outsideGate && e.allowed[sp.uid]
 	defer func() {
 		e.logger.Info("escrow access", "op", op, "handle", logHandle, "status", status, "remote", client)
 	}()

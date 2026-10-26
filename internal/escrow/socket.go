@@ -16,18 +16,21 @@ import (
 type peerKey struct{}
 
 // sockPeer is the user of a unix socket peer; known is false when the system did not say.
+// outsideGate is true only when the peer is known not to be the gate or one of its descendants.
 type sockPeer struct {
-	uid   int
-	known bool
+	uid         int
+	known       bool
+	outsideGate bool
 }
 
 // ConnContext is an http.Server's ConnContext for the escrow socket: it records the peer's user
-// ID, read from the kernel, in the context of the connection's requests.
+// ID, read from the kernel when the peer connected, in the context of the connection's
+// requests, and whether the peer is outside the gate's process tree (see outsideGateTree).
 func ConnContext(ctx context.Context, c net.Conn) context.Context {
 	p := sockPeer{}
 	if uc, ok := c.(*net.UnixConn); ok {
-		if uid, err := peerUID(uc); err == nil {
-			p = sockPeer{uid: uid, known: true}
+		if uid, pid, err := peerCred(uc); err == nil {
+			p = sockPeer{uid: uid, known: true, outsideGate: outsideGateTree(pid)}
 		}
 	}
 	return context.WithValue(ctx, peerKey{}, p)
@@ -95,16 +98,16 @@ func ListenSocket(ctx context.Context, path string, mode fs.FileMode) (*net.Unix
 	return ul, nil
 }
 
-// peerUID reads the user ID of the process at the other end of c.
-func peerUID(c *net.UnixConn) (int, error) {
+// peerCred reads the user ID and process ID of the process at the other end of c; the process
+// ID is 0 where the system does not report it.
+func peerCred(c *net.UnixConn) (uid, pid int, err error) {
 	raw, err := c.SyscallConn()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	var uid int
 	var credErr error
-	if err := raw.Control(func(fd uintptr) { uid, credErr = fdPeerUID(int(fd)) }); err != nil {
-		return 0, err
+	if err := raw.Control(func(fd uintptr) { uid, pid, credErr = fdPeerCred(int(fd)) }); err != nil {
+		return 0, 0, err
 	}
-	return uid, credErr
+	return uid, pid, credErr
 }

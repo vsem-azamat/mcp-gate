@@ -23,7 +23,10 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/testkit"
 )
 
-func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+func TestMain(m *testing.M) {
+	runSocketClient() // the test binary as a socket client, for the process-tree tests
+	goleak.VerifyTestMain(m)
+}
 
 const testKey = "test-escrow-key-0123456789abcdef"
 

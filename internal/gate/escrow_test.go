@@ -298,9 +298,12 @@ func TestEscrowSocket(t *testing.T) {
 			if m == nil {
 				t.Fatalf("result = %q", textOf(t, res))
 			}
-			// The gate's own user needs no key on the socket; the key works there too.
-			if code, body := socketGet(t, sock, http.MethodGet, "/_escrow/"+m[2]); code != http.StatusOK || body != secret {
-				t.Errorf("socket without a key = %d %q", code, body)
+			// By default no user is served without the key on the socket.
+			if code, _ := socketGet(t, sock, http.MethodGet, "/_escrow/"+m[2]); code != http.StatusUnauthorized {
+				t.Errorf("socket without a key = %d, want 401", code)
+			}
+			if code, body := socketGet(t, sock, http.MethodGet, "/_escrow/"+m[2], "Authorization", "Bearer "+escrowKey); code != http.StatusOK || body != secret {
+				t.Errorf("socket with the key = %d %q", code, body)
 			}
 			if code, body := socketGet(t, sock, http.MethodGet, "/_escrow/"+m[2]+"/meta", "Authorization", "Bearer "+escrowKey); code != http.StatusOK || !strings.Contains(body, `"source":{"chat_id":42}`) {
 				t.Errorf("socket meta with the key = %d %q", code, body)

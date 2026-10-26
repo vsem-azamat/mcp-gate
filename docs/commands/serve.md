@@ -82,14 +82,14 @@ A wrong or missing key is 401 on every path; 20 wrong keys from one client addre
 
 ### Escrow socket
 
-With `escrow.socket`, the same API is also served on a unix socket. The kernel tells the gate which user connected; a user in `escrow.socket.allowUIDs` (by default the gate's own user) needs no key there, and any other user needs the key, exactly as on the listener. With `escrow.tcp: false` the listener no longer answers `/_escrow/`, so a reverse proxy in front of the gate cannot reach the API at all.
+With `escrow.socket`, the same API is also served on a unix socket. By default it needs the key like the listener. The kernel tells the gate which user connected; a user listed in `escrow.socket.allowUIDs` needs no key there, and any other user needs the key, exactly as on the listener. With `escrow.tcp: false` the listener no longer answers `/_escrow/`, so a reverse proxy in front of the gate cannot reach the API at all.
 
 ```console
 $ curl -s --unix-socket /run/mcp-gate/escrow.sock http://escrow/_escrow/k3j5rz2q7wd/meta
 {"handle":"k3j5rz2q7wd","type":"password",…}
 ```
 
-Every process of an allowed user is trusted: that includes the gate's stdio servers, which run as the gate's user, and a local reverse proxy that would forward to the socket. When that matters, run the gate as its own user and list the reader's user ID in `allowUIDs`, or set `allowUIDs: []`.
+Listing a user ID trusts every process of that user outside the gate's process tree: a shell, an agent, a reverse proxy that would forward to the socket. On Linux the gate itself and its descendants, its stdio servers and anything they start, still need the key even when their user ID is listed: the gate reads the peer's process ID from the kernel and walks its parents, and a peer it cannot place needs the key too. On macOS the process tree is not checked, so listing the gate's own user ID also lets its stdio servers read every escrowed secret; there, run the gate as a user of its own and list only the reader's user ID.
 
 The access log names a socket client `unix:uid=<n>`, and the failed-auth limit counts per user ID. Where the system does not report the peer's user (on systems other than Linux and macOS), every socket request needs the key.
 

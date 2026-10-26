@@ -87,12 +87,22 @@ The API SHALL be served at `/_escrow/` on the main listener, outside the MCP rou
 
 With `escrow.socket` set and the escrow on, the gate SHALL also serve the API, with the same paths, answers and logs, on a unix socket at `escrow.socket.path`, and nothing else there (any other path is 404). At start it SHALL create the socket's parent directory with mode 0700 when it is missing; remove a socket file already at the path when nothing accepts connections on it; refuse to start (status 2) when the path holds anything other than a socket, or a socket another process listens on; and set the socket file's mode to `escrow.socket.mode` (default 0600). At shutdown it SHALL remove the socket file. With the escrow off, no socket SHALL be opened, and a warning SHALL say so.
 
-On the socket, the client SHALL be the peer's user ID as the kernel reports it when the peer connected (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS), written `unix:uid=<n>` in the access log and keying the failed-authentication limit. A request from a user ID in `escrow.socket.allowUIDs` (by default only the gate's own user; an empty list allows none) SHALL be served without a key and SHALL NOT spend from the limit. A request from any other user ID, or one whose user ID cannot be read (`unix:uid=unknown`), SHALL need the key exactly as on the listener: it is not refused for its user ID alone. Requests on the listener SHALL never be served without the key. Stdio servers run as the gate's user, so with the default `allowUIDs` they too can read a secret through the socket without the key when they can reach its path and know its handle.
+On the socket, the client SHALL be the peer's user ID as the kernel reports it when the peer connected (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS), written `unix:uid=<n>` in the access log and keying the failed-authentication limit. A request SHALL be served without a key, and SHALL NOT spend from the limit, only when its user ID is listed in `escrow.socket.allowUIDs` (by default empty, so every socket request needs the key) and the peer is outside the gate's process tree. On Linux the gate SHALL read the peer's process ID from `SO_PEERCRED` and walk the parent IDs in `/proc/<pid>/stat`: a peer that is the gate itself or one of its descendants (its stdio servers and their children; the gate is a child subreaper, so orphaned descendants stay in its tree), or whose process or ancestors cannot be read, SHALL need the key. On macOS the process tree SHALL NOT be checked: a listed user ID is served without a key whatever its process, the gate's descendants included. A request from any other user ID, or one whose user ID cannot be read (`unix:uid=unknown`), SHALL need the key exactly as on the listener: it is not refused for its user ID alone. Requests on the listener SHALL never be served without the key. Listing a user ID trusts every process of that user outside the gate's tree, such as a shell, an agent or a reverse proxy running as that user.
 
-#### Scenario: Own user without a key
+#### Scenario: Default
 
-- **WHEN** the gate's own user requests a live handle's value on the socket without an `Authorization` header
-- **THEN** it gets 200 with the value, and the access log names `unix:uid=<its uid>`
+- **WHEN** `allowUIDs` is left out and any process requests a live handle's value on the socket without an `Authorization` header
+- **THEN** it gets 401, and the access log names `unix:uid=<its uid>`; with the key it is served
+
+#### Scenario: Listed user outside the gate's tree
+
+- **WHEN** `allowUIDs` lists the peer's user ID and the peer is not a descendant of the gate
+- **THEN** a request without a key gets 200 with the value
+
+#### Scenario: Gate's descendant on Linux
+
+- **WHEN** `allowUIDs` lists the gate's own user ID and a child of the gate (such as a stdio server) requests a value without a key
+- **THEN** it gets 401
 
 #### Scenario: Other user
 
