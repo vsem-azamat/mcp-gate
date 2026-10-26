@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // maxJSONDepth bounds how far JSON nested inside JSON strings is followed.
@@ -49,6 +51,17 @@ func (e *Engine) redactJSONValue(secretKind, value string, r Replacer, depth int
 	return e.redactString(value, r, depth)
 }
 
+// namesBudgetFallbacks counts the objects whose names were kept apart from the replacements
+// only, because the scan budget was spent; tests read it.
+var namesBudgetFallbacks atomic.Int64
+
+// The bytes objectNames may read in one document: namesScanFactor times its size, plus
+// namesScanSlack.
+const (
+	namesScanFactor = 8
+	namesScanSlack  = 1 << 20
+)
+
 // errBadString reports a string literal that does not decode; it cannot happen for valid JSON.
 var errBadString = errors.New("redact: undecodable JSON string")
 
@@ -62,8 +75,19 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 		// inherited is the secret kind of an enclosing secret member: every value below it is
 		// secret unless its own name says otherwise.
 		inherited string
+		// start is the offset of an object's opening brace; taken holds the names of its
+		// members as written and those given to replaced names, once a name is replaced.
+		start int
+		taken map[string]bool
+		// next is the suffix to try next for each replacement, so that many names replaced
+		// alike cost linear time.
+		next map[string]int
 	}
 	stack := make([]frame, 0, 8)
+	// scanBudget bounds the bytes objectNames reads, which nested objects with replaced names
+	// would otherwise make quadratic.
+	scanBudget := namesScanFactor*len(data) + namesScanSlack
+	cleanNames := map[string]struct{}{}
 	currentKey := func() string {
 		if len(stack) == 0 {
 			return ""
@@ -89,7 +113,7 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 	for i := 0; i < len(data); {
 		switch data[i] {
 		case '{':
-			stack = append(stack, frame{object: true, expectKey: true, inherited: secretKind()})
+			stack = append(stack, frame{object: true, expectKey: true, inherited: secretKind(), start: i})
 			i++
 		case '[':
 			// Elements of an array inherit the member name it is stored under.
@@ -131,7 +155,31 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 				return nil, errBadString
 			}
 			if len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectKey {
-				stack[len(stack)-1].key = decoded
+				top := &stack[len(stack)-1]
+				// The name as written marks the value; a name that holds a secret itself
+				// ({"<token>": "repo"}) is replaced as a string value would be.
+				top.key = decoded
+				// Most documents repeat a few clean names many times; they are scanned once.
+				if _, clean := cleanNames[decoded]; clean {
+					i = end
+					continue
+				}
+				if redacted := e.redactJSONValue("", decoded, r, depth); redacted == decoded {
+					cleanNames[decoded] = struct{}{}
+				} else {
+					out.Write(data[last:i])
+					if top.taken == nil {
+						// Past the budget, names are kept apart from the replacements only.
+						names, ok := objectNames(data, top.start, &scanBudget)
+						if !ok {
+							namesBudgetFallbacks.Add(1)
+							names = map[string]bool{}
+						}
+						top.taken, top.next = names, map[string]int{}
+					}
+					out.Write(encodeJSONString(uniqueName(top.taken, top.next, redacted)))
+					last = end
+				}
 			} else if redacted := e.redactJSONValue(secretKind(), decoded, r, depth); redacted != decoded {
 				out.Write(data[last:i])
 				out.Write(encodeJSONString(redacted))
@@ -147,6 +195,68 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 	}
 	out.Write(data[last:])
 	return out.Bytes(), nil
+}
+
+// uniqueName returns name, or name#2, name#3 and so on, whichever is not taken yet, and takes
+// it, so that no member of an object is lost to a duplicate name. next remembers where the
+// search for name stopped.
+func uniqueName(taken map[string]bool, next map[string]int, name string) string {
+	candidate := name
+	n := max(next[name], 2)
+	for taken[candidate] {
+		candidate = name + "#" + strconv.Itoa(n)
+		n++
+	}
+	next[name] = n
+	taken[candidate] = true
+	return candidate
+}
+
+// objectNames returns the decoded member names of the object whose opening brace is at
+// data[start], spending the bytes it reads from budget; ok is false when budget runs out.
+// data is valid JSON.
+func objectNames(data []byte, start int, budget *int) (names map[string]bool, ok bool) {
+	if *budget < 0 {
+		return nil, false
+	}
+	names = map[string]bool{}
+	depth, expectKey := 0, false
+	for i := start; i < len(data); {
+		if *budget--; *budget < 0 {
+			return nil, false
+		}
+		switch data[i] {
+		case '{':
+			depth++
+			expectKey = depth == 1
+			i++
+		case '[':
+			depth++
+			i++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return names, true
+			}
+			i++
+		case ',':
+			expectKey = depth == 1
+			i++
+		case '"':
+			end := jsonStringEnd(data, i)
+			if expectKey {
+				if name, err := decodeJSONString(data[i:end]); err == nil {
+					names[name] = true
+				}
+				expectKey = false
+			}
+			*budget -= end - i - 1
+			i = end
+		default:
+			i++
+		}
+	}
+	return names, true
 }
 
 // jsonStringEnd returns the index just past the closing quote of the string literal starting at

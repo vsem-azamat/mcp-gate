@@ -194,10 +194,11 @@ func TestOverlappingFindingsAreMerged(t *testing.T) {
 			value: "hunter22," + token,
 		},
 		{
+			// An unquoted value ends at an escaped line break, so the two stay apart.
 			name:  "password and token across an escaped newline",
 			text:  `password: hunter22\n` + token + " tail",
-			want:  "password: [REDACTED:github_token] tail",
-			value: `hunter22\n` + token,
+			want:  `password: [REDACTED:password]\n[REDACTED:github_token] tail`,
+			value: "hunter22",
 		},
 		{
 			name: "one value over two higher-priority findings",

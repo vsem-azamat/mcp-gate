@@ -470,6 +470,41 @@ func trimTrailingPunctuation(text string, start, end int) int {
 	return end
 }
 
+// minValueBeforeBreak is the length an unquoted value needs before an escaped line break to end
+// there: a part that long is a credential on its own, while a shorter one may be the start of
+// a value that holds the break, which is then replaced whole.
+const minValueBeforeBreak = 8
+
+// narrowAtBreaks narrows an unquoted value text[start:end] at escaped line breaks and tabs: the
+// ones it starts with are dropped when what is left is still a credential, and it ends at the
+// first escaped line break when the part before it has at least minValueBeforeBreak characters
+// and is a credential. Otherwise the value is kept whole, so the narrowing never lets through
+// what the whole value would have replaced.
+func narrowAtBreaks(text string, start, end int) (int, int) {
+	s := start
+	for s < end && (text[s] == maskedBreak || text[s] == maskedTab) {
+		s++
+	}
+	if s > start && s < end && redactedAlone(text, s, end, 0) {
+		start = s
+	}
+	if i := strings.Index(text[start:end], maskedBreakPair); i >= 0 && redactedAlone(text, start, start+i, minValueBeforeBreak) {
+		end = start + i
+	}
+	return start, end
+}
+
+// redactedAlone reports whether text[start:end], as keyValueAccept would trim it and without
+// surrounding space, has at least
+// minRunes characters and is no placeholder, so that it would be replaced on its own.
+func redactedAlone(text string, start, end, minRunes int) bool {
+	v := strings.TrimSpace(text[start:trimTrailingPunctuation(text, start, end)])
+	return utf8.RuneCountInString(v) >= minRunes && !isPlaceholderValue(v)
+}
+
+// maskedBreakPair is an escaped line break as the rules see it.
+var maskedBreakPair = string([]byte{maskedBreak, maskedBreak})
+
 // keyValueAccept validates a key-value match whose key is in group 1 and whose value is the
 // selected span. Groups after quotedGroups hold unquoted values.
 func keyValueAccept(classify func(string) (string, bool), quotedGroups int) acceptFunc {
@@ -482,6 +517,7 @@ func keyValueAccept(classify func(string) (string, bool), quotedGroups int) acce
 		// Unquoted values (the last group) can carry trailing punctuation.
 		last := len(match)/2 - 1
 		if quotedGroups < last && match[2*last] == start {
+			start, end = narrowAtBreaks(text, start, end)
 			end = trimTrailingPunctuation(text, start, end)
 		}
 		value := text[start:end]
