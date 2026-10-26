@@ -29,6 +29,7 @@ func fuzzSeeds() []string {
 		`{"token":{"access":"abcdef123","type":"Bearer"},"password":12345678,"x":"{\"pwd\":\"zz9\"}"}`,
 		`[{"Authorization":"Basic ` + fake("", 20) + `"},"password: xpy-123"]`,
 		"\\\\n\\n\\\x00password\u200b：\u00a0zz",
+		"db:\n  password:\r\n    hunter22\n  token:\nuser: x\napi_key =\n'sk12345678';",
 	}
 }
 
@@ -200,4 +201,55 @@ func shape(t *testing.T, data []byte) string {
 	default:
 		return "null"
 	}
+}
+
+// FuzzKeyLineRegions checks that the next-line key-value rule, matching only the regions
+// keyLineRegions returns, finds spans in order and apart, and every span it finds when it
+// matches the whole text (which misses a key line right after another). It also checks the key
+// line window: after a line longer than the window, the text gives the same spans. Inputs with a
+// line as long as the window are skipped, since the regions bound how much of a line they hold.
+func FuzzKeyLineRegions(f *testing.F) {
+	for _, seed := range fuzzSeeds() {
+		f.Add(seed)
+	}
+	e := newEngine(f, Options{})
+	var regional *rule
+	for _, r := range e.rules {
+		if r.priority == priorityKeyValueNextLine {
+			regional = r
+		}
+	}
+	whole := *regional
+	whole.regions = nil
+	padding := strings.Repeat("x", 2*maxKeyLineWindow) + " "
+	f.Fuzz(func(t *testing.T, text string) {
+		for line := range strings.SplitSeq(text, "\n") {
+			if len(line) >= maxKeyLineWindow {
+				return
+			}
+		}
+		masked := maskEscapedBreaks(text)
+		got := e.ruleSpans(regional, masked)
+		for i := 1; i < len(got); i++ {
+			if got[i].start < got[i-1].end {
+				t.Fatalf("spans out of order or overlapping: %+v", got)
+			}
+		}
+		padded := e.ruleSpans(regional, maskEscapedBreaks(padding+text))
+		for i := range padded {
+			padded[i].start -= len(padding)
+			padded[i].end -= len(padding)
+		}
+		if !slices.Equal(got, padded) {
+			t.Fatalf("after a long line: %+v, alone: %+v", padded, got)
+		}
+		if !containsAny(strings.ToLower(masked), keyValuePrefilter) {
+			return
+		}
+		for _, s := range e.ruleSpans(&whole, masked) {
+			if !slices.Contains(got, s) {
+				t.Fatalf("the whole text gives %+v, the regions %+v", s, got)
+			}
+		}
+	})
 }

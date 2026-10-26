@@ -2,6 +2,7 @@ package redact
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -110,6 +111,7 @@ func TestRuleOrder(t *testing.T) {
 		{"url_password", setCore},
 		{"env_secret", setCore},
 		{"secret", setCore}, // key: value
+		{"secret", setCore}, // key: and the value on the next line
 		{"secret", setCore}, // --flag value
 		{"secret", setCore}, // "key": "value" fragment
 		{"high_entropy", setHighEntropy},
@@ -309,6 +311,21 @@ func TestLargeInputsStayFast(t *testing.T) {
 		_ = e.RedactString(text, Marker{})
 		if elapsed := time.Since(start); elapsed > limit {
 			t.Errorf("%d bytes took %v", len(text), elapsed)
+		}
+	}
+}
+
+// keyValueSeparator and keyValueSeparators must name the same separators.
+func TestKeyValueSeparators(t *testing.T) {
+	t.Parallel()
+
+	re := regexp.MustCompile(`^` + keyValueSeparator + `$`)
+	for _, a := range []string{"", ":", "=", ">", "：", "-"} {
+		for _, b := range []string{"", ":", "=", ">", "：", "-"} {
+			candidate := a + b
+			if want := slices.Contains(keyValueSeparators, candidate); re.MatchString(candidate) != want {
+				t.Errorf("%q: expression matches %v, list has it %v", candidate, !want, want)
+			}
 		}
 	}
 }

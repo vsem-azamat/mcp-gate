@@ -234,8 +234,28 @@ func containsAny(text string, needles []string) bool {
 
 // ruleSpans returns the accepted matches of one rule, in order.
 func (e *Engine) ruleSpans(r *rule, text string) []span {
+	if r.regions == nil {
+		return e.matchSpans(r, text, r.re.FindAllStringSubmatchIndex(text, -1), nil)
+	}
 	var spans []span
-	for _, match := range r.re.FindAllStringSubmatchIndex(text, -1) {
+	for _, region := range r.regions(text) {
+		match := r.re.FindStringSubmatchIndex(text[region.start:region.end])
+		if match == nil {
+			continue
+		}
+		for k := range match {
+			if match[k] >= 0 {
+				match[k] += region.start
+			}
+		}
+		spans = e.matchSpans(r, text, [][]int{match}, spans)
+	}
+	return spans
+}
+
+// matchSpans appends to spans the accepted matches of r, whose indexes refer to text.
+func (e *Engine) matchSpans(r *rule, text string, matches [][]int, spans []span) []span {
+	for _, match := range matches {
 		start, end := match[0], match[1]
 		if len(r.groups) > 0 {
 			start, end = -1, -1

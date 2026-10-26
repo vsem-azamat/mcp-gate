@@ -29,6 +29,10 @@ type rule struct {
 	prefilter []string
 	// precheck, when set, is a cheap scan that must pass for the rule to run.
 	precheck func(text string) bool
+	// regions, when set, returns the parts of the text the expression runs over, each holding at
+	// most one match, so only the first is taken. They may overlap, but what is accepted in one
+	// must end before what is accepted in the next starts. None means the rule does not run.
+	regions func(text string) []region
 	// accept validates a candidate and may narrow it or change its kind ("" keeps the rule's
 	// kind). It receives the whole text, the submatch indexes and the selected span.
 	accept acceptFunc
@@ -95,15 +99,37 @@ const (
 	priorityURLPassword      = 250
 	priorityEnvAssignment    = 300
 	priorityKeyValue         = 310
+	priorityKeyValueNextLine = 315
 	priorityCLIFlag          = 320
 	priorityJSONFragment     = 330
 	priorityHighEntropy      = 900
 	priorityRussianLabel     = 910
 )
 
-// zeroWidth matches the invisible characters sometimes used to break up a label
-// ("pass\u200bword:").
-const zeroWidth = `[\x{200B}-\x{200D}\x{2060}\x{FEFF}]*`
+// zeroWidthChars are the invisible characters sometimes used to break up a label
+// ("pass\u200bword:"), and zeroWidth matches a run of them.
+const (
+	zeroWidthChars = "\u200b\u200c\u200d\u2060\ufeff"
+	zeroWidth      = `[` + zeroWidthChars + `]*`
+)
+
+// separatorSpace is the space the key-value rules allow around a separator.
+const separatorSpace = " \t\u00a0"
+
+// keyValueSeparators are the separators of a key-value pair, and keyValueSeparator matches one
+// of them; TestKeyValueSeparators keeps the two in step. The expression is written with a
+// character class, which the regexp engine runs faster than an alternation of single letters.
+var keyValueSeparators = []string{":=", "=>", ":", "=", "："}
+
+const keyValueSeparator = `(?::=|=>|[:=]|：)`
+
+// keyValueKey matches the key of a "key: value" pair (group 1) and its separator. The key may
+// carry any prefix (MYSQL_ROOT_PASSWORD, userPassword); proseKeyKind classifies it.
+const keyValueKey = `(?:^|[^A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{0,64}?(?:password|passwd|pwd|passphrase|pass|secret|api[_\-. ]?key|apikey|token|private[_\-]?key|secret[_\-]?key))` +
+	zeroWidth + `["']?[` + separatorSpace + `]*` + keyValueSeparator
+
+// keyValuePrefilter holds the substrings one of which a key of keyValueKey contains.
+var keyValuePrefilter = []string{"pass", "pwd", "secret", "key", "token"}
 
 var coreRules = []*rule{
 	{
@@ -230,16 +256,28 @@ var coreRules = []*rule{
 	},
 	{
 		// "password: x", "api_key = x", "token=x", "password := x" in prose, YAML, INI, code
-		// and query strings. The key may carry any prefix (MYSQL_ROOT_PASSWORD, userPassword);
-		// proseKeyKind classifies it.
-		kind:     kindSecret,
-		priority: priorityKeyValue,
-		re: regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{0,64}?(?:password|passwd|pwd|passphrase|pass|secret|api[_\-. ]?key|apikey|token|private[_\-]?key|secret[_\-]?key))` +
-			zeroWidth + `["']?[ \t\x{00A0}]*(?::=|=>|[:=]|：)[ \t\x{00A0}]*(?:"([^"\r\n]{1,})"|'([^'\r\n]{1,})'|([^\s"'<>&]{1,}))`),
+		// and query strings.
+		kind:      kindSecret,
+		priority:  priorityKeyValue,
+		re:        regexp.MustCompile(`(?i)` + keyValueKey + `[` + separatorSpace + `]*(?:"([^"\r\n]{1,})"|'([^'\r\n]{1,})'|([^\s"'<>&]{1,}))`),
 		groups:    []int{2, 3, 4},
-		prefilter: []string{"pass", "pwd", "secret", "key", "token"},
+		prefilter: keyValuePrefilter,
 		precheck:  func(text string) bool { return strings.ContainsAny(text, ":=：") },
-		accept:    keyValueAccept(proseKeyKind, 3),
+		accept:    proseKeyValueAccept,
+	},
+	{
+		// "password:" at the end of a line and the value alone on the next one ("password:\n
+		// hunter22", YAML's "password:\n  hunter22"). A separate rule rather than an optional
+		// line break in the rule above, so that a next line it rejects is still scanned by that
+		// rule. Each key line is matched on its own region, so a key line after it
+		// ("token:\nabc…", "API_KEY=\nabc…") is matched with its own value.
+		kind:     kindSecret,
+		priority: priorityKeyValueNextLine,
+		re: regexp.MustCompile(`(?im)` + keyValueKey + `[` + keyLineEndSpace + `]*\r?\n[` + separatorSpace + `]*` +
+			`(?:"([^"\r\n]{1,})"|'([^'\r\n]{1,})'|([^\s"'<>&]*[^\s"'<>&:]))[,;]?[` + separatorSpace + `]*\r?$`),
+		groups:  []int{2, 3, 4},
+		regions: keyLineRegions,
+		accept:  nextLineValueAccept,
 	},
 	{
 		// Command-line flags: --password x, --token=x.

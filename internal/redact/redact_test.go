@@ -225,6 +225,109 @@ func TestExactOutput(t *testing.T) {
 	}
 }
 
+// A key at the end of a line takes the next line as its value when that line holds the value
+// alone and is not a key, an assignment, a URL or Markdown structure of its own.
+func TestValueOnTheNextLine(t *testing.T) {
+	t.Parallel()
+
+	for text, want := range map[string]string{
+		pw + ":\nhunter22":                              pw + ":\n[REDACTED:password]",
+		pw + ":\nabc12":                                 pw + ":\n[REDACTED:password]",
+		pw + ":\r\nhunter22\r\nnext":                    pw + ":\r\n[REDACTED:password]\r\nnext",
+		pw + ": \t\n\thunter22 \nnext line":             pw + ": \t\n\t[REDACTED:password] \nnext line",
+		"db:\n  " + pw + ":\n    hunter22\n  user: bob": "db:\n  " + pw + ":\n    [REDACTED:password]\n  user: bob",
+		"api_key =\n  \"sk12345678\"":                   "api_key =\n  \"[REDACTED:secret]\"",
+		"$token =>\n  'abc12345',":                      "$token =>\n  '[REDACTED:secret]',",
+		// Generated passwords that hold "=".
+		pw + ":\nKj8=xP2qLm":          pw + ":\n[REDACTED:password]",
+		pw + ":\nHunter=22x":          pw + ":\n[REDACTED:password]",
+		pw + ":\nabc==":               pw + ":\n[REDACTED:password]",
+		"if_password:\nAbc12345":      "if_password:\n[REDACTED:password]",
+		"TOKEN：\nabc12345":            "TOKEN：\n[REDACTED:secret]",
+		"PASSWORD=\nTOKEN：\nabc12345": "PASSWORD=\nTOKEN：\n[REDACTED:secret]",
+		// A long key line is matched near its separator.
+		strings.Repeat("x", 100000) + " token:\nabc12345":                  strings.Repeat("x", 100000) + " token:\n[REDACTED:secret]",
+		"PASSWORD=\nAPI_KEY=\nrealsecret99":                                "PASSWORD=\nAPI_KEY=\n[REDACTED:secret]",
+		"nextPageToken:\napi_key=\nrealsecret99":                           "nextPageToken:\napi_key=\n[REDACTED:secret]",
+		pw + ": \\t\nhunter22":                                             pw + ": \\t\n[REDACTED:password]",
+		pw + ":\u200b\nhunter22":                                           pw + ":\u200b\n[REDACTED:password]",
+		"token:\nc2VjcmV0dG9rZW4=":                                         "token:\n[REDACTED:secret]",
+		"API_TOKEN=\nabc12345":                                             "API_TOKEN=\n[REDACTED:secret]",
+		pw + "：\u00a0\nhunter22":                                           pw + "：\u00a0\n[REDACTED:password]",
+		"login details\nuser: alice\n" + pw + ":\nCorrect-Horse-9\nThanks": "login details\nuser: alice\n" + pw + ":\n[REDACTED:password]\nThanks",
+		// A key line after the key is matched with its own value.
+		pw + ":\ntoken:\nabc12345": pw + ":\ntoken:\n[REDACTED:secret]",
+		// An escaped line break after the value ends it, as on the key's own line.
+		pw + ":\nhunter22\\nnext": pw + ":\n[REDACTED:password]\\nnext",
+		// A JSON string is scanned decoded, so its \n is a real line break.
+		`{"note":"` + pw + `:\nhunter22"}`: `{"note":"` + pw + `:\n[REDACTED:password]"}`,
+	} {
+		for _, opts := range optionSets {
+			if got := newEngine(t, opts).RedactString(text, Marker{}); got != want {
+				t.Errorf("%+v: %q -> %q, want %q", opts, text, got, want)
+			}
+		}
+	}
+	for _, text := range []string{
+		pw + ":\nusername: alice",
+		// Configuration lines, whatever their value.
+		"SECRET_KEY=\nDEBUG=True",
+		"API_TOKEN=\nTZ=Europe/Prague",
+		"SECRET_KEY=\nAPP_NAME=MyApp",
+		"SECRET_KEY=\ndb_host=",
+		"SECRET_KEY=\n_INTERNAL=1",
+		"SECRET_KEY=\ndebug=",
+		// Code: block headers and their bodies.
+		"case 'token':\n    break;",
+		"case \"" + pw + "\":\n  return;",
+		"if token:\n    return;",
+		"if token:\n    print(token)",
+		"if not token:\n    sys.exit(1)",
+		"if not api_key:\n    usage()",
+		"    elif secret:\n        x",
+		"for token:\n  Abc12345",
+		"API_TOKEN=\nelse",
+		// .env templates.
+		"DB_PASSWORD=\nDB_HOST=\nDB_PORT=5432",
+		"SECRET_KEY=\nDEBUG=\n",
+		"API_TOKEN=\nlog_level=info",
+		// Code: a block header and its body.
+		"if token:\n    return",
+		"while " + pw + ":\n    pass",
+		"if not api_key:\n    continue",
+		"if secret:\n    yield",
+		"if token:\n    return None",
+		// A next line longer than the bound, and a key line whose key is beyond the window.
+		"token:\n" + strings.Repeat("y", maxNextLineValue+1),
+		"token" + strings.Repeat(" ", maxKeyLineWindow) + ":\nabc12345",
+		pw + ":\r\nusername: alice\r\n",
+		pw + ":\nusername:",
+		pw + ":\n  child: x\n  other: y",
+		pw + ":\n  child:\n    x",
+		"## " + pw + ":\nUse the reset link below.",
+		pw + ":\nhunter22 is the one I used",
+		pw + ":\n# Heading",
+		pw + ":\n- item one",
+		pw + ":\n---",
+		pw + ":\n```\ncode\n```",
+		pw + ":\n```yaml",
+		pw + ":\n~~~",
+		pw + ":\n\nhunter22", // one line break only
+		"Reset your " + pw + ":\nhttps://example.com/reset",
+		"API_TOKEN=\nDEBUG=true",
+		pw + ":\nnone",
+		pw + ":\n********",
+		"nextPageToken:\nCAESBggB",
+		pw + ":\n[REDACTED:password]",
+	} {
+		for _, opts := range optionSets {
+			if got := newEngine(t, opts).RedactString(text, Marker{}); got != text {
+				t.Errorf("%+v: %q changed to %q", opts, text, got)
+			}
+		}
+	}
+}
+
 func TestPlaceholdersAreNotSecrets(t *testing.T) {
 	t.Parallel()
 
