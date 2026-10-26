@@ -6,6 +6,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 )
@@ -56,7 +57,7 @@ func TestReadyAfterMirrorsHaveTheTools(t *testing.T) {
 	m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Source: src})
 	var readyAtApply []bool
 	m.Watch(func() { readyAtApply = append(readyAtApply, m.Ready()) })
-	if failed, _ := src.sync(t.Context(), kindAll); failed != 0 {
+	if failed, _ := src.sync(t.Context(), allKinds); failed != 0 {
 		t.Fatalf("failed kinds %b", failed)
 	}
 	if len(readyAtApply) != 1 || readyAtApply[0] {
@@ -80,13 +81,13 @@ func TestMirrorAttachedDuringListing(t *testing.T) {
 		down.during = nil
 		shows = New(Options{Name: "s", Policy: policy.New(&config.Server{}), Source: src})
 	}
-	if failed, _ := src.sync(t.Context(), kindAll); failed != 0 {
+	if failed, _ := src.sync(t.Context(), allKinds); failed != 0 {
 		t.Fatalf("failed kinds %b", failed)
 	}
 	src.mu.Lock()
 	dirty := src.dirty
 	src.mu.Unlock()
-	if dirty&kindPrompts == 0 {
+	if !dirty.has(audit.Prompt) {
 		t.Fatalf("prompts not marked for listing (dirty %b)", dirty)
 	}
 	if failed, _ := src.sync(t.Context(), dirty); failed != 0 {

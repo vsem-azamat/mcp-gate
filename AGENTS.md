@@ -59,6 +59,7 @@ This repository is public. Before every commit and PR, check that nothing privat
 | Path | Contents |
 | --- | --- |
 | `cmd/mcp-gate/` | The `mcp-gate` binary: subcommands, flags, environment |
+| `internal/audit/` | The audit record of a request, its kinds and outcomes, the sink interface and the `call` line writer |
 | `internal/compare/` | Catalog reading, normalisation, diff and snapshots for `mcp-gate compare` |
 | `internal/config/` | Config file: strict YAML, `${VAR}` expansion, defaults, validation |
 | `internal/config/importer/` | Conversion of an mcp-proxy `config.json` for `mcp-gate import` |

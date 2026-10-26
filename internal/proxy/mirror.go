@@ -30,6 +30,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -69,6 +70,9 @@ type Options struct {
 	// Files, if set, scans the files tool calls write, after their results are redacted.
 	Files  FileScanner
 	Logger *slog.Logger
+	// Audit receives the audit record of every request; nil writes them as call lines to
+	// Logger.
+	Audit audit.Sink
 	// Source is the server's source, which the mirror serves the catalog of and sends calls
 	// through.
 	Source *Source
@@ -76,18 +80,11 @@ type Options struct {
 	OnChange func()
 }
 
-// kinds of catalog entries, as bits.
-const (
-	kindTools = 1 << iota
-	kindPrompts
-	kindResources
-	kindAll = kindTools | kindPrompts | kindResources
-)
-
 // Mirror is the upstream face of one downstream server under one config.
 type Mirror struct {
 	opts   Options
 	logger *slog.Logger
+	audit  audit.Sink
 	server *mcp.Server
 	src    *Source
 
@@ -139,9 +136,12 @@ func New(opts Options) *Mirror {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
+	if opts.Audit == nil {
+		opts.Audit = audit.Log(opts.Logger)
+	}
 	logger := opts.Logger.With("server", opts.Name)
 	m := &Mirror{
-		opts: opts, logger: logger, src: opts.Source,
+		opts: opts, logger: logger, audit: opts.Audit, src: opts.Source,
 		tools: map[string]*mcp.Tool{}, prompts: map[string]*mcp.Prompt{},
 		resources: map[string]*mcp.Resource{}, templates: map[string]*mcp.ResourceTemplate{},
 		watchers: map[int]func(){},
@@ -215,13 +215,13 @@ func (m *Mirror) ServerFor(token string) *mcp.Server {
 }
 
 // shows returns the kinds the mirror's policy lets through.
-func (m *Mirror) shows() int {
-	kinds := kindTools
+func (m *Mirror) shows() kindSet {
+	kinds := kindSet(audit.Tool)
 	if !m.opts.Policy.Prompts.ExposesNothing() {
-		kinds |= kindPrompts
+		kinds |= kindSet(audit.Prompt)
 	}
 	if !m.opts.Policy.Resources.ExposesNothing() {
-		kinds |= kindResources
+		kinds |= kindSet(audit.Resource)
 	}
 	return kinds
 }
@@ -241,7 +241,7 @@ type listing struct {
 	prompts   []*mcp.Prompt
 	resources []*mcp.Resource
 	templates []*mcp.ResourceTemplate
-	failed    int
+	failed    kindSet
 }
 
 // Watch registers fn to be called, outside the mirror's lock, after a listing was applied to the
@@ -316,7 +316,7 @@ func collect[T any](seq func(func(*T, error) bool)) ([]*T, error) {
 
 // apply registers the listed kinds, changing only the entries that differ from the mirrored
 // ones, then tells the watchers.
-func (m *Mirror) apply(kinds int, l *listing, at time.Time) {
+func (m *Mirror) apply(kinds kindSet, l *listing, at time.Time) {
 	if kinds == 0 {
 		return
 	}
@@ -324,16 +324,16 @@ func (m *Mirror) apply(kinds int, l *listing, at time.Time) {
 	m.notifyWatchers()
 }
 
-func (m *Mirror) applyLocked(kinds int, l *listing, at time.Time) {
+func (m *Mirror) applyLocked(kinds kindSet, l *listing, at time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if kinds&kindTools != 0 {
+	if kinds.has(audit.Tool) {
 		m.tools = m.applyTools(l.tools)
 	}
-	if kinds&kindPrompts != 0 {
+	if kinds.has(audit.Prompt) {
 		m.prompts = m.applyPrompts(l.prompts)
 	}
-	if kinds&kindResources != 0 {
+	if kinds.has(audit.Resource) {
 		// Before the entries are registered, so that no new template reaches a newly hidden
 		// resource.
 		m.opts.Policy.SetCatalog(entries(l.resources, resourceEntry), entries(l.templates, templateEntry))
@@ -384,21 +384,21 @@ func newServed(resources map[string]*mcp.Resource, templates map[string]*mcp.Res
 // changed only where they differ, under m.mu like the mirror's own, so that a view never lags
 // the catalog its handlers check against. An entry the SDK rejects was logged when the mirror's
 // own server rejected it, so it is not logged again here. The caller holds m.mu.
-func (m *Mirror) syncView(v *tokenView, kinds int) {
+func (m *Mirror) syncView(v *tokenView, kinds kindSet) {
 	quiet := slog.New(slog.DiscardHandler)
-	if kinds&kindTools != 0 {
+	if kinds.has(audit.Tool) {
 		want := passed(m.tools, func(t *mcp.Tool) bool { return v.policy.Tools.Allows(t.Name) })
 		v.tools = syncSet(quiet, m.logText, entryTool, v.tools, want, func(t *mcp.Tool) error {
 			return guard(func() { v.server.AddTool(t, m.callTool) })
 		}, v.server.RemoveTools)
 	}
-	if kinds&kindPrompts != 0 {
+	if kinds.has(audit.Prompt) {
 		want := passed(m.prompts, func(p *mcp.Prompt) bool { return v.policy.Prompts.Allows(p.Name) })
 		v.prompts = syncSet(quiet, m.logText, entryPrompt, v.prompts, want, func(p *mcp.Prompt) error {
 			return guard(func() { v.server.AddPrompt(p, m.getPrompt) })
 		}, v.server.RemovePrompts)
 	}
-	if kinds&kindResources != 0 {
+	if kinds.has(audit.Resource) {
 		v.reads = v.policy.Reads(entries(slices.Collect(maps.Values(m.resources)), resourceEntry),
 			entries(slices.Collect(maps.Values(m.templates)), templateEntry))
 		want := passed(m.resources, func(r *mcp.Resource) bool { return v.policy.Resources.Allows(r.URI, r.Name) })

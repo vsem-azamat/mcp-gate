@@ -9,6 +9,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -16,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
@@ -167,9 +169,43 @@ func TestInvalidUpdateKeepsPrevious(t *testing.T) {
 	}
 }
 
+// recorder is an audit sink that keeps the records.
+type recorder struct {
+	mu      sync.Mutex
+	records []audit.Record
+}
+
+func (r *recorder) Write(rec audit.Record) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, rec)
+}
+
+// all returns the records so far, with their durations zeroed.
+func (r *recorder) all() []audit.Record {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := slices.Clone(r.records)
+	for i := range out {
+		out[i].Duration = 0
+	}
+	return out
+}
+
+// last returns the last record, with its duration zeroed.
+func (r *recorder) last(t *testing.T) audit.Record {
+	t.Helper()
+	all := r.all()
+	if len(all) == 0 {
+		t.Fatal("no audit record")
+	}
+	return all[len(all)-1]
+}
+
 func TestReceiveRecoversAndAuditsRefusals(t *testing.T) {
 	var logs strings.Builder
-	m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{}), Logger: slog.New(slog.NewJSONHandler(&logs, nil))}, stubDown{})
+	rec := &recorder{}
+	m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{}), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Audit: rec}, stubDown{})
 	panics := m.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) { panic("secret-value") })
 	res, err := panics(t.Context(), "tools/list", &mcp.ListToolsRequest{})
 	var rpc *jsonrpc.Error
@@ -178,10 +214,12 @@ func TestReceiveRecoversAndAuditsRefusals(t *testing.T) {
 	}
 	refuses := m.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) { return nil, errors.New("unknown tool") })
 	_, _ = refuses(t.Context(), "tools/call", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "env"}})
-	out := logs.String()
-	if strings.Contains(out, "secret-value") || !strings.Contains(out, `"msg":"call"`) ||
-		!strings.Contains(out, `"tool":"env"`) || !strings.Contains(out, `"outcome":"denied"`) {
+	if out := logs.String(); strings.Contains(out, "secret-value") {
 		t.Errorf("logs %s", out)
+	}
+	want := []audit.Record{{Server: "s", Kind: audit.Tool, Name: "env", Outcome: audit.Denied, TokenPolicy: policy.NoPolicy}}
+	if got := rec.all(); !slices.Equal(got, want) {
+		t.Errorf("records %+v", got)
 	}
 }
 
@@ -237,7 +275,7 @@ func TestDownstreamErrorHidesURL(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{}), Redaction: c.redaction}, urlDown{})
-			call := m.begin(t.Context(), "tools/call", nil, keyTool, "x")
+			call := m.begin(t.Context(), audit.Tool, nil, "x")
 			out := call.downstreamError(t.Context(), c.err)
 			var rpc *jsonrpc.Error
 			if !errors.As(out, &rpc) || rpc.Code != c.code {
@@ -324,10 +362,10 @@ func TestMirrorsOfOneSource(t *testing.T) {
 	}
 	l := listing{tools: []*mcp.Tool{tool("a"), tool("b")}}
 	src.mu.Lock()
-	src.raw, src.listed = l, kindTools
+	src.raw, src.listed = l, kindSet(audit.Tool)
 	src.mu.Unlock()
 	src.ready.Store(true)
-	all.apply(kindTools, &l, time.Now())
+	all.apply(kindSet(audit.Tool), &l, time.Now())
 
 	deny := New(Options{Name: "s", Policy: policy.New(&config.Server{Tools: &config.Filter{Deny: []string{"b"}}}), Source: src})
 	if !deny.Ready() || len(catalogOf(deny).Tools) != 1 || catalogOf(deny).Tools["a"] == nil {
@@ -341,7 +379,7 @@ func TestMirrorsOfOneSource(t *testing.T) {
 	mirrors := slices.Clone(src.mirrors)
 	src.mu.Unlock()
 	for _, m := range mirrors {
-		m.apply(kindTools, &next, time.Now())
+		m.apply(kindSet(audit.Tool), &next, time.Now())
 	}
 	if got := len(catalogOf(deny).Tools); got != 2 || changed != 1 {
 		t.Errorf("after a listing: %d tools, %d changes", got, changed)
@@ -350,7 +388,7 @@ func TestMirrorsOfOneSource(t *testing.T) {
 		t.Errorf("a detached mirror took a listing: %d tools", got)
 	}
 	cancel()
-	deny.apply(kindTools, &l, time.Now())
+	deny.apply(kindSet(audit.Tool), &l, time.Now())
 	if changed != 1 {
 		t.Error("a cancelled watcher was called")
 	}

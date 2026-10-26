@@ -2,13 +2,13 @@ package proxy
 
 import (
 	"context"
-	"log/slog"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 )
@@ -89,14 +89,14 @@ func (d countingDown) Call(ctx context.Context, fn func(context.Context, *mcp.Cl
 // The handlers check access with the token's policy itself: a name the mirror does not hold is
 // refused when the policy hides it, and labelled none in the audit line.
 func TestHandlersCheckThePolicy(t *testing.T) {
-	var logs strings.Builder
+	rec := &recorder{}
 	cfg := &config.Config{Policies: map[string]*config.TokenPolicy{"phone": {Servers: map[string]*config.ServerPolicy{
 		"s": {Tools: &config.PolicyFilter{Allow: []string{"echo"}}, Resources: &config.PolicyFilter{None: true}},
 	}}}}
 	calls := 0
 	m := newMirror(Options{
 		Name: "s", Policy: policy.New(&config.Server{}), Tokens: policy.NewTokens(cfg, "s"),
-		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Audit: rec,
 	}, countingDown{calls: &calls})
 	extra := &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "phone"}}
 	_, err := m.callTool(t.Context(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "ghost"}, Extra: extra})
@@ -110,7 +110,11 @@ func TestHandlersCheckThePolicy(t *testing.T) {
 	if calls != 0 {
 		t.Errorf("%d calls reached the downstream", calls)
 	}
-	if n := strings.Count(logs.String(), `"outcome":"denied","tokenPolicy":"none"`); n != 2 {
-		t.Errorf("audit lines: %s", logs.String())
+	want := []audit.Record{
+		{Server: "s", Principal: "phone", Kind: audit.Tool, Name: "ghost", Outcome: audit.Denied, TokenPolicy: policy.NoPolicy},
+		{Server: "s", Principal: "phone", Kind: audit.Resource, Name: "x://y", Outcome: audit.Denied, TokenPolicy: policy.NoPolicy},
+	}
+	if got := rec.all(); !slices.Equal(got, want) {
+		t.Errorf("records %+v", got)
 	}
 }

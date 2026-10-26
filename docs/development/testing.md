@@ -27,6 +27,8 @@ Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `han
 
 `internal/downstream` runs the downstream half of the version matrix with them: every protocol version the SDK supports, over stdio, HTTP with event streams and HTTP with JSON. `internal/gate` runs the whole matrix through a running gate: clients of each version against servers of each version, over stdio and HTTP. Its tests start a gate on a loopback port with stdio and HTTP fakes behind it, and `TestCompareWithHub` checks with `compare` that the gate serves the catalog of a fake hub unchanged. `internal/procutil` re-executes its test binary the same way, with its own helper modes.
 
+Audit records are checked as records: the unit tests of `internal/proxy` give a mirror or an aggregate a sink that keeps them (`proxy.Options.Audit`) and compare `audit.Record` values. The text of the `call` line is pinned once, by `TestAuditLinesGolden` in `internal/gate` (calls and refusals on a server's route and on `/mcp`, with and without a token policy) and `TestAuditOutcomesGolden` in `internal/proxy` (the outcomes a running gate does not reach easily), which compare whole lines, attribute order included.
+
 ## Binary smoke test
 
 [`internal/smoke`](../../internal/smoke/smoke_test.go) runs a built `mcp-gate` binary as a separate process, the way systemd does: the state directory from `$STATE_DIRECTORY`, the tokens and the escrow key hash in the environment under its deprecated name `MCP_HUB_ESCROW_KEY_SHA256`, as older deployments set it, a config listening on a free loopback port. Behind it are a stdio fake with a grandchild and an HTTP fake. It checks `/_healthz` and `/_readyz`, lists the tools and calls one on both routes, checks that a secret in a result is redacted and released by the escrow (the escrow contract below), that the child inherits neither the key hash nor the secrets, `/_status`, the one deprecation warning, and that SIGTERM ends the gate with status 0 within 20 seconds, with the child's whole process group gone and no secret, token or argument in the log.
@@ -57,4 +59,4 @@ Fuzz targets (`Fuzz*` functions) check invariants on arbitrary input; the redact
 
 ## Benchmarks
 
-`make bench` runs every benchmark with allocation counts. Benchmarks have no time budget in CI; compare runs before and after a change, for example with `go test -run '^$' -bench . -count 10 ./internal/redact/...`.
+`make bench` runs every benchmark with allocation counts. `BenchmarkCallTool` and `BenchmarkCallToolDenied` in `internal/proxy` measure a mirror's call path, forwarded over an in-memory session and refused by a filter, with redaction and the audit line. Benchmarks have no time budget in CI; compare runs before and after a change, for example with `go test -run '^$' -bench . -count 10 ./internal/redact/...`.

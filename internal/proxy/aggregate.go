@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
@@ -61,6 +62,9 @@ type AggregateOptions struct {
 	// Members are the mirrors served together.
 	Members []*Mirror
 	Logger  *slog.Logger
+	// Audit receives the audit records of the requests the aggregate refuses itself; nil writes
+	// them as call lines to Logger.
+	Audit audit.Sink
 }
 
 // Aggregate serves the catalogs of several mirrors at one route. Tools and prompts are named
@@ -71,6 +75,7 @@ type AggregateOptions struct {
 type Aggregate struct {
 	opts    AggregateOptions
 	logger  *slog.Logger
+	audit   audit.Sink
 	engine  *redact.Engine // scrubs logged names that belong to no member, with every rule
 	members map[string]*Mirror
 
@@ -81,7 +86,7 @@ type Aggregate struct {
 	// tokenCats holds, by member, what each token with a policy on it sees.
 	tokenCats map[string]map[string]Catalog
 	listed    map[string]bool // the members whose listed catalog the views hold
-	skipped   map[string]bool
+	skipped   map[named]bool  // tools and prompts left out for their names
 	views     []*View
 	unwatch   []func()
 }
@@ -97,6 +102,9 @@ func NewAggregate(opts AggregateOptions) (*Aggregate, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
+	if opts.Audit == nil {
+		opts.Audit = audit.Log(opts.Logger)
+	}
 	// Names no member scrubs are logged under every rule there is, at least as strict as any
 	// member's own.
 	engine, err := redact.New(redact.Options{Russian: true, HighEntropy: true})
@@ -104,8 +112,8 @@ func NewAggregate(opts AggregateOptions) (*Aggregate, error) {
 		return nil, err
 	}
 	a := &Aggregate{
-		opts: opts, logger: opts.Logger, engine: engine, members: map[string]*Mirror{},
-		skipped: map[string]bool{},
+		opts: opts, logger: opts.Logger, audit: opts.Audit, engine: engine, members: map[string]*Mirror{},
+		skipped: map[named]bool{},
 	}
 	for _, m := range opts.Members {
 		a.members[m.Name()] = m
@@ -157,7 +165,7 @@ func (a *Aggregate) rebuild() {
 	a.listed = make(map[string]bool, len(a.members))
 	a.tools = map[string]routed[mcp.Tool]{}
 	a.prompts = map[string]routed[mcp.Prompt]{}
-	skipped := map[string]bool{}
+	skipped := map[named]bool{}
 	names := make([]string, 0, len(a.members))
 	for name := range a.members {
 		names = append(names, name)
@@ -173,8 +181,8 @@ func (a *Aggregate) rebuild() {
 		for name, t := range c.Tools {
 			full := server + separator + name
 			if !validAggregateName(full) {
-				skipped[string(keyTool)+keySep+full] = true
-				a.logSkipped(m, keyTool, full)
+				skipped[named{audit.Tool, full}] = true
+				a.logSkipped(m, audit.Tool, full)
 				continue
 			}
 			a.tools[full] = routed[mcp.Tool]{server: server, name: name, entry: t}
@@ -182,8 +190,8 @@ func (a *Aggregate) rebuild() {
 		for name, p := range c.Prompts {
 			full := server + separator + name
 			if !validAggregateName(full) {
-				skipped[string(keyPrompt)+keySep+full] = true
-				a.logSkipped(m, keyPrompt, full)
+				skipped[named{audit.Prompt, full}] = true
+				a.logSkipped(m, audit.Prompt, full)
 				continue
 			}
 			a.prompts[full] = routed[mcp.Prompt]{server: server, name: name, entry: p}
@@ -204,12 +212,12 @@ func (a *Aggregate) rebuild() {
 	a.skipped = skipped
 }
 
-func (a *Aggregate) logSkipped(m *Mirror, kind auditKey, full string) {
-	if a.skipped[string(kind)+keySep+full] {
+func (a *Aggregate) logSkipped(m *Mirror, kind audit.Kind, full string) {
+	if a.skipped[named{kind, full}] {
 		return
 	}
 	a.logger.Warn(fmt.Sprintf("left out of the aggregate catalog: the prefixed name is longer than %d characters or holds characters outside A-Z a-z 0-9 _ . -", config.AggregateMaxName),
-		"server", m.Name(), "kind", string(kind), "name", m.logText(full))
+		"server", m.Name(), "kind", kind.String(), "name", m.logText(full))
 }
 
 // View returns the view of the given members, which a caller who may reach exactly those
@@ -267,7 +275,7 @@ type View struct {
 	resources map[string]*mcp.Resource
 	templates map[string]*mcp.ResourceTemplate
 	claims    map[string]claim
-	dropped   map[string]bool // resources and templates left out as listed twice, by kind and key
+	dropped   map[listedKey]bool // resources and templates left out as listed twice
 }
 
 // claim is what a server's catalog says it serves, for routing a resource read.
@@ -347,7 +355,7 @@ func (v *View) sync() {
 		}
 		v.claims[server] = cl
 	}
-	dropped := map[string]bool{}
+	dropped := map[listedKey]bool{}
 	for uri, n := range seenURI {
 		if n > 1 {
 			delete(resources, uri)
@@ -371,9 +379,9 @@ func (v *View) sync() {
 
 // logDropped records a resource or template left out because two of the view's servers list it,
 // and logs it the first time.
-func (v *View) logDropped(dropped map[string]bool, kind entryKind, key string) {
-	dropped[string(kind)+keySep+key] = true
-	if v.dropped[string(kind)+keySep+key] {
+func (v *View) logDropped(dropped map[listedKey]bool, kind entryKind, key string) {
+	dropped[listedKey{kind, key}] = true
+	if v.dropped[listedKey{kind, key}] {
 		return
 	}
 	v.a.logger.Warn("left out of the aggregate catalog: more than one server lists it, so a read could not tell which is meant",
@@ -403,12 +411,12 @@ func (v *View) callTool(server, name string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		extra, m, ok := v.admit(req.Extra, server)
 		if !ok {
-			v.a.deny(ctx, "tools/call", req.Extra, keyTool, req.Params.Name)
+			v.a.deny(ctx, req.Extra, audit.Tool, req.Params.Name)
 			return nil, errUnknownTool(req.Params.Name)
 		}
-		if !m.mirrored(keyTool, name) {
+		if !m.mirrored(audit.Tool, name) {
 			// Gone from the mirror but not yet from the view: refused as on the server's route.
-			m.refused(ctx, "tools/call", extra, keyTool, name, true)
+			m.refused(ctx, extra, audit.Tool, name, true)
 			return nil, errUnknownTool(req.Params.Name)
 		}
 		params := *req.Params
@@ -421,11 +429,11 @@ func (v *View) getPrompt(server, name string) mcp.PromptHandler {
 	return func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		extra, m, ok := v.admit(req.Extra, server)
 		if !ok {
-			v.a.deny(ctx, "prompts/get", req.Extra, keyPrompt, req.Params.Name)
+			v.a.deny(ctx, req.Extra, audit.Prompt, req.Params.Name)
 			return nil, errUnknownPrompt(req.Params.Name)
 		}
-		if !m.mirrored(keyPrompt, name) {
-			m.refused(ctx, "prompts/get", extra, keyPrompt, name, true)
+		if !m.mirrored(audit.Prompt, name) {
+			m.refused(ctx, extra, audit.Prompt, name, true)
 			return nil, errUnknownPrompt(req.Params.Name)
 		}
 		params := *req.Params
@@ -445,13 +453,13 @@ func (v *View) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (
 		if extra, m, ok = v.admit(req.Extra, server); ok {
 			if !m.serves(uri) {
 				// Gone from the mirror but not yet from the view: refused as on the server's route.
-				m.refused(ctx, "resources/read", extra, keyURI, uri, true)
+				m.refused(ctx, extra, audit.Resource, uri, true)
 				return nil, errUnknownResource(uri)
 			}
 			return m.readResource(ctx, &mcp.ReadResourceRequest{Session: req.Session, Params: req.Params, Extra: extra})
 		}
 	}
-	v.a.deny(ctx, "resources/read", req.Extra, keyURI, uri)
+	v.a.deny(ctx, req.Extra, audit.Resource, uri)
 	return nil, errUnknownResource(uri)
 }
 
@@ -480,18 +488,15 @@ func (v *View) route(uri string) (string, bool) {
 	return "", false
 }
 
-// deny writes the audit line of a request the aggregate refuses before any server sees it, with
+// deny writes the audit record of a request the aggregate refuses before any server sees it, with
 // no server named.
-func (a *Aggregate) deny(ctx context.Context, method string, extra *mcp.RequestExtra, key auditKey, name string) {
+func (a *Aggregate) deny(ctx context.Context, extra *mcp.RequestExtra, kind audit.Kind, name string) {
 	if reached, ok := ctx.Value(reachedKey{}).(*bool); ok {
 		*reached = true
 	}
-	principal := ""
-	if extra != nil {
-		principal = upstream.Principal(extra.TokenInfo)
-	}
-	a.logger.Info("call", "server", "", "principal", principal, "method", method, string(key), a.logText(name),
-		"durMs", int64(0), "outcome", outcomeDenied, "tokenPolicy", string(policy.NoPolicy), "redactions", 0)
+	a.audit.Write(audit.Record{
+		Principal: principalOf(extra), Kind: kind, Name: a.logText(name), Outcome: audit.Denied, TokenPolicy: policy.NoPolicy,
+	})
 }
 
 // receive is the view's receiving middleware, as a mirror's: it answers a panic with an internal
@@ -506,33 +511,33 @@ func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 				res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "mcp-gate: internal error"}
 			}
 		}()
-		var key auditKey
+		var kind audit.Kind
 		var name string
 		switch r := req.(type) {
 		case *mcp.CallToolRequest:
 			if r.Params != nil {
-				key, name = keyTool, r.Params.Name
+				kind, name = audit.Tool, r.Params.Name
 			}
 		case *mcp.GetPromptRequest:
 			if r.Params != nil {
-				key, name = keyPrompt, r.Params.Name
+				kind, name = audit.Prompt, r.Params.Name
 			}
 		case *mcp.ReadResourceRequest:
 			if r.Params != nil {
-				key, name = keyURI, r.Params.URI
+				kind, name = audit.Resource, r.Params.URI
 			}
 		}
-		if key == "" {
+		if kind == 0 {
 			return next(ctx, method, req)
 		}
 		reached := new(bool)
 		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
-		if err != nil && !*reached && key == keyURI {
+		if err != nil && !*reached && kind == audit.Resource {
 			// A read of a URI no member serves is not audited; one the token's policy hides is, by
 			// its member.
 			if server, ok := v.route(name); ok {
-				if extra, m, ok := v.admit(req.GetExtra(), server); ok && m.decision(principalOf(extra), keyURI, name) == policy.Denied {
-					m.refused(ctx, method, extra, keyURI, name, false)
+				if extra, m, ok := v.admit(req.GetExtra(), server); ok && m.decision(principalOf(extra), audit.Resource, name) == policy.Denied {
+					m.refused(ctx, extra, audit.Resource, name, false)
 				}
 			}
 			return res, err
@@ -541,13 +546,13 @@ func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 			if server, rest, ok := splitName(name); ok {
 				if extra, m, ok := v.admit(req.GetExtra(), server); ok {
 					v.a.mu.Lock()
-					skipped := v.a.skipped[string(key)+keySep+name]
+					skipped := v.a.skipped[named{kind, name}]
 					v.a.mu.Unlock()
-					m.refused(ctx, method, extra, key, rest, skipped)
+					m.refused(ctx, extra, kind, rest, skipped)
 					return res, err
 				}
 			}
-			v.a.deny(ctx, method, req.GetExtra(), key, name)
+			v.a.deny(ctx, req.GetExtra(), kind, name)
 		}
 		return res, err
 	}

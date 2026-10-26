@@ -11,6 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 )
 
@@ -30,10 +31,10 @@ type Source struct {
 	applyMu sync.Mutex
 
 	mu       sync.Mutex
-	dirty    int
+	dirty    kindSet
 	raw      listing // the last listing of each kind in listed
-	listed   int
-	skipped  int // kinds left out of the last listing because no mirror shows them
+	listed   kindSet
+	skipped  kindSet // kinds left out of the last listing because no mirror shows them
 	lastSync time.Time
 	mirrors  []*Mirror
 	kick     chan struct{}
@@ -87,16 +88,16 @@ func (s *Source) Ready() bool { return s.ready.Load() }
 // Notifications are the handlers to give the supervisor.
 func (s *Source) Notifications() downstream.Notifications {
 	return downstream.Notifications{
-		ToolsChanged:     func() { s.markDirty(kindTools) },
-		PromptsChanged:   func() { s.markDirty(kindPrompts) },
-		ResourcesChanged: func() { s.markDirty(kindResources) },
+		ToolsChanged:     func() { s.markDirty(kindSet(audit.Tool)) },
+		PromptsChanged:   func() { s.markDirty(kindSet(audit.Prompt)) },
+		ResourcesChanged: func() { s.markDirty(kindSet(audit.Resource)) },
 		Progress:         func(p *mcp.ProgressNotificationParams) { s.enqueue(event{progress: p}) },
 		Log:              func(p *mcp.LoggingMessageParams) { s.enqueue(event{log: p}) }, //nolint:staticcheck // servers of older protocol versions still send log messages
 	}
 }
 
 // OnSession is the supervisor's OnSession hook: a new session lists the whole catalog again.
-func (s *Source) OnSession(*mcp.ClientSession) { s.markDirty(kindAll) }
+func (s *Source) OnSession(*mcp.ClientSession) { s.markDirty(allKinds) }
 
 // Start starts the catalog sync and the notification worker. They run until ctx ends or Close is
 // called.
@@ -116,7 +117,7 @@ func (s *Source) Close() {
 	s.wg.Wait()
 }
 
-func (s *Source) markDirty(kinds int) {
+func (s *Source) markDirty(kinds kindSet) {
 	s.mu.Lock()
 	s.dirty |= kinds
 	s.mu.Unlock()
@@ -152,10 +153,10 @@ func (s *Source) detach(m *Mirror) {
 }
 
 // shows returns the kinds some mirror shows; tools always.
-func (s *Source) shows() int {
+func (s *Source) shows() kindSet {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	kinds := kindTools
+	kinds := kindSet(audit.Tool)
 	for _, m := range s.mirrors {
 		kinds |= m.shows()
 	}
@@ -218,7 +219,7 @@ func (s *Source) syncLoop(ctx context.Context) {
 
 // sync lists the given kinds and applies them to every mirror. It returns the kinds that failed,
 // and whether the server had no session.
-func (s *Source) sync(ctx context.Context, kinds int) (failed int, notReady bool) {
+func (s *Source) sync(ctx context.Context, kinds kindSet) (failed kindSet, notReady bool) {
 	ctx, cancel := context.WithTimeout(ctx, listTimeout)
 	defer cancel()
 	shows := s.shows()
@@ -242,20 +243,20 @@ func (s *Source) sync(ctx context.Context, kinds int) (failed int, notReady bool
 	defer s.applyMu.Unlock()
 	now := time.Now()
 	s.mu.Lock()
-	if applied&kindTools != 0 {
+	if applied.has(audit.Tool) {
 		s.raw.tools = l.tools
 	}
-	if applied&kindPrompts != 0 {
+	if applied.has(audit.Prompt) {
 		s.raw.prompts = l.prompts
 	}
-	if applied&kindResources != 0 {
+	if applied.has(audit.Resource) {
 		s.raw.resources, s.raw.templates = l.resources, l.templates
 	}
 	s.listed |= applied
 	s.skipped = s.skipped&^applied | applied&^shows
 	s.lastSync = now
 	mirrors := slices.Clone(s.mirrors)
-	nowShows := kindTools
+	nowShows := kindSet(audit.Tool)
 	for _, m := range mirrors {
 		nowShows |= m.shows()
 	}
@@ -264,7 +265,7 @@ func (s *Source) sync(ctx context.Context, kinds int) (failed int, notReady bool
 		m.apply(applied, &l, now)
 	}
 	// After the mirrors have the tools, so that a route that waits for Ready finds them.
-	if applied&kindTools != 0 {
+	if applied.has(audit.Tool) {
 		s.ready.Store(true)
 	}
 	// A mirror that attached during the listing may show a kind it left out.
@@ -276,32 +277,32 @@ func (s *Source) sync(ctx context.Context, kinds int) (failed int, notReady bool
 
 // list reads the kinds the server advertises and some mirror shows; a kind it does not
 // advertise is empty.
-func (s *Source) list(ctx context.Context, cs *mcp.ClientSession, kinds, shows int) listing {
+func (s *Source) list(ctx context.Context, cs *mcp.ClientSession, kinds, shows kindSet) listing {
 	caps := cs.InitializeResult().Capabilities
 	if caps == nil {
 		caps = &mcp.ServerCapabilities{}
 	}
 	var l listing
-	fail := func(kind int, what string, err error) {
-		l.failed |= kind
+	fail := func(kind audit.Kind, what string, err error) {
+		l.failed |= kindSet(kind)
 		s.logger.Warn("listing the catalog failed; keeping the last one", "list", what, "error", s.down.ErrorText(err))
 	}
 	var err error
-	if kinds&kindTools != 0 && caps.Tools != nil {
+	if kinds.has(audit.Tool) && caps.Tools != nil {
 		if l.tools, err = collect(cs.Tools(ctx, nil)); err != nil {
-			fail(kindTools, "tools", err)
+			fail(audit.Tool, "tools", err)
 		}
 	}
-	if kinds&kindPrompts != 0 && caps.Prompts != nil && shows&kindPrompts != 0 {
+	if kinds.has(audit.Prompt) && caps.Prompts != nil && shows.has(audit.Prompt) {
 		if l.prompts, err = collect(cs.Prompts(ctx, nil)); err != nil {
-			fail(kindPrompts, "prompts", err)
+			fail(audit.Prompt, "prompts", err)
 		}
 	}
-	if kinds&kindResources != 0 && caps.Resources != nil && shows&kindResources != 0 {
+	if kinds.has(audit.Resource) && caps.Resources != nil && shows.has(audit.Resource) {
 		if l.resources, err = collect(cs.Resources(ctx, nil)); err != nil {
-			fail(kindResources, "resources", err)
+			fail(audit.Resource, "resources", err)
 		} else if l.templates, err = collect(cs.ResourceTemplates(ctx, nil)); err != nil && !methodNotFound(err) {
-			fail(kindResources, "resource templates", err)
+			fail(audit.Resource, "resource templates", err)
 		}
 	}
 	return l
