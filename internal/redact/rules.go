@@ -29,6 +29,10 @@ type rule struct {
 	prefilter []string
 	// precheck, when set, is a cheap scan that must pass for the rule to run.
 	precheck func(text string) bool
+	// regions, when set, returns the parts of the text the expression runs over, in order and
+	// apart, each starting and ending at a line boundary, so that ^ and $ match there as in the
+	// whole text. None means the rule does not run.
+	regions func(text string) [][2]int
 	// accept validates a candidate and may narrow it or change its kind ("" keeps the rule's
 	// kind). It receives the whole text, the submatch indexes and the selected span.
 	accept acceptFunc
@@ -95,6 +99,7 @@ const (
 	priorityURLPassword      = 250
 	priorityEnvAssignment    = 300
 	priorityKeyValue         = 310
+	priorityKeyValueNextLine = 315
 	priorityCLIFlag          = 320
 	priorityJSONFragment     = 330
 	priorityHighEntropy      = 900
@@ -104,6 +109,14 @@ const (
 // zeroWidth matches the invisible characters sometimes used to break up a label
 // ("pass\u200bword:").
 const zeroWidth = `[\x{200B}-\x{200D}\x{2060}\x{FEFF}]*`
+
+// keyValueKey matches the key of a "key: value" pair (group 1) and its separator. The key may
+// carry any prefix (MYSQL_ROOT_PASSWORD, userPassword); proseKeyKind classifies it.
+const keyValueKey = `(?:^|[^A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{0,64}?(?:password|passwd|pwd|passphrase|pass|secret|api[_\-. ]?key|apikey|token|private[_\-]?key|secret[_\-]?key))` +
+	zeroWidth + `["']?[ \t\x{00A0}]*(?::=|=>|[:=]|：)`
+
+// keyValuePrefilter holds the substrings one of which a key of keyValueKey contains.
+var keyValuePrefilter = []string{"pass", "pwd", "secret", "key", "token"}
 
 var coreRules = []*rule{
 	{
@@ -230,16 +243,27 @@ var coreRules = []*rule{
 	},
 	{
 		// "password: x", "api_key = x", "token=x", "password := x" in prose, YAML, INI, code
-		// and query strings. The key may carry any prefix (MYSQL_ROOT_PASSWORD, userPassword);
-		// proseKeyKind classifies it.
-		kind:     kindSecret,
-		priority: priorityKeyValue,
-		re: regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{0,64}?(?:password|passwd|pwd|passphrase|pass|secret|api[_\-. ]?key|apikey|token|private[_\-]?key|secret[_\-]?key))` +
-			zeroWidth + `["']?[ \t\x{00A0}]*(?::=|=>|[:=]|：)[ \t\x{00A0}]*(?:"([^"\r\n]{1,})"|'([^'\r\n]{1,})'|([^\s"'<>&]{1,}))`),
+		// and query strings.
+		kind:      kindSecret,
+		priority:  priorityKeyValue,
+		re:        regexp.MustCompile(`(?i)` + keyValueKey + `[ \t\x{00A0}]*(?:"([^"\r\n]{1,})"|'([^'\r\n]{1,})'|([^\s"'<>&]{1,}))`),
 		groups:    []int{2, 3, 4},
-		prefilter: []string{"pass", "pwd", "secret", "key", "token"},
+		prefilter: keyValuePrefilter,
 		precheck:  func(text string) bool { return strings.ContainsAny(text, ":=：") },
 		accept:    keyValueAccept(proseKeyKind, 3),
+	},
+	{
+		// "password:" at the end of a line and the value alone on the next one ("password:\n
+		// hunter22", YAML's "password:\n  hunter22"). A separate rule rather than an optional
+		// line break in the rule above, so that a next line it rejects is still scanned by that
+		// rule. The value cannot end with a colon, so a key line after it ("token:\nabc…") is
+		// matched with its own value.
+		kind:     kindSecret,
+		priority: priorityKeyValueNextLine,
+		re:       regexp.MustCompile(`(?im)` + keyValueKey + `[ \t\x{00A0}]*\r?\n[ \t\x{00A0}]*(?:"([^"\r\n]{1,})"|'([^'\r\n]{1,})'|([^\s"'<>&]*[^\s"'<>&:]))[,;]?[ \t\x{00A0}]*\r?$`),
+		groups:   []int{2, 3, 4},
+		regions:  keyLineRegions,
+		accept:   nextLineValueAccept,
 	},
 	{
 		// Command-line flags: --password x, --token=x.
@@ -532,6 +556,30 @@ func keyValueAccept(classify func(string) (string, bool), quotedGroups int) acce
 	}
 }
 
+// keyValueNextLineGroup is the capture group of an unquoted value in the next-line key-value
+// rule.
+const keyValueNextLineGroup = 4
+
+// assignmentLine matches a line that is an assignment of its own (OTHER=value) rather than a
+// value: a name, "=" and something other than "=", which base64 padding would be.
+var assignmentLine = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.\-]*=[^=]`)
+
+var keyValueOnNextLine = keyValueAccept(proseKeyKind, 3)
+
+// nextLineValueAccept accepts a value written alone on the line after its key, as
+// keyValueAccept does, unless an unquoted one is the structure of the text rather than a value:
+// a Markdown code fence, a URL ("Reset your password:\nhttps://…") or an assignment of its own.
+func nextLineValueAccept(text string, match []int, start, end int) (int, int, string, bool) {
+	if g := keyValueNextLineGroup; match[2*g] >= 0 {
+		value := text[match[2*g]:match[2*g+1]]
+		if strings.HasPrefix(value, "```") || strings.HasPrefix(value, "~~~") ||
+			strings.Contains(value, "://") || assignmentLine.MatchString(value) {
+			return 0, 0, "", false
+		}
+	}
+	return keyValueOnNextLine(text, match, start, end)
+}
+
 // proseKeyKind classifies the key of a "key: value" pair found in free text. It is narrower
 // than secretKeyKind: pagination cursors and similar "*_token" names are common in API output
 // and are not credentials.
@@ -599,6 +647,44 @@ func hasURLUserinfo(text string) bool {
 		}
 		offset = start
 	}
+}
+
+// keyLineRegions returns, for the next-line key-value rule, each line that ends, before spaces
+// and tabs, with a key-value separator (":", "=", "=>", "：") and holds a key word, together with the
+// line after it; regions that overlap are joined. Matching only there keeps the rule's cost to
+// the lines it can match.
+func keyLineRegions(text string) [][2]int {
+	var regions [][2]int
+	lineStart := 0
+	for lineStart < len(text) {
+		i := strings.IndexByte(text[lineStart:], '\n')
+		if i < 0 {
+			break
+		}
+		lineEnd := lineStart + i
+		start := lineStart
+		lineStart = lineEnd + 1
+		if !endsWithSeparator(text[start:lineEnd]) || !containsAny(strings.ToLower(text[start:lineEnd]), keyValuePrefilter) {
+			continue
+		}
+		end := len(text)
+		if j := strings.IndexByte(text[lineStart:], '\n'); j >= 0 {
+			end = lineStart + j
+		}
+		if n := len(regions); n > 0 && regions[n-1][1] >= start {
+			regions[n-1][1] = end
+		} else {
+			regions = append(regions, [2]int{start, end})
+		}
+	}
+	return regions
+}
+
+// endsWithSeparator reports whether line ends with a key-value separator before spaces, tabs,
+// no-break spaces and a carriage return.
+func endsWithSeparator(line string) bool {
+	line = strings.TrimRight(line, " \t\r\u00a0")
+	return strings.HasSuffix(line, ":") || strings.HasSuffix(line, "=") || strings.HasSuffix(line, "=>") || strings.HasSuffix(line, "：")
 }
 
 // hasLongTokenRun reports whether text has 24 base64-ish characters in a row.

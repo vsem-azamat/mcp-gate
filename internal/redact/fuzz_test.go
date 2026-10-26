@@ -29,6 +29,7 @@ func fuzzSeeds() []string {
 		`{"token":{"access":"abcdef123","type":"Bearer"},"password":12345678,"x":"{\"pwd\":\"zz9\"}"}`,
 		`[{"Authorization":"Basic ` + fake("", 20) + `"},"password: xpy-123"]`,
 		"\\\\n\\n\\\x00password\u200b：\u00a0zz",
+		"db:\n  password:\r\n    hunter22\n  token:\nuser: x\napi_key =\n'sk12345678';",
 	}
 }
 
@@ -200,4 +201,32 @@ func shape(t *testing.T, data []byte) string {
 	default:
 		return "null"
 	}
+}
+
+// FuzzKeyLineRegions checks that the next-line key-value rule finds the same spans when it
+// matches only the regions keyLineRegions returns as when it matches the whole text.
+func FuzzKeyLineRegions(f *testing.F) {
+	for _, seed := range fuzzSeeds() {
+		f.Add(seed)
+	}
+	e := newEngine(f, Options{})
+	var regional *rule
+	for _, r := range e.rules {
+		if r.priority == priorityKeyValueNextLine {
+			regional = r
+		}
+	}
+	whole := *regional
+	whole.regions = nil
+	f.Fuzz(func(t *testing.T, text string) {
+		masked := maskEscapedBreaks(text)
+		got := e.ruleSpans(regional, masked)
+		var want []span
+		if containsAny(strings.ToLower(masked), keyValuePrefilter) {
+			want = e.ruleSpans(&whole, masked)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("regions give %+v, the whole text %+v", got, want)
+		}
+	})
 }

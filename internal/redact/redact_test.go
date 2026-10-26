@@ -225,6 +225,65 @@ func TestExactOutput(t *testing.T) {
 	}
 }
 
+// A key at the end of a line takes the next line as its value when that line holds the value
+// alone and is not a key, an assignment, a URL or Markdown structure of its own.
+func TestValueOnTheNextLine(t *testing.T) {
+	t.Parallel()
+
+	for text, want := range map[string]string{
+		pw + ":\nhunter22":                              pw + ":\n[REDACTED:password]",
+		pw + ":\nabc12":                                 pw + ":\n[REDACTED:password]",
+		pw + ":\r\nhunter22\r\nnext":                    pw + ":\r\n[REDACTED:password]\r\nnext",
+		pw + ": \t\n\thunter22 \nnext line":             pw + ": \t\n\t[REDACTED:password] \nnext line",
+		"db:\n  " + pw + ":\n    hunter22\n  user: bob": "db:\n  " + pw + ":\n    [REDACTED:password]\n  user: bob",
+		"api_key =\n  \"sk12345678\"":                   "api_key =\n  \"[REDACTED:secret]\"",
+		"$token =>\n  'abc12345',":                      "$token =>\n  '[REDACTED:secret]',",
+		"API_TOKEN=\nabc12345":                          "API_TOKEN=\n[REDACTED:secret]",
+		pw + "：\u00a0\nhunter22":                        pw + "：\u00a0\n[REDACTED:password]",
+		"login details\nuser: alice\n" + pw + ":\nCorrect-Horse-9\nThanks": "login details\nuser: alice\n" + pw + ":\n[REDACTED:password]\nThanks",
+		// A key line after the key is matched with its own value.
+		pw + ":\ntoken:\nabc12345": pw + ":\ntoken:\n[REDACTED:secret]",
+		// An escaped line break after the value ends it, as on the key's own line.
+		pw + ":\nhunter22\\nnext": pw + ":\n[REDACTED:password]\\nnext",
+		// A JSON string is scanned decoded, so its \n is a real line break.
+		`{"note":"` + pw + `:\nhunter22"}`: `{"note":"` + pw + `:\n[REDACTED:password]"}`,
+	} {
+		for _, opts := range optionSets {
+			if got := newEngine(t, opts).RedactString(text, Marker{}); got != want {
+				t.Errorf("%+v: %q -> %q, want %q", opts, text, got, want)
+			}
+		}
+	}
+	for _, text := range []string{
+		pw + ":\nusername: alice",
+		pw + ":\r\nusername: alice\r\n",
+		pw + ":\nusername:",
+		pw + ":\n  child: x\n  other: y",
+		pw + ":\n  child:\n    x",
+		"## " + pw + ":\nUse the reset link below.",
+		pw + ":\nhunter22 is the one I used",
+		pw + ":\n# Heading",
+		pw + ":\n- item one",
+		pw + ":\n---",
+		pw + ":\n```\ncode\n```",
+		pw + ":\n```yaml",
+		pw + ":\n~~~",
+		pw + ":\n\nhunter22", // one line break only
+		"Reset your " + pw + ":\nhttps://example.com/reset",
+		"API_TOKEN=\nDEBUG=true",
+		pw + ":\nnone",
+		pw + ":\n********",
+		"nextPageToken:\nCAESBggB",
+		pw + ":\n[REDACTED:password]",
+	} {
+		for _, opts := range optionSets {
+			if got := newEngine(t, opts).RedactString(text, Marker{}); got != text {
+				t.Errorf("%+v: %q changed to %q", opts, text, got)
+			}
+		}
+	}
+}
+
 func TestPlaceholdersAreNotSecrets(t *testing.T) {
 	t.Parallel()
 

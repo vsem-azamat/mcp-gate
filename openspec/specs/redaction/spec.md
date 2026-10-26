@@ -89,6 +89,25 @@ The rules SHALL treat a `\n`, `\r` or `\t` written as a backslash and a letter, 
 - **WHEN** a text is `password:\nhunter22`, with an escaped newline
 - **THEN** the output is `password:\n[REDACTED:password]`
 
+### Requirement: Value on the next line
+
+A key of a key-value pair at the end of a line, with its separator (`password:`, `api_key =`, `TOKEN=`), SHALL take the next line as its value when, after one real line break (`\n` or `\r\n`) and spaces or tabs, that line holds the value alone: one quoted value, or one unquoted run without whitespace that does not end with a colon, with only a comma or semicolon, spaces or tabs after it. The value SHALL then be judged as on the key's own line (key classification, placeholders, trailing punctuation, escaped line breaks). Since a JSON string is decoded before it is scanned, this covers a `\n` escape inside a JSON string value. An unquoted next line SHALL NOT be taken when it is the structure of the text rather than a value: a key of its own (`username: alice`, `child:`), an assignment of its own (`DEBUG=true`, a name and `=` followed by anything but `=`), a URL (it contains `://`), or a Markdown code fence (it starts with three backticks or tildes). A next line with more than one word (prose, a heading such as `# Title`, a list item such as `- item`, a YAML mapping such as `child: x`) is not a value alone, and a mask such as `---` is a placeholder. Only one line break is crossed: a value after a blank line is not found. A next line that is rejected is still scanned by every rule as any other text.
+
+#### Scenario: Value alone on the next line
+
+- **WHEN** a text is `password:` and, on the next line after a real line break, `hunter22`
+- **THEN** `hunter22` is replaced as a `password` finding and the line break is kept
+
+#### Scenario: Key on the next line
+
+- **WHEN** a text is `password:` followed on the next line by `username: alice`, or by the YAML lines `  child: x` and `  other: y`
+- **THEN** nothing is replaced
+
+#### Scenario: Prose on the next line
+
+- **WHEN** a text is `## Password:` followed on the next line by `Use the reset link below.`
+- **THEN** nothing is replaced
+
 ### Requirement: JSON
 
 A text that is a JSON object or array SHALL be rewritten value by value: each string value is decoded, redacted and re-encoded, and every other byte (key order, whitespace, numbers) SHALL stay as it was. A value under a member whose name marks a secret SHALL be replaced as a whole. Member names SHALL be scanned by the rules as string values outside a secret member are (a name under a secret member is not replaced for that alone), and a name holding a finding SHALL be replaced by its redacted form, with `#2`, `#3` and so on appended when that text is already a name of the object, written or given to another replaced name, so that every member stays distinct. Once the search for written names has read eight times the document's size plus 1 MiB (each JSON document nested in a string having a budget of its own) (deeply nested objects with replaced names), replaced names SHALL be kept apart only from the other replacements for the rest of the document, which is otherwise redacted as usual; only there can a replaced name equal a written one. Whether a name marks a secret SHALL be decided on the name as written. Member names SHALL be compared without case and separators, so `client_secret`, `clientSecret` and `client-secret` are equal; `token` SHALL count only as the whole name or as part of a listed name such as `accessToken`, `refreshToken`, `authToken`, `idToken`, `bearerToken`, `sessionToken` or `apiToken`, and `pin`, `pass` and `pwd` only as the whole name or its last word, so `nextPageToken`, `db_token`, `token_count` and `bypass` do not mark a secret, and names starting with `is` or `has` SHALL NOT mark one. `Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` SHALL mark an `auth_header` value.

@@ -110,6 +110,7 @@ func TestRuleOrder(t *testing.T) {
 		{"url_password", setCore},
 		{"env_secret", setCore},
 		{"secret", setCore}, // key: value
+		{"secret", setCore}, // key: and the value on the next line
 		{"secret", setCore}, // --flag value
 		{"secret", setCore}, // "key": "value" fragment
 		{"high_entropy", setHighEntropy},

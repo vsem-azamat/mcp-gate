@@ -43,6 +43,13 @@ func BenchmarkRedactManySecrets(b *testing.B) {
 	benchmarkRedactString(b, Options{Russian: true, HighEntropy: true}, text)
 }
 
+// BenchmarkRedactValuesOnNextLines is YAML with keys whose values are on the next line, so that
+// the next-line key-value rule runs over the whole text.
+func BenchmarkRedactValuesOnNextLines(b *testing.B) {
+	text := strings.Repeat("service:\n  password:\n    hunter2secret\n  user: alice\n  note: ordinary text here\n", 2000)
+	benchmarkRedactString(b, Options{Russian: true, HighEntropy: true}, text)
+}
+
 func BenchmarkRedactCoreRulesOnly(b *testing.B) {
 	benchmarkRedactString(b, Options{}, messageList(5000))
 }
