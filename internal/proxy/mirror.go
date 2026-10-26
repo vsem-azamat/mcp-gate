@@ -100,7 +100,8 @@ type Mirror struct {
 	src    *Source
 
 	// mu guards the registered catalog, served and the views' maps. Lock order: a Source's
-	// applyMu, then an Aggregate's mu, then mu; the watchers are called without mu.
+	// applyMu, then an Aggregate's mu, then mu, then the server filter's policy.Policy mu (a
+	// leaf); the watchers are called without mu.
 	mu        sync.Mutex
 	tools     map[string]*mcp.Tool
 	prompts   map[string]*mcp.Prompt

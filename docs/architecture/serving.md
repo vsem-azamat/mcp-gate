@@ -48,7 +48,7 @@ The sync loop, which runs in the server's `Source`, lists what is marked dirty: 
 
 Registering compares each entry with the registered one by its JSON encoding and changes only those that differ (`syncSet`), so a resync that finds nothing new sends clients no notification; an invalid tool keeps its previous version. The SDK panics on entries it rejects (a tool schema that is not an object); `validTool` catches the usual case first so the log can say why, and `guard` recovers the rest.
 
-Locks are taken in one order: a source's `applyMu` (which orders listings and mirrors attaching), then an aggregate's `mu`, then a mirror's `mu`. A mirror calls its watchers without its lock, and an aggregate reads its members' catalogs under its own; the source's `mu` and a mirror's `watchMu` take no other lock while held.
+Locks are taken in one order: a source's `applyMu` (which orders listings and mirrors attaching), then an aggregate's `mu`, then a mirror's `mu`. A mirror calls its watchers without its lock, and an aggregate reads its members' catalogs under its own; the source's `mu`, a mirror's `watchMu` and a server filter's `policy.Policy.mu` (taken under a mirror's `mu` by `SetCatalog`, and alone by reads) take no other lock while held.
 
 Every tool call, prompt get and resource read runs through the request pipeline ([`pipeline.go`](../../internal/proxy/pipeline.go)), the same for the three kinds, which differ only in their `pipeline` value (the typed request and result, the stages, and whether a failure is answered with a tool result or an error):
 
