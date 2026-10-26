@@ -32,28 +32,19 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 
 ## How it compares
 
-| | **mcp-gate** | [mcp-proxy](https://github.com/TBXark/mcp-proxy) | [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | [ContextForge](https://github.com/IBM/mcp-context-forge) | [agentgateway](https://github.com/agentgateway/agentgateway) | [MetaMCP](https://github.com/metatool-ai/metamcp) | [MCPJungle](https://github.com/mcpjungle/MCPJungle) |
-| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Language | Go | Go | Go | Python | Rust | TypeScript | Go |
-| A URL per server | ✅ | ✅ | ❌ | ➖ ⁷ | ✅ | ❌ | ➖ ⁸ |
-| A named token per agent | ✅ | ❌ | ❌ | ✅ | ✅ | – | ✅ |
-| Allow and deny lists for tools | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ➖ ⁸ |
-| …and for prompts and resources | ✅ | ❌ | – | ✅ | ✅ | ❌ | ❌ |
-| Hides secrets in answers | ✅ | ❌ | ➖ ¹ | ➖ ² | ➖ ² | ❌ | ❌ |
-| Secret vault for the owner | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| OAuth to remote servers | ✅ | ✅ | ✅ | ✅ | ➖ ³ | ✅ | ➖ ⁴ |
-| Runs without a database | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ➖ ⁵ |
-| Web UI | ❌ | ❌ | ➖ ⁶ | ✅ | ✅ | ✅ | ✅ |
-| SSO and roles | ❌ | ❌ | ❌ | ✅ | ✅ | ➖ | ➖ |
-| Legacy SSE transport | ❌ | ✅ | – | ✅ | ✅ | ✅ | ➖ |
+| | **mcp-gate** | [mcp-proxy](https://github.com/TBXark/mcp-proxy) | [Docker](https://github.com/docker/mcp-gateway) | [ContextForge](https://github.com/IBM/mcp-context-forge) | [agentgateway](https://github.com/agentgateway/agentgateway) |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| A URL per server | ✅ | ✅ | ❌ | ➖ | ✅ |
+| A named token per agent | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Filters for tools, prompts, resources | ✅ | ➖ | ➖ | ✅ | ✅ |
+| Hides secrets in answers | ✅ | ❌ | ➖ | ➖ | ➖ |
+| Secret vault for the owner | ✅ | ❌ | ❌ | ❌ | ❌ |
+| One binary, no database | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Web UI | ❌ | ❌ | ➖ | ✅ | ✅ |
 
-✅ yes · ➖ partly · ❌ no · – not documented
+<sub>➖ partly: tools only; Docker blocks the whole call instead of hiding the secret; ContextForge and agentgateway hide secrets through plugins. Checked against each project's docs in October 2026, corrections welcome.</sub>
 
-1. Blocks the whole call when it looks like a secret, instead of hiding the secret. 2. Through plugins or external guardrails. 3. Token exchange. 4. Beta. 5. SQLite file. 6. In Docker Desktop. 7. A URL per virtual server, which can combine several. 8. Tool groups.
-
-<sub>From each project's README and docs, October 2026. Corrections are welcome.</sub>
-
-mcp-gate suits a handful of MCP servers on one machine. If you need a web UI, all tools behind one URL, SSO with roles per user, Kubernetes or the old SSE transport, pick one of the others.
+mcp-gate suits a handful of MCP servers on one machine. If you need a web UI, all tools behind one URL, SSO with roles, Kubernetes or the old SSE transport, look at ContextForge, agentgateway, [MetaMCP](https://github.com/metatool-ai/metamcp) or [MCPJungle](https://github.com/mcpjungle/MCPJungle).
 
 ## Quick start
 
