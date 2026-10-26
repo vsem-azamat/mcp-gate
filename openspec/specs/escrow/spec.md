@@ -76,12 +76,48 @@ Entries SHALL live only in the process's memory, never on disk or in a log. Each
 
 ### Requirement: Authentication
 
-The API SHALL be served at `/_escrow/` on the main listener, outside the MCP routes, so that neither their Host check nor their tokens nor their filters apply. Every request SHALL carry `Authorization: Bearer <key>`, the scheme in any letter case; the key, with surrounding space removed, SHALL be hashed with SHA-256 and compared with the configured hash in constant time. A request without the key, including a client or admin token and the bare key without a scheme, SHALL get 401 with `WWW-Authenticate: Bearer realm="escrow"` and the body `Unauthorized`, whatever its path or method.
+The API SHALL be served at `/_escrow/` on the main listener, outside the MCP routes, so that neither their Host check nor their tokens nor their filters apply, unless `escrow.tcp` is `false`: then `/_escrow/` on the listener SHALL be 404 like any unknown path, and the API SHALL be served only on the escrow socket. Except as the socket requirement allows, every request SHALL carry `Authorization: Bearer <key>`, the scheme in any letter case; the key, with surrounding space removed, SHALL be hashed with SHA-256 and compared with the configured hash in constant time. A request without the key, including a client or admin token and the bare key without a scheme, SHALL get 401 with `WWW-Authenticate: Bearer realm="escrow"` and the body `Unauthorized`, whatever its path or method.
 
 #### Scenario: Wrong key
 
 - **WHEN** a request carries no key, `Bearer nope`, the key with a character added, the bare key, or a client token
 - **THEN** it gets 401 for the meta and value of a live handle and of an unknown handle alike
+
+### Requirement: Socket
+
+With `escrow.socket` set and the escrow on, the gate SHALL also serve the API, with the same paths, answers and logs, on a unix socket at `escrow.socket.path`, and nothing else there (any other path is 404). At start it SHALL create the socket's parent directory with mode 0700 when it is missing, and refuse to start (status 2) unless that directory, with symlinks resolved, is owned by root or by the gate's user and writable by neither its group nor others, except a sticky directory owned by root; remove a socket file already at the path when nothing accepts connections on it; refuse to start (status 2) when the path holds anything other than a socket, or a socket another process listens on; and give the socket file the mode `escrow.socket.mode` (default 0600, which admits only the gate's user and root) before it appears at the path, by binding it in a private directory and renaming it into place. At shutdown it SHALL remove the socket file. With the escrow off, no socket SHALL be opened, and a warning SHALL say so.
+
+On the socket, the client SHALL be the peer's user ID as the kernel reports it when the peer connected (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS), written `unix:uid=<n>` in the access log and keying the failed-authentication limit. A request SHALL be served without a key only when its user ID is listed in `escrow.socket.allowUIDs` (by default empty, so every socket request needs the key) and the peer is outside the gate's process tree. On Linux the gate SHALL read the peer's process ID from `SO_PEERCRED` and walk the parent IDs in `/proc/<pid>/stat`: a peer that is the gate itself or one of its descendants (its stdio servers and their children; the gate is a child subreaper, so orphaned descendants stay in its tree), or whose process or ancestors cannot be read, SHALL need the key. The walk reads the `/proc` entries of other users' processes (the peer's, and ancestors such as a login manager or `sshd`); where they are hidden (`ProtectProc=invisible`, a `hidepid` mount), it fails closed, and the gate SHALL log a warning at start when `allowUIDs` is not empty and the entry of process 1 cannot be read. The process ID is the one the peer had when it connected, so a descendant that exits and whose ID is reused by a process outside the tree before the request is a race; it matters only when the gate's own user ID is listed. On macOS the process tree SHALL NOT be checked: a listed user ID is served without a key whatever its process, the gate's descendants included. A request from any other user ID, or one whose user ID cannot be read (`unix:uid=unknown`), SHALL need the key exactly as on the listener: it is not refused for its user ID alone. Requests on the listener SHALL never be served without the key. Listing a user ID trusts every process of that user outside the gate's tree, such as a shell, an agent or a reverse proxy running as that user. The process-tree check is defense in depth, not a boundary: a descendant of the gate can start a process of the same user outside the tree (through `systemd-run --user`, tmux, ssh, D-Bus, or `ptrace` where it is allowed), so listing the gate's own user ID lets its stdio servers read every secret without the key, and the gate SHALL log a warning at start when `allowUIDs` holds its own user ID. A request served without a key SHALL skip the failed-authentication limit, so that wrong keys from the gate's tree under the same user ID cannot lock it out.
+
+#### Scenario: Default
+
+- **WHEN** `allowUIDs` is left out and any process requests a live handle's value on the socket without an `Authorization` header
+- **THEN** it gets 401, and the access log names `unix:uid=<its uid>`; with the key it is served
+
+#### Scenario: Listed user outside the gate's tree
+
+- **WHEN** `allowUIDs` lists the peer's user ID and the peer is not a descendant of the gate
+- **THEN** a request without a key gets 200 with the value
+
+#### Scenario: Gate's descendant on Linux
+
+- **WHEN** `allowUIDs` lists the gate's own user ID and a child of the gate (such as a stdio server) requests a value without a key
+- **THEN** it gets 401
+
+#### Scenario: Other user
+
+- **WHEN** `allowUIDs` does not hold the peer's user ID
+- **THEN** a request without the key gets 401, and one with the key is served
+
+#### Scenario: Socket only
+
+- **WHEN** `escrow.tcp` is `false`
+- **THEN** `/_escrow/` on the listener is 404 with the key, and the socket serves the API
+
+#### Scenario: Stale socket
+
+- **WHEN** a socket file left by a process that exited is at the path
+- **THEN** the gate replaces it; a regular file at the path stops the start and is left untouched
 
 ### Requirement: Failed-authentication limit
 

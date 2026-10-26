@@ -31,6 +31,37 @@ escrow:
 
 systemd gives the service a private read-only copy (mode 0400, owned by the service's user or by root), which passes the gate's checks on the file. Commands run through `systemd-run` need the same `-p LoadCredential=…` for the config to load. Remove `MCP_GATE_ESCROW_KEY_SHA256` from `gate.env`, or keep it equal: two different hashes stop the gate.
 
+### Escrow socket
+
+To serve the escrow API on a unix socket (see [serve](../commands/serve.md#escrow-socket)) to another account, the reader, give the socket a group that only the reader is in. With the system unit, as root:
+
+```sh
+sudo groupadd --system mcp-gate-escrow
+sudo usermod -aG mcp-gate-escrow reader      # the account that reads the secrets
+```
+
+and in a drop-in:
+
+```ini
+[Service]
+RuntimeDirectory=mcp-gate
+ExecStartPre=+/usr/bin/chgrp mcp-gate-escrow /run/mcp-gate
+ExecStartPre=+/usr/bin/chmod 2750 /run/mcp-gate
+ProtectProc=default
+```
+
+```yaml
+escrow:
+  socket: {path: /run/mcp-gate/escrow.sock, mode: "0660", allowUIDs: [1001]}   # 1001: the reader's user ID
+  tcp: false
+```
+
+systemd creates `/run/mcp-gate` before the start, owned by `mcp-gate` and writable despite `ProtectSystem=strict`, and removes it at stop. The two `+` lines run as root: they give the directory the group and the setgid bit, so the socket the gate creates in it belongs to `mcp-gate-escrow`, and mode `0660` lets the group's members connect. The reader then reads secrets without the key; another member of the group would need it. With the default mode `0600`, only the gate's user and root can connect at all. List the reader's user ID in `allowUIDs`, never `mcp-gate`'s: the stdio servers run as `mcp-gate` and can start processes outside the gate's tree. `escrow.tcp: false` keeps the API off the TCP listener.
+
+`ProtectProc=default` undoes the unit's `ProtectProc=invisible` for this setup. Telling the reader from the gate's own descendants means walking the reader's parent processes in `/proc`, and those belong to other users (the reader, its login session, `sshd`); with `invisible` the gate cannot see them, keyless access fails closed and every request needs the key (the gate warns at start). The cost is that the gate and its stdio servers can see every process on the host and its command line, which `invisible` hid. When that is not acceptable, keep `invisible`, leave `allowUIDs` out and have the reader send the key on the socket. A `hidepid=2` mount of `/proc` has the same effect as `invisible`.
+
+The user unit is for one account that is both the gate's user and the reader, which `allowUIDs` cannot safely list: there, leave `allowUIDs` out and use the key on the socket too (`${XDG_RUNTIME_DIR}/mcp-gate/escrow.sock`).
+
 ## Install the system unit
 
 ```sh

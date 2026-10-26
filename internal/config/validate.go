@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -139,6 +140,12 @@ func (e *Escrow) validate(add func(path, format string, args ...any)) {
 			add("escrow.keyHashFile", "must be an absolute path")
 		}
 	}
+	if e.TCP != nil && !*e.TCP && e.Socket == nil {
+		add("escrow.tcp", "false needs escrow.socket: the API would be served nowhere")
+	}
+	if s := e.Socket; s != nil {
+		s.validate(add)
+	}
 	seen := map[string]bool{}
 	for i, a := range e.SourceArguments {
 		p := fmt.Sprintf("escrow.sourceArguments[%d]", i)
@@ -151,6 +158,35 @@ func (e *Escrow) validate(add func(path, format string, args ...any)) {
 			add(p, "is listed twice")
 		}
 		seen[a] = true
+	}
+}
+
+// maxSocketPath is the longest unix socket path every supported system takes (sun_path is 104
+// bytes on darwin, with the terminating NUL).
+const maxSocketPath = 103
+
+func (s *EscrowSocket) validate(add func(path, format string, args ...any)) {
+	switch {
+	case s.Path == "":
+		add("escrow.socket.path", "is required")
+	case !filepath.IsAbs(s.Path):
+		add("escrow.socket.path", "must be an absolute path")
+	case len(s.Path) > maxSocketPath:
+		add("escrow.socket.path", "must be at most %d bytes, the limit of a unix socket path", maxSocketPath)
+	}
+	seen := map[int]bool{}
+	for i, uid := range s.AllowUIDs {
+		p := fmt.Sprintf("escrow.socket.allowUIDs[%d]", i)
+		switch {
+		case uid < 0 || int64(uid) >= math.MaxUint32:
+			add(p, "must be a user ID")
+		case seen[uid]:
+			add(p, "is listed twice")
+		}
+		seen[uid] = true
+	}
+	if s.Mode != nil && *s.Mode > 0o777 {
+		add("escrow.socket.mode", "must be permission bits, at most 0777")
 	}
 }
 

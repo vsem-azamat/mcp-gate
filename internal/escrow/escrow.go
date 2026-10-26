@@ -67,6 +67,9 @@ type Options struct {
 	// SourceArguments are the request arguments kept in an entry's source summary; nil means
 	// DefaultSourceArguments and an empty list keeps none.
 	SourceArguments []string
+	// AllowUIDs are the user IDs of escrow socket peers served without a key (see ConnContext).
+	// Requests that did not come through the socket always need the key.
+	AllowUIDs []int
 	// Remote returns a request's client address, which the failed-auth limit is keyed by and
 	// the access log names. Nil uses the peer address.
 	Remote func(*http.Request) string
@@ -78,6 +81,7 @@ type Escrow struct {
 	store   *store
 	keyHash [sha256.Size]byte
 	sources map[string]bool // the arguments kept in a summary
+	allowed map[int]bool    // socket peers served without a key
 	remote  func(*http.Request) string
 	limit   *limiter
 	logger  *slog.Logger
@@ -98,8 +102,15 @@ func New(o Options) *Escrow {
 	for _, name := range o.SourceArguments {
 		sources[name] = true
 	}
+	allowed := make(map[int]bool, len(o.AllowUIDs))
+	for _, uid := range o.AllowUIDs {
+		allowed[uid] = true
+	}
 	s := newStore(o.MaxEntries, o.Logger)
-	return &Escrow{store: s, keyHash: o.KeyHash, sources: sources, remote: o.Remote, limit: newLimiter(s.clock), logger: o.Logger}
+	return &Escrow{
+		store: s, keyHash: o.KeyHash, sources: sources, allowed: allowed, remote: o.Remote,
+		limit: newLimiter(s.clock), logger: o.Logger,
+	}
 }
 
 // MaxEntries returns the store's cap.

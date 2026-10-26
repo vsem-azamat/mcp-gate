@@ -552,3 +552,45 @@ func TestEscrowKeyHashKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestEscrowSocket(t *testing.T) {
+	t.Parallel()
+	const srv = "auth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n"
+	c, err := Parse([]byte("version: 1\nescrow:\n  tcp: false\n  socket: {path: /run/user/1000/mcp-gate/escrow.sock, allowUIDs: [1000, 0], mode: 0660}\n"+srv), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.Escrow.Socket
+	if *c.Escrow.TCP || s.Path != "/run/user/1000/mcp-gate/escrow.sock" || !slices.Equal(s.AllowUIDs, []int{1000, 0}) || *s.Mode != 0o660 {
+		t.Errorf("escrow = %+v, socket %+v", c.Escrow, s)
+	}
+	c, err = Parse([]byte("version: 1\nescrow:\n  socket: {path: /run/e.sock, mode: '0o600'}\n"+srv), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !*c.Escrow.TCP || c.Escrow.Socket.AllowUIDs != nil || *c.Escrow.Socket.Mode != 0o600 {
+		t.Errorf("defaults = %+v, socket %+v", c.Escrow, c.Escrow.Socket)
+	}
+	c, err = Parse([]byte("version: 1\nescrow:\n  socket: {path: /run/e.sock, allowUIDs: []}\n"+srv), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Escrow.Socket.AllowUIDs == nil || *c.Escrow.Socket.Mode != DefaultEscrowSocketMode {
+		t.Errorf("an empty allowUIDs = %#v, mode %o", c.Escrow.Socket.AllowUIDs, *c.Escrow.Socket.Mode)
+	}
+	for _, c := range []struct{ name, doc, want string }{
+		{"tcp off without a socket", "escrow: {tcp: false}\n", "escrow.tcp: false needs escrow.socket"},
+		{"no path", "escrow: {socket: {mode: 0600}}\n", "escrow.socket.path: is required"},
+		{"relative path", "escrow: {socket: {path: e.sock}}\n", "escrow.socket.path: must be an absolute path"},
+		{"long path", "escrow: {socket: {path: /" + strings.Repeat("d", 120) + "}}\n", "escrow.socket.path: must be at most 103 bytes"},
+		{"negative uid", "escrow: {socket: {path: /run/e.sock, allowUIDs: [-1]}}\n", "escrow.socket.allowUIDs[0]: must be a user ID"},
+		{"uid twice", "escrow: {socket: {path: /run/e.sock, allowUIDs: [5, 5]}}\n", "escrow.socket.allowUIDs[1]: is listed twice"},
+		{"mode too wide", "escrow: {socket: {path: /run/e.sock, mode: 01777}}\n", "escrow.socket.mode: must be"},
+		{"mode not octal", "escrow: {socket: {path: /run/e.sock, mode: rw}}\n", "a file mode is octal"},
+	} {
+		_, err := Parse([]byte("version: 1\n"+c.doc+srv), noEnv)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: error = %v, want %q", c.name, err, c.want)
+		}
+	}
+}

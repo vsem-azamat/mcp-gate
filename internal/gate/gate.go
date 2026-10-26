@@ -9,10 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -70,6 +73,7 @@ type Gate struct {
 	escrow  *escrow.Escrow // nil when off
 	mux     *http.ServeMux
 	srv     *http.Server
+	sock    *http.Server // serves the escrow socket; nil without one
 	pins    *pinStore
 	started atomic.Bool
 	// drain is closed when shutdown begins; it ends the subscriptions/listen streams, which
@@ -115,12 +119,34 @@ func New(opts Options) (*Gate, error) {
 		// contract it keeps was served; its own key and failed-auth limit guard it.
 		g.escrow = escrow.New(escrow.Options{
 			KeyHash: opts.EscrowKey.Hash, MaxEntries: cfg.Escrow.MaxEntries, SourceArguments: cfg.Escrow.SourceArguments,
-			Remote: remote, Logger: g.logger,
+			AllowUIDs: socketUIDs(cfg.Escrow.Socket), Remote: remote, Logger: g.logger,
 		})
-		g.mux.Handle(escrow.Route, upstream.Recover(g.logger, "_escrow", g.escrow.Handler()))
-		g.logger.Info("secret escrow enabled", "route", escrow.Route, "maxEntries", g.escrow.MaxEntries(), "keySource", opts.EscrowKey.Source)
+		api := upstream.Recover(g.logger, "_escrow", g.escrow.Handler())
+		if *cfg.Escrow.TCP {
+			g.mux.Handle(escrow.Route, api)
+		}
+		if cfg.Escrow.Socket != nil {
+			if slices.Contains(cfg.Escrow.Socket.AllowUIDs, os.Geteuid()) {
+				g.logger.Warn("escrow.socket.allowUIDs lists the gate's own user",
+					"risk", "the stdio servers run as that user and can start processes outside the gate's tree "+
+						"(through systemd-run, tmux, ssh or ptrace) that read secrets without the key")
+			}
+			if len(cfg.Escrow.Socket.AllowUIDs) > 0 && !escrow.OthersProcVisible() {
+				g.logger.Warn("escrow socket: other users' /proc entries are hidden (ProtectProc= or hidepid), so the process-tree check "+
+					"cannot place most peers and keyless access fails closed: they need the key", "allowUIDs", cfg.Escrow.Socket.AllowUIDs)
+			}
+			mux := http.NewServeMux()
+			mux.Handle(escrow.Route, api)
+			g.sock = upstream.NewServer("", mux, g.logger)
+			g.sock.ConnContext = escrow.ConnContext
+		}
+		g.logger.Info("secret escrow enabled", "route", escrow.Route, "tcp", *cfg.Escrow.TCP,
+			"maxEntries", g.escrow.MaxEntries(), "keySource", opts.EscrowKey.Source)
 	} else {
 		g.logger.Info("secret escrow disabled", "reason", "no key hash in the config or the environment")
+		if cfg.Escrow.Socket != nil {
+			g.logger.Warn("escrow.socket is set but the escrow is off: no socket is opened")
+		}
 	}
 	all := make([]string, 0, len(cfg.Servers))
 	for name := range cfg.Servers {
@@ -223,6 +249,14 @@ func (g *Gate) replacer(name string, s *config.Server) proxy.ReplacerFunc {
 		}
 	}
 	return nil
+}
+
+// socketUIDs returns the user IDs the escrow socket serves without a key: only those listed.
+func socketUIDs(s *config.EscrowSocket) []int {
+	if s == nil || s.AllowUIDs == nil {
+		return []int{}
+	}
+	return s.AllowUIDs
 }
 
 // escrowFor reports whether a server's findings and files are kept in the escrow.
@@ -340,9 +374,22 @@ func (g *Gate) Listen(ctx context.Context) (net.Listener, error) {
 	return lc.Listen(ctx, "tcp", g.cfg.Listen.Addr)
 }
 
-// Run starts every server and serves ln until ctx is done, then shuts down: it stops accepting,
-// lets calls in flight finish for ShutdownGrace, and stops the servers in parallel.
+// Run starts every server and serves ln, and the escrow socket when there is one, until ctx is
+// done, then shuts down: it stops accepting, lets calls in flight finish for ShutdownGrace, and
+// stops the servers in parallel. The socket file is removed on the way out.
 func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
+	var sockServed chan error
+	if g.sock != nil {
+		s := g.cfg.Escrow.Socket
+		sl, err := escrow.ListenSocket(ctx, s.Path, fs.FileMode(*s.Mode))
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		sockServed = make(chan error, 1)
+		go func() { sockServed <- g.sock.Serve(sl) }()
+		g.logger.Info("escrow socket listening", "path", s.Path, "allowUIDs", socketUIDs(s))
+	}
 	for _, name := range g.names {
 		s := g.servers[name]
 		// The mirror outlives ctx: calls finishing during the shutdown grace still get their
@@ -380,7 +427,13 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	}
 	cancelStartup()
 	<-startupDone
-	return errors.Join(err, g.shutdown(context.WithoutCancel(ctx)))
+	err = errors.Join(err, g.shutdown(context.WithoutCancel(ctx)))
+	if sockServed != nil {
+		if serr := <-sockServed; !errors.Is(serr, http.ErrServerClosed) {
+			err = errors.Join(err, serr)
+		}
+	}
+	return err
 }
 
 // awaitStartup marks the gate started once every server has connected, or when ctx ends.
@@ -418,6 +471,17 @@ func (g *Gate) shutdown(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, ShutdownGrace)
 	defer cancel()
 	var errs []error
+	// The socket server shuts down alongside the listener, so that a slow socket client does
+	// not take the grace from the calls in flight; closing it also removes the socket file.
+	var sockDone sync.WaitGroup
+	if g.sock != nil {
+		sockDone.Go(func() {
+			if err := g.sock.Shutdown(ctx); err != nil {
+				_ = g.sock.Close()
+			}
+		})
+	}
+	defer sockDone.Wait()
 	if err := g.srv.Shutdown(ctx); err != nil {
 		g.logger.Warn("calls still running at shutdown are cut off", "error", err.Error())
 		if err := g.srv.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {

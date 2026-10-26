@@ -86,7 +86,7 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 		return exitUsage
 	}
 	_, _ = fmt.Fprintf(stdout, "%s: valid, %d servers (%d disabled)\n", fs.Arg(0), len(names), disabled)
-	_, _ = fmt.Fprintln(stdout, escrowLine(key))
+	_, _ = fmt.Fprintln(stdout, escrowLine(key, cfg.Escrow))
 	if !*connect {
 		return exitOK
 	}
@@ -97,9 +97,23 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 	return connectAll(ctx, cfg, names, oauth.NewStore(*stateDir), *timeout, logger, stdout)
 }
 
-// escrowLine says whether the escrow would be on and where its key hash comes from, never the
-// hash.
-func escrowLine(key *escrow.Key) string {
+// escrowLine says whether the escrow would be on, where its key hash comes from (never the hash)
+// and where its API is served.
+func escrowLine(key *escrow.Key, c config.Escrow) string {
+	line := escrowKeyLine(key)
+	switch {
+	case key == nil && c.Socket != nil:
+		line += "; escrow.socket is ignored"
+	case key == nil || c.Socket == nil:
+	case *c.TCP:
+		line += "; served on the listener and the socket " + c.Socket.Path
+	default:
+		line += "; served on the socket " + c.Socket.Path + " only"
+	}
+	return line
+}
+
+func escrowKeyLine(key *escrow.Key) string {
 	switch {
 	case key == nil:
 		return "escrow: off (no key hash in " + escrow.KeyHashKey + ", " + escrow.KeyHashFileKey + ", " +
