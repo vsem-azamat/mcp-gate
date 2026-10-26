@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"syscall"
 )
 
 // Environment variables of the protocol. None of them is meant for the gate's children.
@@ -58,7 +57,7 @@ func listener(lookup func(string) (string, bool), pid, fd int) (net.Listener, er
 		return nil, fmt.Errorf("systemd passed %d sockets; the gate serves exactly one (one ListenStream= in the socket unit)", n)
 	}
 	// FileListener takes a connected socket too, which fails only at the first accept.
-	if listening, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_ACCEPTCONN); err != nil || listening == 0 {
+	if !listening(fd) {
 		return nil, errors.New("the socket systemd passed is not a listening socket (Accept=no in the socket unit)")
 	}
 	f := os.NewFile(uintptr(fd), "systemd-socket")

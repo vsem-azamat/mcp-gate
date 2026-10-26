@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -138,6 +139,9 @@ func TestListenerErrors(t *testing.T) {
 		{"unix", "1", unixFD, "not TCP"},
 		{"file", "1", fileFD, "not a listening socket"},
 	} {
+		if c.name == "connected" && runtime.GOOS != "linux" {
+			continue // only Linux tells a listening socket from a connected one
+		}
 		ln, err := listener(env(map[string]string{ListenFDsEnv: c.fds, ListenPIDEnv: pid}), os.Getpid(), c.fd)
 		if ln != nil || err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, %v; want an error with %q", c.name, ln, err, c.want)
