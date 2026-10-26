@@ -93,4 +93,8 @@
 <path d="M938 170 V350" fill="none" stroke="#9198a1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
 <path d="M874.0 170 H934" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
 <path d="M938 350 H878.0" fill="none" stroke="#3fb950" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<style>.dot{opacity:0;offset-rotate:0deg;animation-duration:10s;animation-timing-function:ease-in-out;animation-iteration-count:infinite}@media (prefers-reduced-motion: reduce){.dot{display:none}}.dot-req{offset-path:path('M230 170 H970');animation-name:m-req}@keyframes m-req{0%,0%{offset-distance:0%;opacity:0}1%{opacity:1}27%{opacity:1}28%,100%{offset-distance:100%;opacity:0}}.dot-res{offset-path:path('M970 170 H938 V350 H262 V170 H230');animation-name:m-res}@keyframes m-res{0%,32%{offset-distance:0%;opacity:0}33%{opacity:1}61%{opacity:1}62%,100%{offset-distance:100%;opacity:0}}.dot-deny{offset-path:path('M230 260 H262 V170 H570 V219.0 H262 V260 H230');animation-name:m-deny}@keyframes m-deny{0%,68%{offset-distance:0%;opacity:0}69%{opacity:1}93%{opacity:1}94%,100%{offset-distance:100%;opacity:0}}</style>
+<circle class="dot dot-req" r="7" fill="#4493f8" stroke="#151b23" stroke-width="2.5"/>
+<circle class="dot dot-res" r="7" fill="#3fb950" stroke="#151b23" stroke-width="2.5"/>
+<circle class="dot dot-deny" r="7" fill="#f85149" stroke="#151b23" stroke-width="2.5"/>
 </svg>

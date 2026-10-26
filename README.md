@@ -5,30 +5,30 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/vsem-azamat/mcp-gate)](go.mod)
 [![License](https://img.shields.io/github/license/vsem-azamat/mcp-gate)](LICENSE)
 
-A gateway for [Model Context Protocol](https://modelcontextprotocol.io) servers. Run your MCP servers behind one HTTP listener: each gets its own endpoint, each client its own named token, and every result passes through secret redaction before it leaves the host.
+mcp-gate sits between your AI agents and your [MCP](https://modelcontextprotocol.io) servers. Each server gets its own URL, each agent gets its own token, and passwords or API keys in a server's answer are hidden before the agent sees them.
 
-mcp-gate is a single static binary built on the official [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).
+It is one Go binary, built on the official [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/request-path-dark.svg">
-  <img alt="Your AI agents (Claude Code, Codex, Cursor) each have their own access key. mcp-gate checks who is calling and whether the tool is allowed, blocks the call if not, and passes it on to the right tool server. On the way back it hides secrets in answers and in downloaded files and keeps a log of who did what. Optionally, hidden secrets wait in a vault for a day, and only your own key opens it." src=".github/assets/request-path-light.svg" width="100%">
+  <img alt="Your AI agents (Claude Code, Codex, Cursor) each have their own token. mcp-gate checks who is calling and whether the tool is allowed, blocks the call if not, and passes it to the right MCP server. On the way back it hides secrets in answers and in downloaded files and logs who did what. Optionally, hidden secrets wait in a vault for a day, and only your own key opens it." src=".github/assets/request-path-light.svg" width="100%">
 </picture>
 
-## Why another gateway
+## Why I wrote it
 
-I run a dozen MCP servers for my own agents and needed a few things in front of them: secrets redacted before they reach a model, a way to get a redacted value back when I need it, a name on every token, OAuth that works with real providers, and new protocol versions soon after they ship. None of the open-source gateways I tried had all of that. I kept a patched fork for a while, but features and fixes sent upstream could wait a long time for review. So I wrote mcp-gate on the official SDK, around those needs.
+I run about a dozen MCP servers for my own agents. I wanted secrets hidden from the model, a way to read a hidden value myself, a name on every token so the log shows who called what, OAuth that works with real providers, and new protocol versions soon after they come out. The open-source gateways I tried each had some of this, none had all of it. I patched one of them for a while, but my pull requests there waited a long time for review. So I wrote my own.
 
 ## Features
 
-- **One endpoint per server.** stdio and Streamable HTTP servers are served at `/<server>/mcp`. Children are supervised, probed and restarted with backoff. A server that is restarting keeps its catalog, so clients can still list its tools.
-- **Named tokens.** Every token has a name, and the audit log shows which client made each call. Tokens can be global or limited to one server, and a server can be public.
-- **Filters.** Allow or deny lists for tools, prompts and resources, per server.
-- **Redaction that fails closed.** API keys, PEM keys, `Authorization` headers, `.env` lines, URL passwords and similar secrets are replaced with `[REDACTED:<kind>]` in tool, prompt and resource results, in errors and in child stderr. If a result cannot be redacted, the client gets an error instead. Optional rules cover Russian labels and high-entropy strings.
-- **Escrow (optional).** Set an owner key and redacted secrets are kept in memory for a limited time. The owner can then fetch them over a small HTTP API with that key; client tokens cannot. Files that a tool downloads are scanned too, and held back if they contain secrets.
-- **OAuth for remote servers.** `mcp-gate auth login` runs discovery, dynamic client registration and PKCE. Grants are stored on disk and refreshed automatically.
-- **Protocol negotiation.** The gate learns which protocol version each server speaks, and keeps it across restarts. A version can also be pinned in the config.
-- **Operations.** Health and readiness endpoints, a per-server `/_status` for admins, JSON logs with one audit line per call (arguments and results are never logged), and systemd units with sandboxing.
-- **Migration tools.** `import` converts an [mcp-proxy](https://github.com/TBXark/mcp-proxy) config, and `compare` diffs the catalogs of two gateways or snapshots.
+- **A URL per server.** Local (stdio) and remote (Streamable HTTP) servers are served at `/<server>/mcp`. The gate starts local servers, checks that they respond and restarts them when they crash. While a server restarts, agents can still list its tools.
+- **A token per agent.** Each token has a name, and the log line for every call says which token made it. A token can work for all servers or for one. A server can also be open without a token.
+- **Allow and deny lists** for tools, prompts and resources, set per server.
+- **Hidden secrets.** API keys, private keys, `Authorization` headers, `.env` lines and passwords in URLs are replaced with `[REDACTED:<kind>]` in answers, in error messages and in server logs. If the gate cannot check an answer, the agent gets an error instead of the answer. Files that a tool downloads are checked too, and the agent does not get the path to a file with secrets in it.
+- **Secret vault (optional).** With an owner key set, hidden values are kept in memory for a day, and you can read them with that key. Agent tokens cannot.
+- **OAuth for remote servers.** `mcp-gate auth login` signs in once in any browser. The gate stores the grant and refreshes it.
+- **Protocol versions.** The gate remembers which protocol version each server speaks. You can also set it in the config.
+- **For running it.** Health endpoints, a `/_status` page for admins, JSON logs that never contain arguments or answers, and systemd units.
+- **For moving over.** `import` converts a [TBXark/mcp-proxy](https://github.com/TBXark/mcp-proxy) config, and `compare` shows what differs between two gateways.
 
 ## How it compares
 
@@ -44,7 +44,7 @@ I run a dozen MCP servers for my own agents and needed a few things in front of 
 
 <sub>From each project's README and docs, October 2026. Corrections are welcome.</sub>
 
-mcp-gate fits a few MCP servers on one host, where you want a URL per server, a name on every client, and results that cannot carry secrets out unredacted. If you need a web UI, all tools merged into one endpoint, SSO with per-user roles, Kubernetes or legacy SSE transport, one of the others will serve you better.
+mcp-gate suits a handful of MCP servers on one machine. If you need a web UI, all tools behind one URL, SSO with roles per user, Kubernetes or the old SSE transport, pick one of the others.
 
 ## Quick start
 
@@ -54,7 +54,7 @@ Download an archive for Linux or macOS (amd64 or arm64) from [Releases](https://
 go install github.com/vsem-azamat/mcp-gate/cmd/mcp-gate@latest
 ```
 
-Write `gate.yaml`:
+Create `gate.yaml`:
 
 ```yaml
 version: 1
@@ -122,11 +122,11 @@ The [configuration reference](docs/configuration/README.md) lists every key. To 
 
 ## Status
 
-mcp-gate is young (v0.1) but already handles day-to-day traffic for a dozen servers. The config format is versioned (`version: 1`), and a key the build does not know is rejected rather than ignored. There is no config reload yet: after a change, restart the gate.
+Version 0.1. I use it every day with about a dozen servers. The config has a version number (`version: 1`), and an unknown key is an error. The gate does not reload its config yet, so restart it after a change.
 
 ## Contributing
 
-Issues, fixes and features are welcome. I answer issues and review pull requests as soon as I can, usually within a day or two: slow upstream reviews are part of why this project exists. Start with [CONTRIBUTING](.github/CONTRIBUTING.md); [AGENTS.md](AGENTS.md) has the working rules, and security issues go through [private reporting](https://github.com/vsem-azamat/mcp-gate/security/advisories/new).
+Issues, fixes and features are welcome. I answer issues and review pull requests as soon as I can, usually within a day or two. Start with [CONTRIBUTING](.github/CONTRIBUTING.md); [AGENTS.md](AGENTS.md) has the working rules, and security issues go through [private reporting](https://github.com/vsem-azamat/mcp-gate/security/advisories/new).
 
 ## License
 
