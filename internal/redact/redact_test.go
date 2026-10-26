@@ -490,3 +490,23 @@ func TestEngineIsSafeForConcurrentUse(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestCut(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"short", 10, "short"},
+		{"abcdef", 3, "abc…"},
+		{"ab€", 3, "ab…"}, // € is three bytes
+		{"ab€", 5, "ab€"},
+		{"€", 1, "…"},
+	} {
+		if got := Cut(c.in, c.n); got != c.want {
+			t.Errorf("Cut(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+		}
+	}
+}

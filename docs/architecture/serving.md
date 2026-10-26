@@ -40,6 +40,8 @@ Downstream notifications arrive from the SDK one at a time on the session's read
 
 Results go through `mcpredact` with the server's engine and the replacer that the server's `proxy.ReplacerFunc` returns for the call: `redact.Marker` by default, the escrow's with the escrow on, or what `gate.Options.Replacer` returns in tests. The function gets a `proxy.Request` with the method, the name and the arguments, which a replacer that keeps values records as the source. Each call counts its findings through a wrapping replacer for the audit line. A tool result then goes through the server's file scanner, if it has one.
 
+A failed call's error is rebuilt by `call.downstreamError`, never passed on: the SDK reports an HTTP request that could not be sent as a JSON-RPC error (`ErrRejected`, code -32005) whose message quotes the full URL, so every message first goes through `HideURL`. A JSON-RPC error keeps its code; its message and, for an unwrapped error reply, its data are then redacted with the call's replacer, or with results not redacted the message goes through `ErrorText` and the data is dropped.
+
 The mirror's receiving middleware recovers panics in request handling, which the SDK runs on goroutines of its own, and writes the audit line of a tool call or prompt get that the SDK refuses before a handler runs (an unknown or filtered name); a context value tells whether a handler was reached. The notification worker and the progress sinks recover their own panics.
 
 ## Shutdown

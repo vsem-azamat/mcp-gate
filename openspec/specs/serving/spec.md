@@ -86,7 +86,12 @@ The upstream `_meta` describes the client and the downstream servers are third p
 
 Downstream notifications SHALL pass through a queue of 64; when it is full a notification SHALL be dropped and counted. Log messages from the downstream SHALL be logged at debug level, redacted and cut at 4 KiB, and not forwarded.
 
-A call on a server that is not ready SHALL fail at once: a tool call with a tool error naming the state, a prompt get or resource read with an error naming it. A JSON-RPC error from the downstream SHALL keep its code and be redacted; any other error SHALL be described with the server's URL replaced by its config path and redacted, and a deadline as the server not answering in time. A result that asks the client for input (input requests or request state) SHALL NOT be forwarded: the call fails, as a tool error for a tool call.
+A call on a server that is not ready SHALL fail at once: a tool call with a tool error naming the state, a prompt get or resource read with an error naming it. Every error from the downstream SHALL be rebuilt before it reaches the client, with the server's URL replaced by its config path in its message, and a deadline described as the server not answering in time. A JSON-RPC error, including the one the SDK reports when an HTTP request cannot be sent, SHALL keep its code; with results redacted its message and the data of an error reply SHALL be redacted as results are, the data with the URL replaced too, and otherwise its message SHALL be redacted and cut as any other error's and its data dropped. Any other error SHALL be described by its message with the URL replaced, redacted and cut at 512 bytes. No cut SHALL split a UTF-8 character. A result that asks the client for input (input requests or request state) SHALL NOT be forwarded: the call fails, as a tool error for a tool call.
+
+#### Scenario: Transport failure on an HTTP server
+
+- **WHEN** an HTTP server whose URL holds a credential in its path stops accepting connections and a client calls a tool, with results redacted or not
+- **THEN** the error the client gets names `<servers.NAME.http.url>` and not the URL
 
 #### Scenario: Version matrix
 
@@ -115,7 +120,7 @@ A call on a server that is not ready SHALL fail at once: a tool call with a tool
 
 ### Requirement: Redaction
 
-When `redact.enabled` is true, the default, tool results, prompt results, resource read results and JSON-RPC errors from the server SHALL be redacted with the engine built from `redact.ru`, `redact.highEntropy` and `redact.disableRules`, as the redaction spec describes, with a limit of `maxMessageBytes` per text. A result that cannot be redacted SHALL be withheld: the client gets an error saying the result was withheld, never the result. Each finding SHALL be replaced by `[REDACTED:<kind>]`, or with the escrow on by the escrow's marker for the call it came from. A tool result of a file tool SHALL then go through file scanning, and a file that cannot be scanned SHALL withhold the result the same way. Progress messages and logged texts from the server SHALL be redacted even when results are not, always with `[REDACTED:<kind>]`.
+When `redact.enabled` is true, the default, tool results, prompt results, resource read results and JSON-RPC errors from the server SHALL be redacted with the engine built from `redact.ru`, `redact.highEntropy` and `redact.disableRules`, as the redaction spec describes, with a limit of `maxMessageBytes` per text. A result that cannot be redacted SHALL be withheld: the client gets an error saying the result was withheld, never the result. Each finding SHALL be replaced by `[REDACTED:<kind>]`, or with the escrow on by the escrow's marker for the call it came from. A tool result of a file tool SHALL then go through file scanning, and a file that cannot be scanned SHALL withhold the result the same way. Progress messages and logged texts from the server, including the logger name of a log message and the keys and errors of catalog entries the SDK rejects, SHALL be redacted even when results are not, always with `[REDACTED:<kind>]`.
 
 #### Scenario: Token in a result
 

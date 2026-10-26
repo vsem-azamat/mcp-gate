@@ -372,24 +372,27 @@ func (s *Supervisor) scrub(text string) string { return s.redactor.RedactText(te
 
 // ErrorText returns err's message fit for logs and status: the server's URL, which may carry a
 // credential in its path or query, is replaced by its config path, the redaction rules run, and
-// the text is cut at 512 bytes.
+// the text is cut at 512 bytes, on a character boundary.
 func (s *Supervisor) ErrorText(err error) string {
-	msg := err.Error()
-	if h := s.opts.HTTP; h != nil && h.URL != "" {
-		placeholder := "<servers." + s.opts.Name + ".http.url>"
-		forms := []string{h.URL, strings.Trim(strconv.Quote(h.URL), `"`)}
-		if u, perr := url.Parse(h.URL); perr == nil {
-			forms = append(forms, u.String(), u.Redacted())
-		}
-		for _, f := range forms {
-			msg = strings.ReplaceAll(msg, f, placeholder)
-		}
+	return redact.Cut(s.scrub(s.HideURL(err.Error())), maxErrorLen)
+}
+
+// HideURL returns text with every form of the server's URL replaced by its config path,
+// `<servers.NAME.http.url>`. Text of a stdio server is returned as it is.
+func (s *Supervisor) HideURL(text string) string {
+	h := s.opts.HTTP
+	if h == nil || h.URL == "" {
+		return text
 	}
-	msg = s.scrub(msg)
-	if len(msg) > maxErrorLen {
-		msg = msg[:maxErrorLen] + "…"
+	placeholder := "<servers." + s.opts.Name + ".http.url>"
+	forms := []string{h.URL, strings.Trim(strconv.Quote(h.URL), `"`)}
+	if u, perr := url.Parse(h.URL); perr == nil {
+		forms = append(forms, u.String(), u.Redacted())
 	}
-	return msg
+	for _, f := range forms {
+		text = strings.ReplaceAll(text, f, placeholder)
+	}
+	return text
 }
 
 // Start starts supervising in the background. The values of ctx, not its cancellation, carry

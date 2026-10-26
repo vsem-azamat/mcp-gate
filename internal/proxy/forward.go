@@ -73,9 +73,12 @@ func toolError(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 }
 
-// downstreamError turns a failed call into what the client gets, and sets the outcome. A
-// JSON-RPC error reply keeps its code and is redacted; any other error is described by the
-// supervisor, which hides the server's URL.
+// downstreamError turns a failed call into what the client gets, and sets the outcome. Every
+// error is rebuilt, so that nothing the SDK or the server put in it reaches the client
+// unchecked: its message never quotes the server's URL (an HTTP request that fails is reported
+// with its full URL, inside a JSON-RPC error) and is redacted. A JSON-RPC error keeps its code;
+// the data of a JSON-RPC error reply has the URL replaced and is redacted with the result, and dropped when results are
+// not redacted.
 func (c *call) downstreamError(ctx context.Context, err error) error {
 	c.outcome = outcomeError
 	switch {
@@ -85,13 +88,18 @@ func (c *call) downstreamError(ctx context.Context, err error) error {
 		return fmt.Errorf("server %s did not answer in time", c.m.opts.Name)
 	}
 	var rpc *jsonrpc.Error
-	if errors.As(err, &rpc) {
-		if r := c.m.opts.Redaction; r != nil {
-			return r.results.Error(err, c.replacer())
-		}
-		return err
+	if !errors.As(err, &rpc) || rpc == nil {
+		return errors.New(c.m.down.ErrorText(err))
 	}
-	return errors.New(c.m.down.ErrorText(err))
+	r := c.m.opts.Redaction
+	if r == nil {
+		return &jsonrpc.Error{Code: rpc.Code, Message: c.m.down.ErrorText(err)}
+	}
+	fresh := &jsonrpc.Error{Code: rpc.Code, Message: c.m.down.HideURL(err.Error())}
+	if direct, ok := err.(*jsonrpc.Error); ok && direct == rpc { //nolint:errorlint // only an unwrapped error reply carries its data to the wire
+		fresh.Data = json.RawMessage(c.m.down.HideURL(string(rpc.Data)))
+	}
+	return r.results.Error(fresh, c.replacer())
 }
 
 func (c *call) replacer() *countingReplacer {
@@ -266,11 +274,7 @@ func (m *Mirror) scrub(s string) string {
 
 // logText makes a value from a request fit for the log: scrubbed and cut at 256 bytes.
 func (m *Mirror) logText(s string) string {
-	s = m.scrub(s)
-	if len(s) > 256 {
-		s = s[:256] + "…"
-	}
-	return s
+	return redact.Cut(m.scrub(s), 256)
 }
 
 // forward runs fn on the downstream session with the downstream _meta, built by setMeta from the

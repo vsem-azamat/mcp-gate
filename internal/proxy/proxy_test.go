@@ -2,18 +2,22 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
+	"github.com/vsem-azamat/mcp-gate/internal/redact"
 )
 
 func TestDownstreamMeta(t *testing.T) {
@@ -96,7 +100,7 @@ func TestSyncSetKeepsWhatFails(t *testing.T) {
 		}
 		return nil
 	}
-	got := syncSet(slog.New(slog.DiscardHandler), "test", have, want, add, func(keys ...string) { removed = append(removed, keys...) })
+	got := syncSet(slog.New(slog.DiscardHandler), func(s string) string { return s }, "test", have, want, add, func(keys ...string) { removed = append(removed, keys...) })
 	slices.Sort(added)
 	if !slices.Equal(added, []string{"changed", "new"}) || !slices.Equal(removed, []string{"gone"}) {
 		t.Errorf("added %v, removed %v", added, removed)
@@ -188,3 +192,108 @@ func (stubDown) Call(context.Context, func(context.Context, *mcp.ClientSession) 
 }
 
 func (stubDown) ErrorText(err error) string { return err.Error() }
+
+func (stubDown) HideURL(text string) string { return text }
+
+// urlDown is a downstream whose URL is serverURL.
+type urlDown struct{ stubDown }
+
+const serverURL = "https://mcp.example.com/k-PATHCRED/mcp"
+
+func (urlDown) HideURL(text string) string {
+	return strings.ReplaceAll(text, serverURL, "<servers.s.http.url>")
+}
+
+func (d urlDown) ErrorText(err error) string { return d.HideURL(err.Error()) }
+
+func TestDownstreamErrorHidesURL(t *testing.T) {
+	const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	engine, err := redact.New(redact.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := fmt.Errorf("calling: %w: Post %q: connection refused", &jsonrpc.Error{Code: -32005, Message: "rejected by transport"}, serverURL)
+	reply := &jsonrpc.Error{
+		Code: -32000, Message: "failed at " + serverURL,
+		Data: json.RawMessage(`{"url":"` + serverURL + `","token":"` + token + `"}`),
+	}
+	for _, c := range []struct {
+		name      string
+		redaction *Redaction
+		err       error
+		code      int64
+		data      bool
+	}{
+		{"transport, plain", nil, rejected, -32005, false},
+		{"transport, redacted", NewRedaction(engine, nil, 1<<20), rejected, -32005, false},
+		{"reply, plain", nil, reply, -32000, false},
+		{"reply, redacted", NewRedaction(engine, nil, 1<<20), reply, -32000, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Redaction: c.redaction})
+			m.Attach(urlDown{})
+			call := m.begin(t.Context(), "tools/call", nil)
+			out := call.downstreamError(t.Context(), c.err)
+			var rpc *jsonrpc.Error
+			if !errors.As(out, &rpc) || rpc.Code != c.code {
+				t.Fatalf("error %v, want code %d", out, c.code)
+			}
+			if strings.Contains(out.Error(), "PATHCRED") || strings.Contains(string(rpc.Data), "PATHCRED") {
+				t.Errorf("the error quotes the URL: %q %s", out.Error(), rpc.Data)
+			}
+			if strings.Contains(string(rpc.Data), token) {
+				t.Errorf("the data holds the token: %s", rpc.Data)
+			}
+			if got := len(rpc.Data) > 0; got != c.data {
+				t.Errorf("data %s, want data: %v", rpc.Data, c.data)
+			}
+		})
+	}
+}
+
+func TestRejectedEntryLogIsRedacted(t *testing.T) {
+	const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	engine, err := redact.New(redact.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	m := New(Options{
+		Name: "s", Policy: policy.New(&config.Server{}), Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Redaction: NewRedaction(engine, nil, 1<<20),
+	})
+	m.templates = m.applyTemplates([]*mcp.ResourceTemplate{{Name: "t", URITemplate: "https://example.com/{x?token=" + token}})
+	if len(m.templates) != 0 {
+		t.Fatalf("the SDK took an invalid template: %v", m.templates)
+	}
+	if out := logs.String(); !strings.Contains(out, "skipping a catalog entry") || strings.Contains(out, token) {
+		t.Errorf("logs %s", out)
+	}
+}
+
+func TestServerLogMessageIsRedacted(t *testing.T) {
+	const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	engine, err := redact.New(redact.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	m := New(Options{
+		Name: "s", Policy: policy.New(&config.Server{}),
+		Logger:    slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Redaction: NewRedaction(engine, nil, 1<<20),
+	})
+	m.logMessage(t.Context(), &mcp.LoggingMessageParams{Level: "info", Logger: "auth " + token, Data: "token " + token}) //nolint:staticcheck // servers of older protocol versions still send log messages
+	if out := logs.String(); !strings.Contains(out, "server log message") || strings.Contains(out, token) {
+		t.Errorf("logs %s", out)
+	}
+}
+
+func TestLogTextKeepsCharacters(t *testing.T) {
+	m := New(Options{Name: "s", Policy: policy.New(&config.Server{})})
+	m.Attach(stubDown{})
+	got := m.logText(strings.Repeat("a", 255) + "é")
+	if !utf8.ValidString(got) || got != strings.Repeat("a", 255)+"…" {
+		t.Errorf("logText = %q", got)
+	}
+}

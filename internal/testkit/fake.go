@@ -437,3 +437,11 @@ func (g *gzipWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Close stops the server at once: its listener and open connections are closed, so later
+// requests fail to connect.
+func (h *FakeHTTP) Close() {
+	_ = h.srv.Listener.Close()
+	h.srv.CloseClientConnections()
+	h.srv.Close()
+}
