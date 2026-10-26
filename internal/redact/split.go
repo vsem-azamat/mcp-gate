@@ -25,18 +25,21 @@ func isSplitByte(c byte) bool {
 }
 
 // splitNeedles maps the first two bytes of each prefilter word of the split rules to the words,
-// so that a window is searched for them without lower-casing it.
-var splitNeedles = func() map[uint16][]string {
+// so that a window is searched for them without lower-casing it; splitPairs holds the same
+// pairs as a bit set, which rules out most positions without a map lookup.
+var splitNeedles, splitPairs = func() (map[uint16][]string, *[1 << 16 / 64]uint64) {
 	needles := map[uint16][]string{}
+	var pairs [1 << 16 / 64]uint64
 	for _, r := range allRules() {
 		for _, word := range r.prefilter {
 			if r.split && len(word) >= 2 {
 				pair := uint16(word[0])<<8 | uint16(word[1])
 				needles[pair] = append(needles[pair], word)
+				pairs[pair/64] |= 1 << (pair % 64)
 			}
 		}
 	}
-	return needles
+	return needles, &pairs
 }()
 
 // lowerASCII lower-cases an ASCII letter.
@@ -51,9 +54,14 @@ func lowerASCII(c byte) byte {
 // hasDigitColonRun checks it.
 const telegramTokenRun = 35
 
+// maySplitReach is how far into b a prefilter word of a token that starts in a can begin: after
+// the digits of a Telegram bot token (at most 16), or after "sk_" or "https://".
+const maySplitReach = 16
+
 // maySplit is the cheap check of a window that joins a and b: whether it holds, in any letter
-// case, a prefilter word of a split rule, or a digit, a colon and telegramTokenRun token bytes
-// (a Telegram bot token, the split rule with a precheck instead).
+// case and starting in a or at most maySplitReach bytes into b, a prefilter word of a split rule,
+// or a digit, a colon and telegramTokenRun token bytes (a Telegram bot token, the split rule with
+// a precheck instead).
 func maySplit[B string | []byte](a string, b B) bool {
 	at := func(i int) byte {
 		if i < len(a) {
@@ -62,9 +70,15 @@ func maySplit[B string | []byte](a string, b B) bool {
 		return b[i-len(a)]
 	}
 	n := len(a) + len(b)
-	for i := 0; i+1 < n; i++ {
-		c, d := at(i), at(i+1)
-		if d == ':' && c >= '0' && c <= '9' {
+	end := min(n-1, len(a)+maySplitReach)
+	for i := range end {
+		c := at(i)
+		starts := splitStarts[c]
+		if starts == 0 {
+			continue
+		}
+		d := at(i + 1)
+		if starts&startsDigit != 0 && d == ':' {
 			run := 0
 			for j := i + 2; j < n && isTokenByte(at(j)); j++ {
 				run++
@@ -73,13 +87,16 @@ func maySplit[B string | []byte](a string, b B) bool {
 				return true
 			}
 		}
-		words := splitNeedles[uint16(lowerASCII(c))<<8|uint16(lowerASCII(d))]
-		for _, word := range words {
-			if i+len(word) > n {
-				continue
-			}
+		if starts&startsWord == 0 {
+			continue
+		}
+		pair := uint16(lowerASCII(c))<<8 | uint16(lowerASCII(d))
+		if splitPairs[pair/64]&(1<<(pair%64)) == 0 {
+			continue
+		}
+		for _, word := range splitNeedles[pair] {
 			k := 2
-			for k < len(word) && lowerASCII(at(i+k)) == word[k] {
+			for k < len(word) && i+k < n && lowerASCII(at(i+k)) == word[k] {
 				k++
 			}
 			if k == len(word) {
@@ -89,6 +106,28 @@ func maySplit[B string | []byte](a string, b B) bool {
 	}
 	return false
 }
+
+// splitStarts marks, for each byte, whether it is a digit (it may start the digits of a Telegram
+// bot token) or starts a prefilter word of a split rule in either letter case.
+var splitStarts = func() *[256]uint8 {
+	var starts [256]uint8
+	for c := '0'; c <= '9'; c++ {
+		starts[c] |= startsDigit
+	}
+	for pair := range splitNeedles {
+		c := byte(pair >> 8)
+		starts[c] |= startsWord
+		if c >= 'a' && c <= 'z' {
+			starts[c-'a'+'A'] |= startsWord
+		}
+	}
+	return &starts
+}()
+
+const (
+	startsDigit uint8 = 1 << iota
+	startsWord
+)
 
 // splitCut is a token split across two strings: it starts at tail in the first one and ends at
 // head in the second, and value is the whole token.
