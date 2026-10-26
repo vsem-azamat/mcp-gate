@@ -170,7 +170,7 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 			// its name as well, so that each string continues at most one token.
 			isName := len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectKey
 			if next := adjacentString(data, end, stack); next >= 0 && (!isName || heads[next] == 0) {
-				if cut, ok := e.splitAfter(decoded, c.head, data, next, isName); ok {
+				if cut, ok := e.splitAfter(decoded, c.head, data, next); ok {
 					c.tail = &cut
 					if heads == nil {
 						heads = map[int]int{}
@@ -388,7 +388,7 @@ func skipJSONSpace(data []byte, i int) int {
 // splitAfter looks for a token that starts in the decoded string a, at or after from, and goes
 // on in the string literal at data[next] (see splitToken). The literal is decoded only when the
 // window passes maySplit, checked on its raw bytes as far as they hold no escape.
-func (e *Engine) splitAfter(a string, from int, data []byte, next int, nameValue bool) (splitCut, bool) {
+func (e *Engine) splitAfter(a string, from int, data []byte, next int) (splitCut, bool) {
 	if len(a) <= from || !isSplitByte(a[len(a)-1]) || next+1 >= len(data) || (!isSplitByte(data[next+1]) && data[next+1] != '\\') {
 		return splitCut{}, false
 	}
@@ -412,7 +412,7 @@ func (e *Engine) splitAfter(a string, from int, data []byte, next int, nameValue
 			return splitCut{}, false
 		}
 	}
-	return e.splitToken(a, from, b, nameValue)
+	return e.splitToken(a, from, b)
 }
 
 // nameShape is what a member name under a secret member looks like, as nameShapeOf finds it.

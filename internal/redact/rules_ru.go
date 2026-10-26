@@ -168,26 +168,27 @@ func keyShaped(name string) bool {
 
 // russianKeyLineRegions returns, for the Russian next-line rule, each line that ends, before
 // spaces and a carriage return, with a label separator and holds a Russian label, together with
-// the line after it, and with the line before it when the key line starts with "доступа" (the
-// space of "код доступа" may be a line break). A line is in at most three regions, so the cost
+// the line after it, and with the line before it when that one ends with "код" and the key line
+// starts with "доступа" (the space of "код доступа" may be a line break). A line is in at most three regions, so the cost
 // stays linear.
 func russianKeyLineRegions(text string) []region {
 	var regions []region
-	prevStart := 0
+	prevStart, prevEndsWithCode := 0, false
 	for lineStart := 0; lineStart < len(text); {
 		i := strings.IndexByte(text[lineStart:], '\n')
 		if i < 0 {
 			break
 		}
 		start, lineEnd := lineStart, lineStart+i
-		before := prevStart
+		before, afterCode := prevStart, prevEndsWithCode
 		prevStart, lineStart = start, lineEnd+1
+		prevEndsWithCode = strings.HasSuffix(strings.ToLower(trimRightSet(text[start:lineEnd], " \t\r")), "код")
 		key := trimRightSet(text[start:lineEnd], " \t\r")
 		if !hasRussianSeparatorSuffix(key) {
 			continue
 		}
 		lowered := strings.ToLower(key)
-		if strings.HasPrefix(strings.TrimLeft(lowered, " \t"), "доступа") {
+		if afterCode && strings.HasPrefix(strings.TrimLeft(lowered, " \t"), "доступа") {
 			start = before
 		} else if !containsAny(lowered, russianLabelPrefilter) {
 			continue

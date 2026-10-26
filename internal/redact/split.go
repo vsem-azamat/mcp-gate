@@ -111,9 +111,8 @@ func splitLeft(a string, from int) int {
 // splitToken looks for a match of a split rule that starts in a, at or after from, and ends in
 // b, over a window that joins the run of splitBytes ending a (at most splitWindow bytes of it)
 // to the run starting b (as much). A match that reaches the edge of a window cut short goes on
-// over the rest of the run, so no part of the token stays visible. nameValue is set when a is
-// a member name and b its value. The caller has checked the window with maySplit.
-func (e *Engine) splitToken(a string, from int, b string, nameValue bool) (splitCut, bool) {
+// over the rest of the run, so no part of the token stays visible. The caller has checked the window with maySplit.
+func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
 	if len(a) <= from || b == "" || !isSplitByte(a[len(a)-1]) || !isSplitByte(b[0]) {
 		return splitCut{}, false
 	}
@@ -128,11 +127,11 @@ func (e *Engine) splitToken(a string, from int, b string, nameValue bool) (split
 		if s.start >= boundary || s.end <= boundary {
 			continue
 		}
-		// A member name that is a whole token ({"<token>": "repo"}) is found there; a rule that
-		// runs on into its value only took the value's start along. Between other strings a
-		// token is joined whenever it crosses, since a part long enough to match on its own may
-		// still be only the start of the token.
-		if nameValue {
+		// A whole token that ends a ({"<token>": "repo"}, ["<token>", "general"]) is found
+		// there, and a rule that runs on into b only took b's start along; it is joined only
+		// when that start looks like the random rest of a token, since a part long enough to
+		// match on its own may still be only the start of a longer one.
+		if !randomTail(b[:min(s.end-boundary, len(b))]) {
 			for _, whole := range e.splitSpans(a[left:]) {
 				if whole.end == boundary && whole.start <= s.start {
 					return splitCut{}, false
@@ -153,6 +152,23 @@ func (e *Engine) splitToken(a string, from int, b string, nameValue bool) (split
 		return splitCut{tail: tail, head: head, kind: s.kind, value: a[tail:] + b[:head]}, true
 	}
 	return splitCut{}, false
+}
+
+// minRandomTail is the length from which the start of a string can be the random rest of a
+// token that already matches whole before it.
+const minRandomTail = 8
+
+// randomTail reports whether s looks like the random rest of a token: at least minRandomTail
+// bytes, with upper-case letters, lower-case letters and digits.
+func randomTail(s string) bool {
+	var upper, lower, digit bool
+	for i := range len(s) {
+		c := s[i]
+		upper = upper || c >= 'A' && c <= 'Z'
+		lower = lower || c >= 'a' && c <= 'z'
+		digit = digit || c >= '0' && c <= '9'
+	}
+	return len(s) >= minRandomTail && upper && lower && digit
 }
 
 // splitSpans returns the findings of the split rules in text.

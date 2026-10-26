@@ -134,8 +134,8 @@ func TestTokensSplitAcrossStrings(t *testing.T) {
 		},
 		{
 			name: "a whole token followed by a word, between values",
-			in:   `{"a":"` + gh + `","b":"repo"}`,
-			want: `{"a":"[REDACTED:github_token]","b":"` + cont + `"}`,
+			in:   `{"a":"` + gh + `","b":"repo","c":["` + fake("xoxb-", 30) + `","general"]}`,
+			want: `{"a":"[REDACTED:github_token]","b":"repo","c":["[REDACTED:slack_token]","general"]}`,
 		},
 		{
 			name: "a value continues one token only",

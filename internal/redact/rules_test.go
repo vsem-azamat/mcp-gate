@@ -50,10 +50,12 @@ func TestRussianLabels(t *testing.T) {
 		"пароль" + strings.Repeat(" ", 600) + ":\nHunter22x":         "Hunter22x",
 		"пароль от" + strings.Repeat(" ", 600) + "почты:\nHunter22x": "Hunter22x",
 		// A next line that starts with a password, not a key, before a separator.
-		"пароль:\nP@ssw0rd = old":         "P@ssw0rd",
-		"пароль:\nQwerty123: да":          "Qwerty123",
-		"код\nдоступа:\nHunter22x":        "Hunter22x",
-		"токен: \tERC-20,токен: hunter22": "hunter22",
+		"пароль:\nP@ssw0rd = old":              "P@ssw0rd",
+		"пароль:\nQwerty123: да":               "Qwerty123",
+		"пароль:\nдоступа, токен:\nHunter22x":  "Hunter22x",
+		"пароль:\nдоступа к токен:\nHunter22x": "Hunter22x",
+		"код\nдоступа:\nHunter22x":             "Hunter22x",
+		"токен: \tERC-20,токен: hunter22":      "hunter22",
 	}
 	negatives := []string{
 		"пароль был изменён",
