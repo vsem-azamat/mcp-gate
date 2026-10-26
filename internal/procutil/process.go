@@ -32,6 +32,10 @@ const ChildOOMScoreAdj = 500
 // killWait bounds the wait for a process group after SIGKILL.
 const killWait = 5 * time.Second
 
+// drainWait bounds the wait, once the group is gone, for the stderr reader to read what is left
+// in the pipe, which a process outside the group may still hold.
+const drainWait = time.Second
+
 // Process is a running child in a process group of its own, with pipes on stdin and stdout.
 type Process struct {
 	pid    int
@@ -151,8 +155,9 @@ func (p *Process) ExitErr() error {
 
 // Stop ends the whole process group: it closes stdin, sends SIGTERM to the group, waits up to
 // grace for the leader and every other member to exit, then sends SIGKILL to the group and waits
-// again. It returns once the group is gone and stderr is drained, or with an error if the group
-// survived SIGKILL. Stop may be called more than once; later calls return the first result.
+// again. It returns once the group is gone and stderr is drained, or after drainWait more when
+// a process outside the group still holds stderr, or with an error if the group survived
+// SIGKILL. Stop may be called more than once; later calls return the first result.
 // Since it waits for the stderr reader, which runs the LineLog's onLine, it must not be called
 // with a lock that onLine takes.
 func (p *Process) Stop(grace time.Duration) error {
@@ -168,9 +173,20 @@ func (p *Process) stop(grace time.Duration) error {
 		p.signal(syscall.SIGKILL)
 		gone = p.waitGone(killWait)
 	}
-	// Members that left the group (setsid) may still hold the pipes; closing the read ends
-	// stops the readers either way.
+	// Once the group is gone, the stderr reader reads what is left in the pipe and meets EOF;
+	// closing the read end before would lose the last lines. Members that left the group
+	// (setsid, setpgid) or that the gate cannot signal may still hold the pipe, so after
+	// drainWait the read end is closed, which stops the reader; when the group survived SIGKILL
+	// it is closed at once. Stdout needs no draining: the connection on it is done.
 	_ = p.stdout.Close()
+	if gone {
+		drain := time.NewTimer(drainWait)
+		select {
+		case <-p.stderrDone:
+		case <-drain.C:
+		}
+		drain.Stop()
+	}
 	_ = p.stderr.Close()
 	<-p.stderrDone
 	if !gone {
