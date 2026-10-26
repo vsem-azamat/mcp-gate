@@ -326,3 +326,23 @@ servers:
 		return err
 	})
 }
+
+// A token allowed a catch-all template cannot read a hidden listed resource by adding a query.
+func TestTokenPolicyQuerySpelling(t *testing.T) {
+	doc := `version: 1
+auth:
+  tokens: {laptop: "${LAPTOP}", phone: "${PHONE}"}
+policies:
+  phone: {servers: {cat: {resources: {allow: [any]}}}}
+servers:
+  cat:
+` + stdioServer(t, testkit.Fake{Catalog: true}, "")
+	r := startGate(t, doc, gateOpts{})
+	r.waitReady(t, "cat")
+	phone := r.connect(t, "cat", clientOpts{header: "Bearer " + phoneToken})
+	for uri, ok := range map[string]bool{"fake://hidden?a=b": false, "fake://hidden": false, "FAKE://%68idden?x": false, "fake://other?a=b": true} {
+		if _, err := phone.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: uri}); (err == nil) != ok {
+			t.Errorf("phone reads %s: %v", uri, err)
+		}
+	}
+}

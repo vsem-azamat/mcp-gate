@@ -137,29 +137,34 @@ func TestReadAllowed(t *testing.T) {
 	}
 }
 
-// Under an allow list the comparison keeps the query, so that hiding one query of a URI does
-// not refuse the others; under a deny list it drops it, so that none of them is read.
+// Under an allow list, a hidden resource with a query refuses the reads whose query holds all
+// of its parameters, however written, and passes other queries; one without a query refuses
+// every query. Under a deny list every query of a hidden URI is refused.
 func TestReadQueries(t *testing.T) {
-	resources := []Entry{{"db://t?id=1", "one"}}
-	templates := []Entry{{"db://t{?id}", "rows"}}
-	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"rows"}}})
+	resources := []Entry{{"db://t?id=1", "one"}, {"fake://hidden", "hidden"}}
+	templates := []Entry{{"db://t{?id}", "rows"}, {"db://{+path}", "db"}, {"fake://{+path}", "any"}}
+	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"rows", "db", "any"}}})
 	allow.SetCatalog(resources, templates)
 	deny := New(&config.Server{Resources: &config.Filter{Deny: []string{"one"}}})
 	deny.SetCatalog(resources, templates)
-	for _, c := range []struct {
-		p    *Policy
-		uri  string
-		want bool
-	}{
-		{allow, "db://t?id=2", true},
-		{allow, "db://t?id=1", false},
-		{allow, "DB://t?id=%31", false},
-		{allow, "db://t", true},
-		{deny, "db://t?id=2", false},
-		{deny, "db://t", false},
-	} {
-		if got := c.p.ReadAllowed(c.uri); got != c.want {
-			t.Errorf("ReadAllowed(%q) = %v, want %v", c.uri, got, c.want)
+	refused := []string{
+		"db://t?id=1", "DB://t?id=%31", "db://t?id=1&", "db://t?&id=1", "db://t?id=1&id=1", "db://t?x=&id=1",
+		"db://t?id=1&x=y", "db://t?id=1;", "db://t?ID=1", "db://t?id=01", "db://t?id=+1", "db://t/?id=1#x",
+		"fake://hidden", "fake://hidden?a=b", "FAKE://%68idden?", "fake://hidden/?x",
+	}
+	for _, uri := range refused {
+		if allow.ReadAllowed(uri) {
+			t.Errorf("allow list: %s is read", uri)
+		}
+	}
+	for _, uri := range []string{"db://t?id=2", "db://t", "db://t?id=10", "db://t?x=1", "fake://other?a=b"} {
+		if !allow.ReadAllowed(uri) {
+			t.Errorf("allow list: %s is refused", uri)
+		}
+	}
+	for _, uri := range []string{"db://t?id=2", "db://t", "db://t?id=1"} {
+		if deny.ReadAllowed(uri) {
+			t.Errorf("deny list: %s is read", uri)
 		}
 	}
 }
@@ -210,6 +215,7 @@ func TestTokenReads(t *testing.T) {
 		{"through a template not allowed", allow, "fake://other", false},
 		{"nothing matches", allow, "other://x", false},
 		{"hidden resource in another spelling through an allowed template", anyTemplate, "FAKE://%68idden", false},
+		{"hidden resource with a query through an allowed template", anyTemplate, "fake://hidden?a=b", false},
 		{"resource through an allowed template", anyTemplate, "fake://other", true},
 		{"resource denied by name", deny, "fake://hidden", false},
 		{"hidden resource in another spelling", deny, "FAKE:///%68idden/", false},

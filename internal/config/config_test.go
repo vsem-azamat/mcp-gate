@@ -663,6 +663,22 @@ policies:
 	if p := c.ServerPolicy("agent", "a"); p == nil || !slices.Equal(p.Tools.Allow, []string{"search"}) || !p.Prompts.None || p.Resources != nil {
 		t.Errorf("agent on a: %+v", p)
 	}
+	// Aliases resolve to what they name.
+	aliased, err := Parse([]byte("version: 1\n"+servers+`
+policies:
+  agent:
+    servers:
+      a: {tools: &none none, prompts: &read {allow: [summary]}}
+  bot:
+    servers:
+      b: {tools: *none, prompts: *read}
+`), noEnv)
+	if err != nil {
+		t.Fatalf("aliased filters: %v", err)
+	}
+	if p := aliased.ServerPolicy("bot", "b"); !p.Tools.None || !slices.Equal(p.Prompts.Allow, []string{"summary"}) {
+		t.Errorf("aliased filters: %+v", p)
+	}
 	if c.ServerPolicy("agent", "b") != nil || c.ServerPolicy("laptop", "a") != nil || c.ServerPolicy("bot", "b") == nil {
 		t.Error("a policy applies where none is written, or is missing")
 	}

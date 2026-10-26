@@ -14,6 +14,7 @@ package policy
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -215,18 +216,20 @@ type Entry struct{ Key, Name string }
 // A read reaches the resource listed under its URI, or else a template that matches it, so it
 // passes when that entry passes: a listed resource the filter passes, or, for a URI not listed,
 // under an allow list a matching template the filter passes and under a deny list no matching
-// template the filter hides. It is also refused when the comparison key of the URI is that of a
-// listed resource the filter hides or, under a deny list, of an entry the list names, so that a
-// template does not reach a hidden resource by another spelling. Under a deny list the key drops
-// the query, so every query of a hidden URI is refused; under an allow list it keeps it, so
-// that hiding db://t?id=1 does not refuse db://t?id=2. It errs towards refusing.
+// template the filter hides. So that a template does not reach a hidden resource by another
+// spelling, a read is also refused when the comparison key of its URI (NormalizeURI, without
+// the query) is that of an entry a deny list names, or of a listed resource the filter hides,
+// with these exceptions for a hidden resource whose URI has a query, under an allow list only:
+// the read is refused when its query holds every parameter of the hidden URI's (see
+// queryParams), and passes otherwise, so that hiding db://t?id=1 does not refuse db://t?id=2.
+// Under a deny list every query of a hidden URI is refused. It errs towards refusing.
 type Reads struct {
-	key       func(string) string // the comparison key: NormalizeURI, keeping the query unless under a deny list
-	all       bool                // no filter
+	all       bool // no filter
 	none      bool
 	deny      bool
-	listed    map[string]bool     // listed URI → whether the filter passes it
-	blocked   map[string]struct{} // comparison keys refused
+	listed    map[string]bool                  // listed URI → whether the filter passes it
+	blocked   map[string]struct{}              // comparison keys refused whatever the query
+	queries   map[string][]map[string][]string // comparison key → the parameters of hidden URIs with a query, under an allow list
 	templates []readTemplate
 }
 
@@ -238,21 +241,23 @@ type readTemplate struct {
 // NewReads compiles the reads l allows from a catalog.
 func NewReads(l list, resources, templates []Entry) *Reads {
 	r := &Reads{
-		key: normalizeKeepingQuery, all: l.any, none: l.none, deny: l.Deny(),
-		listed: make(map[string]bool, len(resources)), blocked: map[string]struct{}{},
-	}
-	if r.deny {
-		// A deny list refuses every query of a URI it names or hides.
-		r.key = NormalizeURI
+		all: l.any, none: l.none, deny: l.Deny(),
+		listed: make(map[string]bool, len(resources)), blocked: map[string]struct{}{}, queries: map[string][]map[string][]string{},
 	}
 	for _, v := range l.Listed() {
-		r.blocked[r.key(v)] = struct{}{}
+		r.blocked[NormalizeURI(v)] = struct{}{}
 	}
 	for _, e := range resources {
 		passes := l.Allows(e.Key, e.Name)
 		r.listed[e.Key] = passes
-		if !passes {
-			r.blocked[r.key(e.Key)] = struct{}{}
+		if passes {
+			continue
+		}
+		key := NormalizeURI(e.Key)
+		if params := queryParams(e.Key); !r.deny && len(params) > 0 {
+			r.queries[key] = append(r.queries[key], params)
+		} else {
+			r.blocked[key] = struct{}{}
 		}
 	}
 	for _, e := range templates {
@@ -271,8 +276,17 @@ func (r *Reads) Allowed(uri string) bool {
 	case r.none:
 		return false
 	}
-	if _, blocked := r.blocked[r.key(uri)]; blocked {
+	key := NormalizeURI(uri)
+	if _, blocked := r.blocked[key]; blocked {
 		return false
+	}
+	if hidden := r.queries[key]; len(hidden) > 0 {
+		params := queryParams(uri)
+		for _, h := range hidden {
+			if containsParams(params, h) {
+				return false
+			}
+		}
 	}
 	if passes, ok := r.listed[uri]; ok {
 		return passes
@@ -290,6 +304,45 @@ func (r *Reads) Allowed(uri string) bool {
 	return r.deny || matched
 }
 
+// queryParams returns the parameters of a URI's query, as compared to tell whether a read names
+// a hidden resource: the query decoded as NormalizeURI decodes, split at "&" and ";", each
+// parameter at its first "="; "+" read as a space; keys and values trimmed of spaces and NULs
+// and lower-cased; a value of digits without its leading zeros; empty parameters dropped. Every
+// choice makes more queries alike, which refuses more, never less.
+func queryParams(raw string) map[string][]string {
+	_, query, _ := strings.Cut(decodeAll(raw), "?")
+	params := map[string][]string{}
+	for part := range strings.FieldsFuncSeq(query, func(r rune) bool { return r == '&' || r == ';' }) {
+		k, v, _ := strings.Cut(strings.ReplaceAll(part, "+", " "), "=")
+		k, v = queryText(k), queryText(v)
+		if k == "" && v == "" {
+			continue
+		}
+		if strings.Trim(v, "0123456789") == "" && v != "" {
+			if v = strings.TrimLeft(v, "0"); v == "" {
+				v = "0"
+			}
+		}
+		params[k] = append(params[k], v)
+	}
+	return params
+}
+
+func queryText(s string) string { return strings.ToLower(strings.Trim(s, " \t\r\n\x00")) }
+
+// containsParams reports whether params has every parameter of hidden, each with one of its
+// values.
+func containsParams(params, hidden map[string][]string) bool {
+	for k, values := range hidden {
+		for _, v := range values {
+			if !slices.Contains(params[k], v) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // NormalizeURI returns the key a URI is compared by, so that a deny list is not sidestepped by
 // another spelling of a denied URI that a server would read the same: every percent-encoding is
 // decoded until none is left, the query and fragment are dropped, the scheme and authority are
@@ -302,17 +355,6 @@ func (r *Reads) Allowed(uri string) bool {
 func NormalizeURI(raw string) string {
 	raw, _, _ = strings.Cut(decodeAll(raw), "?")
 	return normalizeDecoded(raw)
-}
-
-// normalizeKeepingQuery returns the key of NormalizeURI followed by the URI's decoded query,
-// if it has one, so that URIs that differ only in their query keep different keys.
-func normalizeKeepingQuery(raw string) string {
-	raw, query, _ := strings.Cut(decodeAll(raw), "?")
-	key := normalizeDecoded(raw)
-	if query == "" {
-		return key
-	}
-	return key + "?" + query
 }
 
 // decodeAll decodes every percent-encoding until none is left and drops the fragment.

@@ -121,6 +121,7 @@ type PolicyFilter struct {
 // UnmarshalYAML decodes PolicyNone or a mapping with the keys allow and deny, strictly. Parse
 // checks the form first, naming the field; these errors are a fallback with the line only.
 func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
+	n = resolveAlias(n)
 	switch n.Kind {
 	case yaml.ScalarNode:
 		if n.Tag == "!!str" && n.Value == PolicyNone {
@@ -512,6 +513,7 @@ func checkPolicyFilters(data []byte) error {
 					continue
 				}
 				path := "policies." + token + ".servers." + server + "." + kind
+				f = resolveAlias(f)
 				switch {
 				case f.Tag == "!!null":
 					add(path, "has no value; write `%s: %s` to hide every %s, or remove the key", kind, PolicyNone, noun)
@@ -538,8 +540,20 @@ func checkPolicyFilters(data []byte) error {
 	return errors.Join(errs...)
 }
 
+// resolveAlias returns the node an alias names, or n itself.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for i := 0; n != nil && n.Kind == yaml.AliasNode && i < maxAliasDepth; i++ {
+		n = n.Alias
+	}
+	return n
+}
+
+// maxAliasDepth bounds the aliases followed to reach a node.
+const maxAliasDepth = 16
+
 // mappingValue returns the value of key in a mapping node, or nil.
 func mappingValue(n *yaml.Node, key string) *yaml.Node {
+	n = resolveAlias(n)
 	if n == nil || n.Kind != yaml.MappingNode {
 		return nil
 	}
@@ -554,6 +568,7 @@ func mappingValue(n *yaml.Node, key string) *yaml.Node {
 // mappingEntries yields the keys and values of a mapping node; nothing for any other node.
 func mappingEntries(n *yaml.Node) func(func(string, *yaml.Node) bool) {
 	return func(yield func(string, *yaml.Node) bool) {
+		n := resolveAlias(n)
 		if n == nil || n.Kind != yaml.MappingNode {
 			return
 		}
