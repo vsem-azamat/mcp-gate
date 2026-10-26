@@ -74,10 +74,10 @@ jobs:
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir dist \
             --pattern '*.tar.gz' --pattern checksums.txt
           cd dist
-          [ -n "$BUILT_SHA256" ] && echo "$BUILT_SHA256  checksums.txt" | sha256sum --check || {
+          if [ -z "$BUILT_SHA256" ] || ! echo "$BUILT_SHA256  checksums.txt" | sha256sum --check; then
             echo "the published checksums.txt is not the one the release job built" >&2
             exit 1
-          }
+          fi
           sha256sum --check checksums.txt
       # signed SLSA build provenance for every archive and checksums.txt; verify with gh attestation verify
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
