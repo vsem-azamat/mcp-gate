@@ -164,6 +164,7 @@ func TestLoginDiscoveryFallbacks(t *testing.T) {
 		{"no challenge", testkit.OAuthOptions{NoChallenge: true}},
 		{"no resource metadata", testkit.OAuthOptions{NoResourceMetadata: true, NoChallenge: true}},
 		{"issuer with a path", testkit.OAuthOptions{IssuerPath: "/tenant"}},
+		{"endpoint with a trailing slash", testkit.OAuthOptions{IssuerPath: "/mcp", TrailingSlash: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.opts.Fake = testkit.Fake{Name: "notes"}
