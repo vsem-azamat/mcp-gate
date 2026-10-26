@@ -53,6 +53,18 @@ func (t *Tokens) Lookup(secret string) (string, bool) {
 	return t.entries[found].name, true
 }
 
+// Authenticate returns the name of the token that an Authorization header value carries, as
+// "Bearer <token>" (the scheme in any case) or as the bare token. It is the one check of a
+// client's credential: a value without a credential, or whose credential holds a space or a tab,
+// carries no token.
+func (t *Tokens) Authenticate(header string) (principal string, ok bool) {
+	secret := Credential(header)
+	if secret == "" || strings.ContainsAny(secret, " \t") {
+		return "", false
+	}
+	return t.Lookup(secret)
+}
+
 // Credential returns the secret in an Authorization header value: the credentials after a
 // "Bearer" scheme, matched without regard to case, or the whole value when it has no scheme.
 func Credential(header string) string {
@@ -73,28 +85,39 @@ func Principal(info *auth.TokenInfo) string {
 	return info.UserID
 }
 
-// RequireToken passes only requests whose Authorization header carries one of tokens, as
-// "Bearer <token>" or as the bare token. Others get 401 with the body "Unauthorized". The token's
-// name reaches MCP handlers as the TokenInfo UserID.
+// RequireToken passes only requests whose Authorization header carries one of tokens (see
+// Tokens.Authenticate). Others get 401 with the body "Unauthorized". The token's name reaches MCP
+// handlers as the TokenInfo UserID.
 func RequireToken(tokens *Tokens, next http.Handler) http.Handler {
-	verify := func(_ context.Context, secret string, _ *http.Request) (*auth.TokenInfo, error) {
-		name, ok := tokens.Lookup(secret)
-		if !ok {
+	return Authorize(func(r *http.Request) (context.Context, *auth.TokenInfo, bool) {
+		name, ok := tokens.Authenticate(r.Header.Get("Authorization"))
+		return r.Context(), &auth.TokenInfo{UserID: name}, ok
+	}, next)
+}
+
+// Authorize passes only the requests that check accepts; the others get 401 with the body
+// "Unauthorized". check returns the context the request goes on with and the TokenInfo that
+// reaches its MCP handlers (see Principal).
+func Authorize(check func(*http.Request) (context.Context, *auth.TokenInfo, bool), next http.Handler) http.Handler {
+	type infoKey struct{}
+	verify := func(_ context.Context, _ string, r *http.Request) (*auth.TokenInfo, error) {
+		info, _ := r.Context().Value(infoKey{}).(*auth.TokenInfo)
+		if info == nil {
 			return nil, auth.ErrInvalidToken
 		}
-		return &auth.TokenInfo{UserID: name}, nil
+		return info, nil
 	}
 	// The SDK middleware puts the TokenInfo where the MCP handlers find it. It only sees
-	// requests already checked here, with the header in the form it reads.
+	// requests already checked here, with a header in the form it reads that holds no secret.
 	inner := auth.RequireBearerToken(verify, &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		secret := Credential(r.Header.Get("Authorization"))
-		if _, ok := tokens.Lookup(secret); !ok || strings.ContainsAny(secret, " \t") {
+		ctx, info, ok := check(r)
+		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		r = r.Clone(r.Context())
-		r.Header.Set("Authorization", "Bearer "+secret)
+		r = r.Clone(context.WithValue(ctx, infoKey{}, info)) //nolint:contextcheck // check derives ctx from the request's own
+		r.Header.Set("Authorization", "Bearer checked")
 		inner.ServeHTTP(w, r)
 	})
 }

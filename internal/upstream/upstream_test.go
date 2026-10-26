@@ -319,3 +319,43 @@ func TestShutdownClosesUnusedConns(t *testing.T) {
 		t.Errorf("the unused connection was not closed: %v", err)
 	}
 }
+
+func TestAuthenticate(t *testing.T) {
+	tokens := NewTokens(map[string]string{"laptop": "secret-a", "phone": "secret-b"})
+	for header, want := range map[string]string{
+		"Bearer secret-a":       "laptop",
+		"bearer secret-b":       "phone",
+		"BEARER  secret-a ":     "laptop",
+		"secret-b":              "phone",
+		"Bearer secret-c":       "",
+		"Bearer secret-a extra": "",
+		"Bearer secret-a\tb":    "",
+		"Bearer ":               "",
+		"":                      "",
+		"Basic secret-a":        "",
+	} {
+		got, ok := tokens.Authenticate(header)
+		if got != want || ok != (want != "") {
+			t.Errorf("Authenticate(%q) = %q %v, want %q", header, got, ok, want)
+		}
+	}
+	var none *Tokens
+	if _, ok := none.Authenticate("Bearer secret-a"); ok {
+		t.Error("no tokens accept a header")
+	}
+}
+
+func TestAuthorizeHidesTheSecret(t *testing.T) {
+	var seen []string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Values("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := RequireToken(NewTokens(map[string]string{"laptop": "secret-a"}), next)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/s/mcp", nil)
+	req.Header.Set("Authorization", "Bearer secret-a")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if len(seen) != 1 || strings.Contains(seen[0], "secret-a") {
+		t.Errorf("the handler sees the header %q", seen)
+	}
+}

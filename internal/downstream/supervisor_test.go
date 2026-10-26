@@ -685,3 +685,23 @@ func TestHideURL(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusPredicates(t *testing.T) {
+	for _, c := range []struct {
+		state                 State
+		connected, awaitLogin bool
+	}{
+		{Starting, false, false},
+		{Ready, true, false},
+		{Degraded, true, false},
+		{Backoff, false, false},
+		{Disabled, false, false},
+		{Stopped, false, false},
+		{NeedsLogin, false, true},
+	} {
+		st := Status{State: c.state}
+		if st.Connected() != c.connected || st.AwaitsLogin() != c.awaitLogin || st.ConnectsOnItsOwn() == c.awaitLogin {
+			t.Errorf("%s: connected %v, awaits a login %v, connects on its own %v", c.state, st.Connected(), st.AwaitsLogin(), st.ConnectsOnItsOwn())
+		}
+	}
+}

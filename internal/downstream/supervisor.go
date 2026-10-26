@@ -294,6 +294,18 @@ type Status struct {
 	Stderr []string
 }
 
+// Connected reports whether the server has a session that calls go through: ready or degraded.
+func (s Status) Connected() bool { return s.State == Ready || s.State == Degraded }
+
+// AwaitsLogin reports whether the server waits for an OAuth login, which needs someone to run
+// mcp-gate auth: it does not connect on its own.
+func (s Status) AwaitsLogin() bool { return s.State == NeedsLogin }
+
+// ConnectsOnItsOwn reports whether the server, while not connected, gets connected without anyone
+// acting: in every state but needs-login. A request for such a server is worth holding while it
+// starts.
+func (s Status) ConnectsOnItsOwn() bool { return !s.AwaitsLogin() }
+
 // NotReadyError is returned by Call when the server has no usable session.
 type NotReadyError struct {
 	Name  string
