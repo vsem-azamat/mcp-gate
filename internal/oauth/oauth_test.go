@@ -25,7 +25,7 @@ func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 
 func httpClient(t *testing.T) *http.Client {
 	t.Helper()
-	c := oauth.NewHTTPClient()
+	c := oauth.NewHTTPClient("http://127.0.0.1/mcp") // the fakes listen on loopback
 	t.Cleanup(c.CloseIdleConnections)
 	return c
 }
@@ -487,7 +487,7 @@ func TestRefreshAfterLogout(t *testing.T) {
 	}
 	later := func() time.Time { return time.Now().Add(2 * time.Hour) } // token expired
 	src := newSource(t, store, srv.URL(), nil, later)
-	unlock, err := store.Lock("notes") // "auth logout" holds the lock
+	unlock, err := store.Lock(t.Context(), "notes") // "auth logout" holds the lock
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,6 +504,46 @@ func TestRefreshAfterLogout(t *testing.T) {
 	}
 }
 
+// Close ends a refresh that waits for the lock another process holds, so that a supervisor
+// that stops is not held for the lock's whole deadline.
+func TestCloseEndsLockWait(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}})
+	store := oauth.NewStore(t.TempDir())
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	later := func() time.Time { return time.Now().Add(2 * time.Hour) } // token expired
+	src := newSource(t, store, srv.URL(), nil, later)
+	unlock, err := store.Lock(t.Context(), "notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := src.Token()
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("the refresh did not wait for the lock: %v", err)
+	default:
+	}
+	src.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("a refresh ended by Close = %v, want the lock wait cancelled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not end the wait for the lock")
+	}
+	if _, err := src.Token(); !errors.Is(err, oauth.ErrClosed) {
+		t.Errorf("a closed source's refresh = %v, want ErrClosed", err)
+	}
+}
+
 // A new login while a refresh waits for the lock wins over the old grant.
 func TestRefreshAfterNewLogin(t *testing.T) {
 	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}})
@@ -516,7 +556,7 @@ func TestRefreshAfterNewLogin(t *testing.T) {
 	src := newSource(t, store, srv.URL(), nil, func() time.Time { return later().Add(-3 * time.Hour) })
 	_ = src.LoginRequired()
 	src2 := newSource(t, store, srv.URL(), nil, later)
-	unlock, err := store.Lock("notes")
+	unlock, err := store.Lock(t.Context(), "notes")
 	if err != nil {
 		t.Fatal(err)
 	}

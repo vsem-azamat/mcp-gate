@@ -166,7 +166,7 @@ func (s *OAuthServer) Approve(t testing.TB, authURL string) string {
 // redirect URL, and saves the grant under name in store.
 func (s *OAuthServer) Login(t testing.TB, store *oauth.Store, name string) *oauth.Grant {
 	t.Helper()
-	hc := oauth.NewHTTPClient()
+	hc := oauth.NewHTTPClient(s.URL())
 	defer hc.CloseIdleConnections()
 	p, err := oauth.BeginLogin(t.Context(), oauth.LoginOptions{
 		Name: name, ServerURL: s.URL(), Config: config.OAuth{RedirectURL: config.DefaultRedirectURL}, HTTPClient: hc,

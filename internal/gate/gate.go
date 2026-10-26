@@ -14,6 +14,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -121,6 +122,10 @@ func New(opts Options) (*Gate, error) {
 		api := upstream.Recover(g.logger, "_escrow", g.escrow.Handler())
 		if *cfg.Escrow.TCP {
 			g.mux.Handle(escrow.Route, api)
+			if !cfg.Listen.BehindProxy && loopbackListen(cfg.Listen.Addr) {
+				g.logger.Warn("the escrow API is on a loopback listener without listen.behindProxy: behind a reverse proxy " +
+					"on this host every client is 127.0.0.1 and shares one failed-auth budget; set behindProxy and trustedProxies")
+			}
 		}
 		if cfg.Escrow.Socket != nil {
 			if slices.Contains(cfg.Escrow.Socket.AllowUIDs, os.Geteuid()) {
@@ -293,7 +298,7 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 		if oc := s.HTTP.OAuth; oc != nil {
 			o.HTTP.OAuth = oauth.NewSource(oauth.SourceOptions{
 				Name: name, ServerURL: s.HTTP.URL, ClientID: oc.ClientID, ClientSecret: oc.ClientSecret,
-				Store: store, HTTPClient: oauth.NewHTTPClient(), Logger: logger,
+				Store: store, HTTPClient: oauth.NewHTTPClient(s.HTTP.URL), Logger: logger,
 			})
 		}
 	}
@@ -518,4 +523,17 @@ func (g *Gate) Readiness() upstream.Readiness {
 		}
 	}
 	return r
+}
+
+// loopbackListen reports whether a listen address is on a loopback address or localhost.
+func loopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
 }

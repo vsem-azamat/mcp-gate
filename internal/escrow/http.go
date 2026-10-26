@@ -87,24 +87,34 @@ func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		e.logger.Info("escrow access", "op", op, "handle", logHandle, "status", status, "remote", client)
 	}()
 
-	// A keyless peer skips the limit, so that wrong keys from inside the gate's tree, under the
-	// same user ID, cannot lock it out.
+	// A client whose bucket is empty gets 429 for any key, the right one included; the global
+	// bucket refuses wrong keys only. A keyless peer skips the limit, so that wrong keys from
+	// inside the gate's tree, under the same user ID, cannot lock it out.
 	if !keyless {
-		if wait, ok := e.limit.allow(client); !ok {
-			status = http.StatusTooManyRequests
-			w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
-			http.Error(w, "Too Many Requests", status)
+		apiKey := presentedKey(r)
+		if apiKey != "" {
+			if wait, ok := e.limit.allow(client); !ok {
+				status = http.StatusTooManyRequests
+				w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
+				http.Error(w, "Too Many Requests", status)
+				return
+			}
+		}
+		if !e.authorized(apiKey) {
+			if apiKey != "" { // only a presented key can be a guess
+				if wait, ok := e.limit.fail(client); !ok {
+					status = http.StatusTooManyRequests
+					w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
+					http.Error(w, "Too Many Requests", status)
+					return
+				}
+			}
+			status = http.StatusUnauthorized
+			w.Header().Set("WWW-Authenticate", `Bearer realm="escrow"`)
+			http.Error(w, "Unauthorized", status)
 			return
 		}
-	}
-	if key := presentedKey(r); !keyless && !e.authorized(key) {
-		if key != "" {
-			e.limit.fail(client) // only a presented key can be a guess
-		}
-		status = http.StatusUnauthorized
-		w.Header().Set("WWW-Authenticate", `Bearer realm="escrow"`)
-		http.Error(w, "Unauthorized", status)
-		return
+		e.limit.succeed(client)
 	}
 	if !HandleRE.MatchString(handle) || (sub != "" && sub != "meta") {
 		status = http.StatusNotFound

@@ -202,10 +202,42 @@ func contentURI(c mcp.Content) string {
 	return ""
 }
 
-// withhold returns res with every mention of a file removed: a content block whose text or URI
-// names one of paths becomes notice, and a string in structured content that names one becomes
-// marker (a string, so that an output schema requiring the member still validates). res is not
-// modified.
+// contentMeta returns the _meta objects of a content block: its own and, for an embedded
+// resource, the resource's.
+func contentMeta(c mcp.Content) []map[string]any {
+	switch v := c.(type) {
+	case *mcp.TextContent:
+		if v != nil {
+			return []map[string]any{v.Meta}
+		}
+	case *mcp.ImageContent:
+		if v != nil {
+			return []map[string]any{v.Meta}
+		}
+	case *mcp.AudioContent:
+		if v != nil {
+			return []map[string]any{v.Meta}
+		}
+	case *mcp.ResourceLink:
+		if v != nil {
+			return []map[string]any{v.Meta}
+		}
+	case *mcp.EmbeddedResource:
+		if v != nil {
+			m := []map[string]any{v.Meta}
+			if v.Resource != nil {
+				m = append(m, v.Resource.Meta)
+			}
+			return m
+		}
+	}
+	return nil
+}
+
+// withhold returns res with every mention of a file removed: a content block whose text, URI
+// or _meta names one of paths becomes notice, and a string in structured content or in the
+// result's _meta that names one becomes marker (a string, so that an output schema requiring
+// the member still validates). res is not modified.
 func withhold(res *mcp.CallToolResult, paths []string, marker, notice string) *mcp.CallToolResult {
 	mentions := func(text string) bool {
 		for _, p := range paths {
@@ -214,17 +246,6 @@ func withhold(res *mcp.CallToolResult, paths []string, marker, notice string) *m
 			}
 		}
 		return false
-	}
-	out := *res
-	out.Content = slices.Clone(res.Content)
-	for i, c := range out.Content {
-		embedded := ""
-		if e, ok := c.(*mcp.EmbeddedResource); ok && e != nil && e.Resource != nil {
-			embedded = e.Resource.Text
-		}
-		if mentions(contentText(c)) || mentions(contentURI(c)) || mentions(embedded) {
-			out.Content[i] = &mcp.TextContent{Text: notice}
-		}
 	}
 	// Unlike the search for paths, this walk has no depth limit: a mention anywhere is removed.
 	var replace func(value any) (any, bool)
@@ -268,9 +289,33 @@ func withhold(res *mcp.CallToolResult, paths []string, marker, notice string) *m
 		}
 		return value, false
 	}
+	metaMentions := func(c mcp.Content) bool {
+		for _, m := range contentMeta(c) {
+			if _, changed := replace(m); changed {
+				return true
+			}
+		}
+		return false
+	}
+	out := *res
+	out.Content = slices.Clone(res.Content)
+	for i, c := range out.Content {
+		embedded := ""
+		if e, ok := c.(*mcp.EmbeddedResource); ok && e != nil && e.Resource != nil {
+			embedded = e.Resource.Text
+		}
+		if mentions(contentText(c)) || mentions(contentURI(c)) || mentions(embedded) || metaMentions(c) {
+			out.Content[i] = &mcp.TextContent{Text: notice}
+		}
+	}
 	if res.StructuredContent != nil {
 		if updated, changed := replace(res.StructuredContent); changed {
 			out.StructuredContent = updated
+		}
+	}
+	if res.Meta != nil {
+		if updated, changed := replace(map[string]any(res.Meta)); changed {
+			out.Meta = updated.(map[string]any) //nolint:forcetypeassert // replace returns a map for a map
 		}
 	}
 	return &out

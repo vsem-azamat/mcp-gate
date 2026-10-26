@@ -1,6 +1,7 @@
 package downstream
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -12,7 +13,7 @@ import (
 
 func oauthOptions(t *testing.T, srv *testkit.OAuthServer, store *oauth.Store) Options {
 	t.Helper()
-	hc := oauth.NewHTTPClient()
+	hc := oauth.NewHTTPClient(srv.URL())
 	t.Cleanup(hc.CloseIdleConnections)
 	src := oauth.NewSource(oauth.SourceOptions{Name: "fake", ServerURL: srv.URL(), Store: store, HTTPClient: hc})
 	return fast(Options{Name: "fake", HTTP: &HTTP{URL: srv.URL(), OAuth: src}})
@@ -62,5 +63,36 @@ func TestOAuthRevokedGrantNeedsLogin(t *testing.T) {
 		if strings.Contains(st.LastError, secret) {
 			t.Error("a token appears in the last error")
 		}
+	}
+}
+
+// Stop ends a token refresh that waits for the grant lock another process holds; the SDK holds
+// its connection lock meanwhile, so the wait would otherwise outlast the stop limit.
+func TestStopEndsOAuthLockWait(t *testing.T) {
+	t.Parallel()
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{})
+	store := oauth.NewStore(t.TempDir())
+	srv.Login(t, store, "fake")
+	hc := oauth.NewHTTPClient(srv.URL())
+	t.Cleanup(hc.CloseIdleConnections)
+	src := oauth.NewSource(oauth.SourceOptions{
+		Name: "fake", ServerURL: srv.URL(), Store: store, HTTPClient: hc,
+		Now: func() time.Time { return time.Now().Add(2 * time.Hour) }, // the token has expired
+	})
+	unlock, err := store.Lock(t.Context(), "fake") // another process holds the lock
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	s, err := New(fast(Options{Name: "fake", HTTP: &HTTP{URL: srv.URL(), OAuth: src}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Start(t.Context())
+	time.Sleep(300 * time.Millisecond) // the connect is waiting for the lock
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := s.Stop(ctx); err != nil {
+		t.Fatalf("Stop while a refresh waits for the lock: %v", err)
 	}
 }

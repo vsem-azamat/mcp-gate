@@ -105,7 +105,7 @@ func runAuth(ctx context.Context, args []string, env lookupEnv, stdout, stderr i
 		return exitUsage
 	}
 	if cmd == "logout" {
-		return authLogout(store, name, stdout, stderr)
+		return authLogout(ctx, store, name, stdout, stderr)
 	}
 	ctx, cancel := context.WithTimeout(ctx, loginTimeout)
 	defer cancel()
@@ -122,7 +122,7 @@ func authLogin(ctx context.Context, cfg *config.Config, name string, s *config.S
 		_, _ = fmt.Fprintf(stdout, "The kept grant cannot be read (%v); it is replaced.\n", err)
 		prev = nil
 	}
-	hc := oauth.NewHTTPClient()
+	hc := oauth.NewHTTPClient(s.HTTP.URL)
 	p, err := oauth.BeginLogin(ctx, oauth.LoginOptions{
 		Name: name, ServerURL: s.HTTP.URL, Config: *s.HTTP.OAuth, ClientName: cfg.Name + " (" + name + ")",
 		Previous: prev, HTTPClient: hc,
@@ -145,7 +145,7 @@ func authLogin(ctx context.Context, cfg *config.Config, name string, s *config.S
 	if err != nil {
 		return err
 	}
-	unlock, err := store.Lock(name)
+	unlock, err := store.Lock(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -255,8 +255,8 @@ func grantLine(store *oauth.Store, name string, s *config.Server, now time.Time)
 	return fmt.Sprintf("%s (%s, since %s): %s", state, client, g.ObtainedAt.UTC().Format(time.RFC3339), describeTokens(g, now)), usable
 }
 
-func authLogout(store *oauth.Store, name string, stdout, stderr io.Writer) int {
-	unlock, err := store.Lock(name)
+func authLogout(ctx context.Context, store *oauth.Store, name string, stdout, stderr io.Writer) int {
+	unlock, err := store.Lock(ctx, name)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", err)
 		return exitTrouble

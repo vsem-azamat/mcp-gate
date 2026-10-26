@@ -26,11 +26,18 @@ const (
 	MaxBodyBytes = 4 << 20
 	// RetryAfter is the Retry-After, in seconds, of a route whose server has not connected yet.
 	RetryAfter = "5"
+	// WriteTimeout bounds each write of a response, of at most writeChunk bytes, so that a
+	// client that stops reading cannot hold its handler, nor the goroutines and memory behind
+	// it, while the connection stays up.
+	WriteTimeout = 30 * time.Second
+	writeChunk   = 64 << 10
 )
 
 // NewServer returns the HTTP server for handler with mcp-gate's limits. It has no ReadTimeout:
 // net/http cancels a request's context when the read deadline passes, even after the body has
 // been read, which would cancel long calls. MCP routes bound their body with ReadBody instead.
+// It has no WriteTimeout either, which would bound the whole response and so the call; each
+// write is bounded by BoundWrites instead.
 // Its Shutdown closes the connections on which no request has arrived. It serves HTTP/1 only:
 // net/http does not report an HTTP/2 connection becoming active, which the tracking relies on.
 func NewServer(addr string, handler http.Handler, logger *slog.Logger) *http.Server {
@@ -40,7 +47,7 @@ func NewServer(addr string, handler http.Handler, logger *slog.Logger) *http.Ser
 	srv := &http.Server{
 		Protocols:         &protocols,
 		Addr:              addr,
-		Handler:           handler,
+		Handler:           BoundWrites(WriteTimeout, handler),
 		ReadHeaderTimeout: ReadHeaderTimeout,
 		IdleTimeout:       IdleTimeout,
 		MaxHeaderBytes:    MaxHeaderBytes,
@@ -84,6 +91,54 @@ func (u *unusedConns) closeAll() {
 	}
 	clear(u.conns)
 }
+
+// BoundWrites gives every write of a response, cut into pieces of at most writeChunk bytes, and
+// every flush a write deadline of timeout from its start, so that a response that makes no
+// progress for that long fails. net/http then closes the connection and cancels the request's
+// context, which ends the call behind it. The deadline is cleared when a request starts, since
+// one left by the previous request on the connection would fail it, and set once more when the
+// handler returns, for the flush that net/http does then.
+func BoundWrites(timeout time.Duration, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bw := &boundedWriter{ResponseWriter: w, rc: http.NewResponseController(w), timeout: timeout}
+		_ = bw.rc.SetWriteDeadline(time.Time{})
+		defer bw.arm()
+		next.ServeHTTP(bw, r)
+	})
+}
+
+// boundedWriter sets the write deadline before each write. Unwrap lets
+// http.ResponseController reach the connection through it.
+type boundedWriter struct {
+	http.ResponseWriter
+	rc      *http.ResponseController
+	timeout time.Duration
+}
+
+func (w *boundedWriter) arm() { _ = w.rc.SetWriteDeadline(time.Now().Add(w.timeout)) }
+
+func (w *boundedWriter) Write(p []byte) (int, error) {
+	n := 0
+	for len(p) > 0 {
+		w.arm()
+		m, err := w.ResponseWriter.Write(p[:min(len(p), writeChunk)])
+		n += m
+		if err != nil {
+			return n, err
+		}
+		p = p[m:]
+	}
+	return n, nil
+}
+
+func (w *boundedWriter) Flush() { _ = w.FlushError() }
+
+func (w *boundedWriter) FlushError() error {
+	w.arm()
+	return w.rc.Flush()
+}
+
+func (w *boundedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // ReadBody reads the request body, up to maxBytes within timeout, before next runs, and then
 // clears the read deadline, so that the body is bounded but a long call is not. Handlers after it

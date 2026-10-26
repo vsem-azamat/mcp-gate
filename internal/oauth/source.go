@@ -14,6 +14,9 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// ErrClosed is returned by a refresh after Source.Close.
+var ErrClosed = errors.New("oauth: the token source is closed")
+
 // expirySkew is how long before its expiry an access token is refreshed.
 const expirySkew = time.Minute
 
@@ -44,6 +47,9 @@ type SourceOptions struct {
 type Source struct {
 	opts   SourceOptions
 	logger *slog.Logger
+	// closed ends refreshes and the waits for the grant lock; Close closes it.
+	closed    chan struct{}
+	closeOnce sync.Once
 
 	mu       sync.Mutex
 	grant    *Grant
@@ -75,8 +81,13 @@ func NewSource(opts SourceOptions) *Source {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
-	return &Source{opts: opts, logger: opts.Logger.With("server", opts.Name), reason: "not logged in"}
+	return &Source{opts: opts, logger: opts.Logger.With("server", opts.Name), reason: "not logged in", closed: make(chan struct{})}
 }
+
+// Close ends a wait for the grant lock in progress, and makes later refreshes fail at once, so
+// that a supervisor that stops is not held by another process holding the lock. A token request
+// already sent runs on, bounded by RequestTimeout, so that a rotated refresh token is saved.
+func (s *Source) Close() { s.closeOnce.Do(func() { close(s.closed) }) }
 
 // LoginRequired reports whether the server has no usable grant, reading the grant file again
 // if it changed.
@@ -110,7 +121,7 @@ func (s *Source) Token() (*oauth2.Token, error) {
 		return nil, ErrLoginRequired
 	}
 	if !s.validLocked(s.grant) {
-		// oauth2.TokenSource has no context; the refresh is bounded by RequestTimeout.
+		// oauth2.TokenSource has no context; the refresh is bounded by RequestTimeout and Close.
 		if err := s.refreshLocked(context.Background()); err != nil {
 			return nil, err
 		}
@@ -165,7 +176,8 @@ func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Re
 		s.rejectLocked("the server rejects the grant's tokens")
 		return ErrLoginRequired
 	}
-	// A refresh cut off by the request's end could lose a rotated refresh token.
+	// A refresh cut off by the request's end could lose a rotated refresh token, so only Close
+	// ends it early.
 	if err := s.refreshLocked(context.WithoutCancel(ctx)); err != nil {
 		return err
 	}
@@ -212,7 +224,23 @@ func (s *Source) rejectLocked(reason string) {
 // refreshLocked replaces the access token using the refresh token. Under the store's lock it
 // first reads the grant file again, in case another process has refreshed it already.
 func (s *Source) refreshLocked(ctx context.Context) error {
-	unlock, err := s.opts.Store.Lock(s.opts.Name)
+	// Close ends the wait for the lock, but not a token request once sent: cutting that off
+	// could lose a refresh token the authorization server has already rotated.
+	select {
+	case <-s.closed:
+		return ErrClosed
+	default:
+	}
+	lockCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.closed:
+			cancel()
+		case <-lockCtx.Done():
+		}
+	}()
+	unlock, err := s.opts.Store.Lock(lockCtx, s.opts.Name)
 	if err != nil {
 		return err
 	}
@@ -241,8 +269,8 @@ func (s *Source) refreshLocked(ctx context.Context) error {
 	if s.grant.Resource != "" {
 		form.Set("resource", s.grant.Resource)
 	}
-	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
-	defer cancel()
+	ctx, cancelReq := context.WithTimeout(ctx, RequestTimeout)
+	defer cancelReq()
 	tr, err := requestToken(ctx, s.opts.HTTPClient, s.grant.TokenEndpoint, cl, form)
 	if err != nil {
 		var te *TokenError

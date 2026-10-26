@@ -439,6 +439,44 @@ func TestEmbeddedTextMentionIsWithheld(t *testing.T) {
 	}
 }
 
+func TestMetaMentionIsWithheld(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, true)
+	p := filepath.Join(f.dir, "a.env")
+	writeFile(t, p, "DB_PASS"+"WORD="+"hunter2!x\n")
+	in := &mcp.CallToolResult{
+		Meta: mcp.Meta{"download": map[string]any{"saved": []any{"at " + p}}, "other": "kept"},
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: "Media downloaded to " + p + "."},
+			&mcp.ImageContent{MIMEType: "image/png", Data: []byte{1}, Meta: mcp.Meta{"source": p}},
+			&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{URI: "note://1", Text: "note", Meta: mcp.Meta{"file": p}}},
+			&mcp.TextContent{Text: "unrelated", Meta: mcp.Meta{"x": "y"}},
+		},
+	}
+	res, n, err := f.scan(t, "download_media", nil, in)
+	if err != nil || n != 1 {
+		t.Fatalf("scan = %d, %v", n, err)
+	}
+	out, err := json.Marshal(res)
+	if err != nil || strings.Contains(string(out), p) {
+		t.Fatalf("result = %s, %v", out, err)
+	}
+	for i := 1; i <= 2; i++ {
+		if _, ok := res.Content[i].(*mcp.TextContent); !ok {
+			t.Errorf("block %d, whose _meta names the file, was kept: %#v", i, res.Content[i])
+		}
+	}
+	if tc, ok := res.Content[3].(*mcp.TextContent); !ok || tc.Text != "unrelated" {
+		t.Errorf("an unrelated block changed: %#v", res.Content[3])
+	}
+	if res.Meta["other"] != "kept" || !markerRE.MatchString(fmt.Sprint(res.Meta["download"])) {
+		t.Errorf("result _meta = %v", res.Meta)
+	}
+	if in.Meta["download"].(map[string]any)["saved"].([]any)[0] != "at "+p { //nolint:forcetypeassert // built above
+		t.Error("the input _meta was modified")
+	}
+}
+
 func TestPathThroughAFileFailsClosed(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, 0, true)

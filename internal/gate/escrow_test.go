@@ -122,9 +122,12 @@ func TestEscrowFailedAuthLimit(t *testing.T) {
 					t.Fatalf("failure %d = %d, want 401", i+1, code)
 				}
 			}
-			code, h, _ := r.escrowGet(t, http.MethodGet, path, "Authorization", "Bearer "+escrowKey, "X-Forwarded-For", "203.0.113.5")
+			code, h, _ := r.escrowGet(t, http.MethodGet, path, "Authorization", "Bearer wrong", "X-Forwarded-For", "203.0.113.5")
 			if code != http.StatusTooManyRequests || h.Get("Retry-After") == "" {
-				t.Errorf("the limited client with the key = %d %v, want 429", code, h)
+				t.Errorf("the limited client's wrong key = %d %v, want 429", code, h)
+			}
+			if code, _, _ := r.escrowGet(t, http.MethodGet, path, "Authorization", "Bearer "+escrowKey, "X-Forwarded-For", "203.0.113.5"); code != http.StatusTooManyRequests {
+				t.Errorf("the limited client with the key = %d, want 429", code)
 			}
 			code, _, _ = r.escrowGet(t, http.MethodGet, path, "Authorization", "Bearer "+escrowKey, "X-Forwarded-For", "203.0.113.6")
 			want := http.StatusNotFound // a client of its own, past the auth check
@@ -132,7 +135,7 @@ func TestEscrowFailedAuthLimit(t *testing.T) {
 				want = http.StatusTooManyRequests // X-Forwarded-For is ignored: the same peer
 			}
 			if code != want {
-				t.Errorf("another forwarded client = %d, want %d", code, want)
+				t.Errorf("another forwarded client's wrong key = %d, want %d", code, want)
 			}
 			if lines := r.logs.lines("escrow access"); len(lines) == 0 || (behind && lines[0]["remote"] != "203.0.113.5") || (!behind && lines[0]["remote"] != "127.0.0.1") {
 				t.Errorf("access lines = %v", lines)
@@ -367,5 +370,24 @@ func TestEscrowSocketOwnUIDWarning(t *testing.T) {
 	r.waitReady(t, "chat")
 	if w := r.logs.lines("escrow.socket.allowUIDs lists the gate's own user"); len(w) != 1 || w[0]["level"] != "WARN" {
 		t.Errorf("warnings = %v", w)
+	}
+}
+
+// The default listen address is loopback, so a gate with the escrow on the listener and no
+// behindProxy warns that clients behind a same-host proxy share one budget.
+func TestEscrowLoopbackListenerWarning(t *testing.T) {
+	for _, tc := range []struct {
+		head string
+		want int
+	}{
+		{"", 1},
+		{"listen: {behindProxy: true, trustedProxies: [127.0.0.1/32]}\n", 0},
+	} {
+		r := startGate(t, configDoc(tc.head, map[string]string{"chat": stdioServer(t, testkit.Fake{}, "")}), gateOpts{escrowKey: escrowKey})
+		r.waitReady(t, "chat")
+		if w := r.logs.lines("the escrow API is on a loopback listener without listen.behindProxy: behind a reverse proxy " +
+			"on this host every client is 127.0.0.1 and shares one failed-auth budget; set behindProxy and trustedProxies"); len(w) != tc.want {
+			t.Errorf("%q: warnings = %v, want %d", tc.head, w, tc.want)
+		}
 	}
 }
