@@ -57,6 +57,18 @@ checksum:
 changelog:
   use: github
   sort: asc
+  filters:
+    exclude:
+      - "^(chore|docs|test|ci)(\\(.+\\))?!?:"
+  groups:
+    - title: Features
+      regexp: "^feat(\\(.+\\))?!?:"
+      order: 0
+    - title: Fixes
+      regexp: "^fix(\\(.+\\))?!?:"
+      order: 1
+    - title: Other changes
+      order: 999
 
 release:
   draft: false
