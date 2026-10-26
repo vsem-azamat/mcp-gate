@@ -74,6 +74,19 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 
 mcp-gate suits a handful of MCP servers on one machine. If you need what the lower rows list, look at ContextForge, agentgateway, [MetaMCP](https://github.com/metatool-ai/metamcp) or [MCPJungle](https://github.com/mcpjungle/MCPJungle).
 
+### Footprint
+
+10 small stdio servers and 1 HTTP server behind each gateway; 4 agents, each with a session to all 11 servers, make 1000 `tools/call` in total. Median of 3 runs, Linux x86-64, October 2026.
+
+| | **mcp-gate** | mcp-proxy | Docker | ContextForge | agentgateway |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gateway, idle | 22 MB | 18 MB | 43 MB | 371 MB | 37 MB |
+| Gateway, peak under load | 25 MB | 21 MB | 48 MB | 387 MB | 47 MB |
+| Gateway plus servers, after load | 79 MB | 81 MB | 875 MB | 1862 MB | 112 MB |
+| Server processes kept | 10 | 10 | 40 containers | 10 + 10 bridges | 50 |
+
+<sub>PSS, except RSS for mcp-gate: it is not dumpable, so its PSS needs root, and RSS is an upper bound (mcp-proxy by RSS: 20 MB idle, 22 MB peak). Totals count the gateway, its server processes, containers with their `docker` helpers, and bridges, but not the shared HTTP server. The test servers are tiny Go programs of about 4 MB each; real servers often take tens of megabytes, so the totals grow with what you run. Docker and agentgateway start a copy of each server for every agent session; agentgateway also kept the 10 from the session that listed the tools. ContextForge ran on SQLite with one worker and needs a bridge per stdio server. Versions: mcp-gate 0.1.3, mcp-proxy 1.1.0, Docker mcp-gateway 0.44.2, ContextForge 1.1.0, agentgateway 1.6.0.</sub>
+
 ## Getting started
 
 Download an archive for Linux or macOS (amd64 or arm64) from [Releases](https://github.com/vsem-azamat/mcp-gate/releases) and check it against `checksums.txt`. You can also build from source with Go 1.27 or newer:
