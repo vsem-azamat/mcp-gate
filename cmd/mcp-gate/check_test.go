@@ -171,6 +171,7 @@ func TestCheckEscrow(t *testing.T) {
 		{"both variables", "", map[string]string{"MCP_GATE_ESCROW_KEY_SHA256": hashA, "MCP_HUB_ESCROW_KEY_SHA256": hashA}, "escrow: on, key hash from MCP_GATE_ESCROW_KEY_SHA256 (MCP_HUB_ESCROW_KEY_SHA256 is set too, and deprecated)\n"},
 		{"socket only", "escrow: {keyHash: '${H}', tcp: false, socket: {path: /run/escrow.sock}}\n", map[string]string{"H": hashA}, "escrow: on, key hash from escrow.keyHash; served on the socket /run/escrow.sock only\n"},
 		{"socket too", "escrow: {socket: {path: /run/escrow.sock}}\n", map[string]string{"MCP_GATE_ESCROW_KEY_SHA256": hashA}, "escrow: on, key hash from MCP_GATE_ESCROW_KEY_SHA256; served on the listener and the socket /run/escrow.sock\n"},
+		{"socket while off", "escrow: {socket: {path: /run/escrow.sock}}\n", nil, "MCP_HUB_ESCROW_KEY_SHA256); escrow.socket is ignored\n"},
 		{"file", "escrow: {keyHashFile: " + quote(hashFile) + "}\n", nil, "escrow: on, key hash from escrow.keyHashFile\n"},
 	}
 	for _, c := range cases {

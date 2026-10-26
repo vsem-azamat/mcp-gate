@@ -102,6 +102,8 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 func escrowLine(key *escrow.Key, c config.Escrow) string {
 	line := escrowKeyLine(key)
 	switch {
+	case key == nil && c.Socket != nil:
+		line += "; escrow.socket is ignored"
 	case key == nil || c.Socket == nil:
 	case *c.TCP:
 		line += "; served on the listener and the socket " + c.Socket.Path

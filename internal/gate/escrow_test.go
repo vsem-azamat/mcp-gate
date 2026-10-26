@@ -308,6 +308,10 @@ func TestEscrowSocket(t *testing.T) {
 			if code, _ := socketGet(t, sock, http.MethodGet, "/chat/mcp"); code != http.StatusNotFound {
 				t.Errorf("an MCP route on the socket = %d, want 404", code)
 			}
+			// The listener never serves without the key.
+			if code, _, _ := r.escrowGet(t, http.MethodGet, "/_escrow/"+m[2]); tcp && code != http.StatusUnauthorized {
+				t.Errorf("TCP without a key = %d, want 401", code)
+			}
 			code, _, _ := r.escrowGet(t, http.MethodGet, "/_escrow/"+m[2], "Authorization", "Bearer "+escrowKey)
 			if want := map[bool]int{true: http.StatusOK, false: http.StatusNotFound}[tcp]; code != want {
 				t.Errorf("TCP with the key = %d, want %d", code, want)
@@ -326,5 +330,24 @@ func TestEscrowSocket(t *testing.T) {
 				t.Errorf("the socket is still there after shutdown: %v", err)
 			}
 		})
+	}
+}
+
+func TestEscrowSocketWhileOff(t *testing.T) {
+	dir, err := os.MkdirTemp("", "esc") //nolint:usetesting // t.TempDir can exceed the socket path limit of about 100 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "escrow.sock")
+	r := startGate(t, configDoc(fmt.Sprintf("escrow:\n  socket: {path: %q}\n", sock), map[string]string{
+		"chat": stdioServer(t, testkit.Fake{}, ""),
+	}), gateOpts{})
+	r.waitReady(t, "chat")
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Errorf("a socket was opened with the escrow off: %v", err)
+	}
+	if w := r.logs.lines("escrow.socket is set but the escrow is off: no socket is opened"); len(w) != 1 {
+		t.Errorf("warnings = %v", w)
 	}
 }

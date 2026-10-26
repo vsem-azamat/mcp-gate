@@ -89,6 +89,8 @@ $ curl -s --unix-socket /run/mcp-gate/escrow.sock http://escrow/_escrow/k3j5rz2q
 {"handle":"k3j5rz2q7wd","type":"password",…}
 ```
 
+Every process of an allowed user is trusted: that includes the gate's stdio servers, which run as the gate's user, and a local reverse proxy that would forward to the socket. When that matters, run the gate as its own user and list the reader's user ID in `allowUIDs`, or set `allowUIDs: []`.
+
 The access log names a socket client `unix:uid=<n>`, and the failed-auth limit counts per user ID. Where the system does not report the peer's user (on systems other than Linux and macOS), every socket request needs the key.
 
 ## Logs

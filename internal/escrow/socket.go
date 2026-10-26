@@ -9,12 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 )
 
 // peerKey is the context key of a socket peer's credentials.
 type peerKey struct{}
 
-// socketPeer is the user of a unix socket peer; known is false when the system did not say.
+// sockPeer is the user of a unix socket peer; known is false when the system did not say.
 type sockPeer struct {
 	uid   int
 	known bool
@@ -58,10 +59,17 @@ func ListenSocket(ctx context.Context, path string, mode fs.FileMode) (*net.Unix
 		if fi.Mode().Type() != fs.ModeSocket {
 			return nil, fmt.Errorf("escrow socket %s: is not a socket; not removing it", path)
 		}
+		// Only a refused connection means nothing listens; a full backlog (EAGAIN) or a socket
+		// this user may not connect to (EACCES) may still be in use. Two gates started at the
+		// same moment on one path can still race here; one path serves one gate.
 		var d net.Dialer
-		if c, err := d.DialContext(ctx, "unix", path); err == nil {
+		c, err := d.DialContext(ctx, "unix", path)
+		if err == nil {
 			_ = c.Close()
 			return nil, fmt.Errorf("escrow socket %s: in use by another process", path)
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			return nil, fmt.Errorf("escrow socket %s: cannot tell whether it is in use; not removing it: %w", path, err)
 		}
 		if err := os.Remove(path); err != nil {
 			return nil, fmt.Errorf("escrow socket %s: removing the stale socket: %w", path, err)
@@ -79,6 +87,7 @@ func ListenSocket(ctx context.Context, path string, mode fs.FileMode) (*net.Unix
 		_ = ln.Close()
 		return nil, fmt.Errorf("escrow socket %s: not a unix listener", path)
 	}
+	// Until the chmod the socket has the mode the umask gives; peers are still checked by user ID.
 	if err := os.Chmod(path, mode); err != nil {
 		_ = ul.Close()
 		return nil, fmt.Errorf("escrow socket %s: %w", path, err)

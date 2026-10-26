@@ -465,12 +465,17 @@ func (g *Gate) shutdown(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, ShutdownGrace)
 	defer cancel()
 	var errs []error
+	// The socket server shuts down alongside the listener, so that a slow socket client does
+	// not take the grace from the calls in flight; closing it also removes the socket file.
+	var sockDone sync.WaitGroup
 	if g.sock != nil {
-		// Its requests are short; closing it also removes the socket file.
-		if err := g.sock.Shutdown(ctx); err != nil {
-			_ = g.sock.Close()
-		}
+		sockDone.Go(func() {
+			if err := g.sock.Shutdown(ctx); err != nil {
+				_ = g.sock.Close()
+			}
+		})
 	}
+	defer sockDone.Wait()
 	if err := g.srv.Shutdown(ctx); err != nil {
 		g.logger.Warn("calls still running at shutdown are cut off", "error", err.Error())
 		if err := g.srv.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {

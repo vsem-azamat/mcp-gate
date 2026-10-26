@@ -46,7 +46,7 @@ escrow:
   socket: {path: /run/mcp-gate/escrow.sock}   # the user unit: ${XDG_RUNTIME_DIR}/mcp-gate/escrow.sock
 ```
 
-systemd creates the directory before the start, writable despite `ProtectSystem=strict`, and removes it at stop. The gate's own user then reads secrets without the key; other local users, and a reverse proxy in front of the TCP listener, still need it. Add `escrow.tcp: false` when nothing should reach the API over TCP.
+systemd creates the directory before the start, writable despite `ProtectSystem=strict`, and removes it at stop. The gate's own user, and so every process of that user including the stdio servers, then reads secrets without the key (see [serve](../commands/serve.md#escrow-socket) for narrowing it); other local users, and a reverse proxy in front of the TCP listener, still need it. Add `escrow.tcp: false` when nothing should reach the API over TCP.
 
 ## Install the system unit
 
