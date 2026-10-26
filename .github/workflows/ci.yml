@@ -60,6 +60,23 @@ jobs:
       - name: Test (race detector, shuffled)
         run: make test
 
+  # The darwin code paths (build tags) build and run their tests on macOS. Tests only: lint and
+  # the rest are platform-independent and stay on Linux.
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: Test (race detector, shuffled)
+        run: make test
+
   vuln:
     name: Vulnerabilities
     runs-on: ubuntu-latest
@@ -103,7 +120,7 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [repo, lint, test, vuln, release]
+    needs: [repo, lint, test, test-macos, vuln, release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
