@@ -11,7 +11,7 @@ It is one Go binary, built on the official [MCP Go SDK](https://github.com/model
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/request-path-dark.svg">
-  <img alt="Your AI agents (Claude Code, Codex, Cursor) each have their own token. mcp-gate checks who is calling and whether the tool is allowed, blocks the call if not, and passes it to the right MCP server. On the way back it hides secrets in answers and in downloaded files and logs who did what. Optionally, hidden secrets wait in a vault for a day, and only your own key opens it." src=".github/assets/request-path-light.svg" width="100%">
+  <img alt="Your AI agents (Claude Code, Codex, Cursor) each have their own token. mcp-gate checks who is calling and whether the tool is allowed, blocks the call if not, and passes it to the right MCP server. On the way back it hides secrets in answers and in downloaded files and logs who did what. The animation follows one call: read_file returns "password: hunter2", the agent gets "password: [REDACTED #k3j5]", the password waits in the secret vault, and the owner reads it back with their own key." src=".github/assets/request-path-light.svg" width="100%">
 </picture>
 
 ## Why I wrote it
