@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -216,5 +219,34 @@ func TestAggregateLogTextUsesEveryRule(t *testing.T) {
 	secret := base64.RawURLEncoding.EncodeToString(sum[:])
 	if got := a.logText("x__" + secret); strings.Contains(got, secret) {
 		t.Errorf("a high-entropy name is logged: %q", got)
+	}
+}
+
+// TestViewAuditsHiddenReadsOnly checks which reads the SDK refuses before a handler a view
+// audits: one whose URI the caller's token policy hides, by the member's mirror, and not one of
+// a URI the member serves and the policy passes, nor one no member serves.
+func TestViewAuditsHiddenReadsOnly(t *testing.T) {
+	rec := &recorder{}
+	cfg := &config.Config{Policies: map[string]*config.TokenPolicy{"phone": {Servers: map[string]*config.ServerPolicy{
+		"a": {Resources: &config.PolicyFilter{Allow: []string{"x://open"}}},
+	}}}}
+	m := newMirror(Options{Name: "a", Policy: policy.New(&config.Server{}), Tokens: policy.NewTokens(cfg, "a"), Audit: rec}, stubDown{})
+	m.apply(kindSet(audit.Resource), &listing{resources: []*mcp.Resource{{URI: "x://open", Name: "open"}, {URI: "x://secret", Name: "secret"}}}, time.Now())
+	agg, err := NewAggregate(AggregateOptions{Members: []*Mirror{m}, Audit: rec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := agg.View([]string{"a"}, map[string]string{"a": "phone"})
+	refuses := v.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) { return nil, errors.New("not found") })
+	for _, uri := range []string{"x://open", "x://secret", "y://nowhere"} {
+		req := &mcp.ReadResourceRequest{
+			Params: &mcp.ReadResourceParams{URI: uri},
+			Extra:  &mcp.RequestExtra{TokenInfo: AccessInfo("phone", map[string]string{"a": "phone"})},
+		}
+		_, _ = refuses(t.Context(), "resources/read", req)
+	}
+	want := []audit.Record{{Server: "a", Principal: "phone", Kind: audit.Resource, Name: "x://secret", Outcome: audit.Denied, TokenPolicy: policy.Denied}}
+	if got := rec.all(); !slices.Equal(got, want) {
+		t.Errorf("records %+v", got)
 	}
 }

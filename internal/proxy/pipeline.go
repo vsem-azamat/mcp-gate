@@ -16,8 +16,8 @@ import (
 // The request pipeline. Every tool call, prompt get and resource read that reaches a mirror's
 // handler runs through the same stages, in this order:
 //
-//   - begin: the audit record starts, the call is counted, and the token policy's decision is
-//     labelled (Mirror.begin);
+//   - begin: the audit record starts and the call is counted (Mirror.begin), and the token
+//     policy's decision is labelled (Mirror.start);
 //   - before forward: the kind's before stages, each of which may refuse the request or change
 //     what is sent: today the server's filter, then the caller's token policy, each of which
 //     refuses an entry it hides with the error of an unknown one;
@@ -55,11 +55,11 @@ type result interface {
 
 // beforeStage checks or changes a request before it is forwarded. An error refuses the request,
 // with the outcome the stage set.
-type beforeStage[P any] func(ctx context.Context, m *Mirror, x *exchange, p P) error
+type beforeStage[P any] func(ctx context.Context, x *exchange, p P) error
 
 // afterStage checks or changes a result. An error withholds the result, with the outcome the
 // stage set.
-type afterStage[R result] func(ctx context.Context, m *Mirror, x *exchange, res R) (R, error)
+type afterStage[R result] func(ctx context.Context, x *exchange, res R) (R, error)
 
 // pipeline is what differs between the kinds of request: the request P sent downstream, the
 // result R, and the stages around the forward.
@@ -77,31 +77,32 @@ type pipeline[P any, R result] struct {
 }
 
 // run takes x and the request p through the pipeline.
-func (pl *pipeline[P, R]) run(ctx context.Context, m *Mirror, x *exchange, p P) (R, error) {
+func (pl *pipeline[P, R]) run(ctx context.Context, x *exchange, p P) (R, error) {
 	defer x.end()
 	var none R
 	for _, stage := range pl.before {
-		if err := stage(ctx, m, x, p); err != nil {
+		if err := stage(ctx, x, p); err != nil {
 			return none, err
 		}
 	}
-	res, err := forward(ctx, m, x, pl, p)
+	res, err := pl.forward(ctx, x, p)
 	res, done, err := pl.outcome(ctx, x, res, err)
 	if done {
 		return res, err
 	}
 	for _, stage := range pl.after {
-		if res, err = stage(ctx, m, x, res); err != nil {
+		if res, err = stage(ctx, x, res); err != nil {
 			return none, err
 		}
 	}
 	return res, nil
 }
 
-// forward sends p downstream with the downstream _meta, and with the progress of the call routed
+// forward is the forward stage: it sends p downstream with the downstream _meta, and with the progress of the call routed
 // to the upstream request while it runs. ctx is the upstream request's: its cancellation cancels
 // the downstream call, and progress is sent on its stream.
-func forward[P any, R result](ctx context.Context, m *Mirror, x *exchange, pl *pipeline[P, R], p P) (R, error) {
+func (pl *pipeline[P, R]) forward(ctx context.Context, x *exchange, p P) (R, error) {
+	m := x.m
 	down := downstreamMeta(x.meta, m.opts.ForwardMeta)
 	if token := progressToken(x.meta); token != nil && x.session != nil {
 		sink := m.src.progress.open(ctx, x.session, token, m.scrub, m.logger)
@@ -154,8 +155,8 @@ func (pl *pipeline[P, R]) fail(err error) (R, error) {
 // The before stages.
 
 // serverFilter refuses an entry that the server's filter hides.
-func serverFilter[P any](_ context.Context, m *Mirror, x *exchange, _ P) error {
-	if !m.serverAllows(x.kind, x.entry) {
+func serverFilter[P any](_ context.Context, x *exchange, _ P) error {
+	if !x.m.serverAllows(x.kind, x.entry) {
 		x.outcome = audit.Denied
 		return errUnknown(x.kind, x.shown)
 	}
@@ -163,8 +164,8 @@ func serverFilter[P any](_ context.Context, m *Mirror, x *exchange, _ P) error {
 }
 
 // tokenPolicy refuses an entry that the caller's token policy hides.
-func tokenPolicy[P any](_ context.Context, m *Mirror, x *exchange, _ P) error {
-	if !m.tokenAllows(x.principal, x.kind, x.entry) {
+func tokenPolicy[P any](_ context.Context, x *exchange, _ P) error {
+	if !x.m.tokenAllows(x.principal, x.kind, x.entry) {
 		x.outcome = audit.Denied
 		return errUnknown(x.kind, x.shown)
 	}
@@ -176,8 +177,8 @@ func tokenPolicy[P any](_ context.Context, m *Mirror, x *exchange, _ P) error {
 // redactWith returns the stage that redacts a result with the server's redaction, if it has
 // one, through fn; a result that cannot be redacted is withheld.
 func redactWith[R result](fn func(*mcpredact.Redactor, R, *countingReplacer) (R, error)) afterStage[R] {
-	return func(_ context.Context, m *Mirror, x *exchange, res R) (R, error) {
-		r := m.opts.Redaction
+	return func(_ context.Context, x *exchange, res R) (R, error) {
+		r := x.m.opts.Redaction
 		if r == nil {
 			return res, nil
 		}
@@ -191,9 +192,9 @@ func redactWith[R result](fn func(*mcpredact.Redactor, R, *countingReplacer) (R,
 
 // scanFiles withholds the files a tool call wrote that hold secrets, with the server's file
 // scanner, on a redacted result; a file that cannot be scanned withholds the result.
-func scanFiles(ctx context.Context, m *Mirror, x *exchange, res *mcp.CallToolResult) (*mcp.CallToolResult, error) {
-	f := m.opts.Files
-	if f == nil || m.opts.Redaction == nil {
+func scanFiles(ctx context.Context, x *exchange, res *mcp.CallToolResult) (*mcp.CallToolResult, error) {
+	f := x.m.opts.Files
+	if f == nil || x.m.opts.Redaction == nil {
 		return res, nil
 	}
 	out, n, err := f.Scan(ctx, x.entry, x.req.Arguments, res, x.forwarded)
@@ -205,7 +206,7 @@ func scanFiles(ctx context.Context, m *Mirror, x *exchange, res *mcp.CallToolRes
 }
 
 // toolErrorOutcome records a tool result that reports an error to the model.
-func toolErrorOutcome(_ context.Context, _ *Mirror, x *exchange, res *mcp.CallToolResult) (*mcp.CallToolResult, error) {
+func toolErrorOutcome(_ context.Context, x *exchange, res *mcp.CallToolResult) (*mcp.CallToolResult, error) {
 	if res.IsError {
 		x.outcome = audit.ToolError
 	}
@@ -282,7 +283,7 @@ func (m *Mirror) callToolAs(ctx context.Context, req *mcp.CallToolRequest, shown
 	if len(req.Params.Arguments) > 0 {
 		params.Arguments = req.Params.Arguments
 	}
-	return toolPipeline.run(ctx, m, x, params)
+	return toolPipeline.run(ctx, x, params)
 }
 
 func (m *Mirror) getPrompt(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
@@ -294,12 +295,12 @@ func (m *Mirror) getPromptAs(ctx context.Context, req *mcp.GetPromptRequest, sho
 	name := req.Params.Name
 	x := m.start(ctx, audit.Prompt, req.Extra, name, shown, req.Session, req.Params.Meta)
 	x.req = Request{Method: audit.Prompt.Method(), Name: name, Arguments: promptArguments(req.Params.Arguments)}
-	return promptPipeline.run(ctx, m, x, &mcp.GetPromptParams{Name: name, Arguments: req.Params.Arguments})
+	return promptPipeline.run(ctx, x, &mcp.GetPromptParams{Name: name, Arguments: req.Params.Arguments})
 }
 
 func (m *Mirror) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	uri := req.Params.URI
 	x := m.start(ctx, audit.Resource, req.Extra, uri, uri, req.Session, req.Params.Meta)
 	x.req = Request{Method: audit.Resource.Method(), Name: uri}
-	return resourcePipeline.run(ctx, m, x, &mcp.ReadResourceParams{URI: uri})
+	return resourcePipeline.run(ctx, x, &mcp.ReadResourceParams{URI: uri})
 }

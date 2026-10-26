@@ -29,7 +29,7 @@ Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `han
 
 Audit records are checked as records: the unit tests of `internal/proxy` give a mirror or an aggregate a sink that keeps them (`proxy.Options.Audit`, `proxy.AggregateOptions.Audit`) and compare `audit.Record` values. The text of the `call` line is pinned once, by `TestAuditLinesGolden` in `internal/gate` (calls and refusals on a server's route and on `/mcp`, with and without a token policy) and `TestAuditOutcomesGolden` and `TestAuditMoreOutcomesGolden` in `internal/proxy` (every other outcome of each kind, the refusals a mirror and a view make before or instead of a forward, and joined token names), which compare whole lines, attribute order included.
 
-The request pipeline is tested in `internal/proxy` against `fakeDown`, a `proxy.Supervisor` whose typed calls answer with canned results and keep the requests they got: every outcome of each kind, the refusals before the forward, the `_meta` sent, redaction and the file scan.
+The request pipeline is tested in `internal/proxy` against `fakeDown`, a `proxy.Supervisor` whose typed calls answer with canned results and keep the requests they got: every outcome of a tool call, those of a prompt get and a resource read that differ from it, the refusals before the forward, the `_meta` sent, redaction and the file scan.
 
 ## Binary smoke test
 
