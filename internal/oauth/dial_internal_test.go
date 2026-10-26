@@ -149,6 +149,11 @@ func TestGuardBehindProxy(t *testing.T) {
 	if err := get(t, local, "http://nas.lan/token"); err != nil {
 		t.Errorf("an internal name for a local server through the proxy: %v", err)
 	}
+	for _, target := range []string{"http://metadata.google.internal/computeMetadata", "http://metadata/computeMetadata", "http://instance-data/latest"} {
+		if err := get(t, local, target); !errors.Is(err, errNonPublic) {
+			t.Errorf("%s for a local server through the proxy: err = %v, want a refusal", target, err)
+		}
+	}
 	if err := get(t, local, "http://169.254.169.254/latest"); !errors.Is(err, errNonPublic) {
 		t.Errorf("a metadata target of a local server through the proxy: err = %v", err)
 	}

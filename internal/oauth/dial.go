@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -106,6 +107,14 @@ func internalName(host string) bool {
 		}
 	}
 	return false
+}
+
+// metadataNames are names of cloud metadata services, refused behind a proxy in every case.
+var metadataNames = []string{"metadata", "metadata.google.internal", "metadata.goog", "instance-data", "instance-data.ec2.internal"}
+
+// metadataName reports a name of a cloud metadata service.
+func metadataName(host string) bool {
+	return slices.Contains(metadataNames, strings.ToLower(host))
 }
 
 // defaultPorts are the ports of server and proxy URLs that name none.
@@ -217,7 +226,7 @@ func (g *guard) proxyFor(req *http.Request) (*url.URL, error) {
 		if alwaysRefused(a) || (!ownServer && g.refused(a)) {
 			return nil, fmt.Errorf("%w %s", errNonPublic, host)
 		}
-	case numericHost(host):
+	case numericHost(host) || metadataName(host):
 		return nil, fmt.Errorf("%w %s", errNonPublic, host)
 	case !ownServer && !g.local && (isLocalName(host) || internalName(host)):
 		return nil, fmt.Errorf("%w %s", errNonPublic, host)

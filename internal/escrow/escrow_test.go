@@ -305,14 +305,21 @@ func TestFailedAuthLimit(t *testing.T) {
 		rec.Header().Get("Retry-After") != "3" || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("a wrong key over the limit = %d %q %v", rec.Code, rec.Body, rec.Header())
 	}
-	// The right key is checked first and always served, even with the client's bucket empty.
-	if rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", client); rec.Code != http.StatusOK {
-		t.Errorf("the right key over the limit = %d, want 200", rec.Code)
+	// The client's bucket is checked before the key, so a guess that happens to be right is
+	// refused too: guessing from one address is bounded.
+	if rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", client); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("the right key over the limit = %d, want 429", rec.Code)
 	}
-	if rec := request(t, e, http.MethodGet, Route+h, "Bearer wrong", "X-Client", "203.0.113.6"); rec.Code != http.StatusUnauthorized {
-		t.Errorf("another client = %d, want 401", rec.Code)
+	if rec := request(t, e, http.MethodGet, Route+h, "", "X-Client", client); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key over the limit = %d, want 401", rec.Code)
+	}
+	if rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", "203.0.113.6"); rec.Code != http.StatusOK {
+		t.Errorf("another client = %d, want 200", rec.Code)
 	}
 	clk.add(failRefill)
+	if rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", client); rec.Code != http.StatusOK {
+		t.Errorf("after a refill = %d, want 200", rec.Code)
+	}
 	if rec := request(t, e, http.MethodGet, Route+h, "Bearer wrong", "X-Client", client); rec.Code != http.StatusUnauthorized {
 		t.Errorf("the earned attempt = %d, want 401", rec.Code)
 	}
@@ -335,11 +342,10 @@ func TestLimiterTableIsBounded(t *testing.T) {
 	if len(l.budgets) > maxClients {
 		t.Fatalf("%d budgets, cap %d", len(l.budgets), maxClients)
 	}
-	l.global.tokens = globalBurst
-	if _, ok := l.fail("198.51.100.1"); ok {
+	if _, ok := l.allow("198.51.100.1"); ok {
 		t.Error("a full table forgot the client that failed most")
 	}
-	if _, ok := l.fail("198.51.100.2"); !ok {
+	if _, ok := l.allow("198.51.100.2"); !ok {
 		t.Error("a client that never failed is refused")
 	}
 }
@@ -370,7 +376,7 @@ func TestGlobalFailLimit(t *testing.T) {
 	if code := get("", "203.0.113.11"); code != http.StatusUnauthorized {
 		t.Errorf("a request without a key, global bucket empty = %d, want 401", code)
 	}
-	// The right key is served from any client, a new one included, with the bucket empty.
+	// The global bucket never refuses the right key, from a new client either.
 	if code := get("Bearer "+testKey, "203.0.113.12"); code != http.StatusOK {
 		t.Errorf("the right key from a new client, global bucket empty = %d, want 200", code)
 	}
@@ -435,10 +441,10 @@ func TestLimiterGroupsIPv6(t *testing.T) {
 	for i := range failBurst {
 		l.fail("2001:db8:1:2::" + strconv.FormatInt(int64(i+1), 16))
 	}
-	if _, ok := l.fail("2001:db8:1:2:ffff::1"); ok {
+	if _, ok := l.allow("2001:db8:1:2:ffff::1"); ok {
 		t.Error("another address of the same /64 is allowed")
 	}
-	if _, ok := l.fail("2001:db8:1:3::1"); !ok {
+	if _, ok := l.allow("2001:db8:1:3::1"); !ok {
 		t.Error("another /64 is refused")
 	}
 }

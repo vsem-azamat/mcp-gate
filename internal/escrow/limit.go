@@ -6,18 +6,23 @@ import (
 	"time"
 )
 
-// The failed-authentication limit. The key is checked first: a request with the right key is
-// always served, so no one can lock the owner out, after a restart, from a new address or from
-// behind a proxy that makes every client 127.0.0.1. A wrong key spends a token of its client's
-// bucket (failBurst, one more every failRefill) and of a global one (globalBurst, one more
-// every globalRefill) that bounds clients rotating addresses; while either is empty, a wrong
-// key gets 429 instead of 401. A request that presents no key costs nothing: it cannot be a
-// guess, and a web page can send such requests to a local listener without the owner knowing.
-// The limit slows guessing and keeps the log readable; a key of 128 random bits or more is what
-// makes guessing hopeless.
+// The failed-authentication limit bounds guessing per client address and sheds the load of
+// wrong keys; a key of at least 128 random bits is what makes guessing hopeless.
 //
-// A client that presented the right key within trustedFor is trusted: its wrong keys (a stale
-// key in a script) spend only its own bucket, not the global one that others share.
+// Each client has a token bucket (failBurst, one more every failRefill) that a presented wrong
+// key spends. While it is empty, every request of that client that presents a key gets 429
+// before its key is looked at, the right key included, so that guessing from one address is
+// bounded however fast it is sent. Whoever shares the owner's address (behind a NAT, or every
+// client behind a same-host proxy without listen.behindProxy) can therefore empty the owner's
+// bucket too.
+//
+// A global bucket (globalBurst, one more every globalRefill) is spent by wrong keys from clients
+// that have not presented the right key within trustedFor; while it is empty, wrong keys get
+// 429 instead of 401. It limits the load of guessing from many addresses and never refuses the
+// right key, so it cannot lock anyone out.
+//
+// A request that presents no key costs nothing: it cannot be a guess, and a web page can send
+// such requests to a local listener without the owner knowing.
 const (
 	failBurst  = 20
 	failRefill = 3 * time.Second
@@ -110,18 +115,25 @@ func (l *limiter) succeed(client string) {
 	l.trusted[ck] = now
 }
 
-// fail counts a wrong key presented by client. It reports false, with how long until the
-// client may try again, when the client's bucket or, for a client that is not trusted, the
-// global one is empty; nothing is spent then.
+// allow reports whether client may present a key now, and if not, how long until it may.
+func (l *limiter) allow(client string) (time.Duration, bool) {
+	now := l.clock.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b := l.budgets[clientKey(client)]; b != nil && b.refill(now) < 1 {
+		return b.wait(failRefill), false
+	}
+	return 0, true
+}
+
+// fail counts a wrong key presented by client. It reports false, with how long until a wrong
+// key is counted again, when the global bucket is empty for a client that is not trusted;
+// nothing is spent then.
 func (l *limiter) fail(client string) (time.Duration, bool) {
 	now := l.clock.Now()
 	ck := clientKey(client)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.budgets[ck]
-	if b != nil && b.refill(now) < 1 {
-		return b.wait(failRefill), false
-	}
 	charged := !l.isTrusted(ck, now)
 	if charged && l.global.refillAt(now, globalBurst, globalRefill) < 1 {
 		return l.global.wait(globalRefill), false
@@ -129,6 +141,7 @@ func (l *limiter) fail(client string) (time.Duration, bool) {
 	if charged {
 		l.global.tokens--
 	}
+	b := l.budgets[ck]
 	if b == nil {
 		if len(l.budgets) >= maxClients {
 			// Linear in the table, under the lock, once per wrong key from a new client.
@@ -144,6 +157,7 @@ func (l *limiter) fail(client string) (time.Duration, bool) {
 		b = &budget{tokens: failBurst, at: now}
 		l.budgets[ck] = b
 	}
+	b.refill(now)
 	b.tokens = max(0, b.tokens-1)
 	return 0, true
 }

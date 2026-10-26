@@ -126,12 +126,11 @@ func TestEscrowFailedAuthLimit(t *testing.T) {
 			if code != http.StatusTooManyRequests || h.Get("Retry-After") == "" {
 				t.Errorf("the limited client's wrong key = %d %v, want 429", code, h)
 			}
-			// The right key is checked first and always served.
-			if code, _, _ := r.escrowGet(t, http.MethodGet, path, "Authorization", "Bearer "+escrowKey, "X-Forwarded-For", "203.0.113.5"); code != http.StatusNotFound {
-				t.Errorf("the limited client with the key = %d, want 404 (past the auth check)", code)
+			if code, _, _ := r.escrowGet(t, http.MethodGet, path, "Authorization", "Bearer "+escrowKey, "X-Forwarded-For", "203.0.113.5"); code != http.StatusTooManyRequests {
+				t.Errorf("the limited client with the key = %d, want 429", code)
 			}
-			code, _, _ = r.escrowGet(t, http.MethodGet, path, "Authorization", "Bearer wrong", "X-Forwarded-For", "203.0.113.6")
-			want := http.StatusUnauthorized // a client of its own
+			code, _, _ = r.escrowGet(t, http.MethodGet, path, "Authorization", "Bearer "+escrowKey, "X-Forwarded-For", "203.0.113.6")
+			want := http.StatusNotFound // a client of its own, past the auth check
 			if !behind {
 				want = http.StatusTooManyRequests // X-Forwarded-For is ignored: the same peer
 			}
