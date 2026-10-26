@@ -33,10 +33,10 @@ func NewTokens(byName map[string]string) *Tokens {
 	return t
 }
 
-// Lookup returns the name of the token whose secret is secret. Every entry is compared, in
+// lookup returns the name of the token whose secret is secret. Every entry is compared, in
 // constant time on fixed-length digests, so the timing tells nothing about which token matched
 // or how much of one did.
-func (t *Tokens) Lookup(secret string) (string, bool) {
+func (t *Tokens) lookup(secret string) (string, bool) {
 	if t == nil || secret == "" {
 		return "", false
 	}
@@ -58,16 +58,16 @@ func (t *Tokens) Lookup(secret string) (string, bool) {
 // client's credential: a value without a credential, or whose credential holds a space or a tab,
 // carries no token.
 func (t *Tokens) Authenticate(header string) (principal string, ok bool) {
-	secret := Credential(header)
+	secret := credential(header)
 	if secret == "" || strings.ContainsAny(secret, " \t") {
 		return "", false
 	}
-	return t.Lookup(secret)
+	return t.lookup(secret)
 }
 
-// Credential returns the secret in an Authorization header value: the credentials after a
+// credential returns the secret in an Authorization header value: the credentials after a
 // "Bearer" scheme, matched without regard to case, or the whole value when it has no scheme.
-func Credential(header string) string {
+func credential(header string) string {
 	header = strings.TrimSpace(header)
 	const scheme = "bearer "
 	if len(header) >= len(scheme) && strings.EqualFold(header[:len(scheme)], scheme) {

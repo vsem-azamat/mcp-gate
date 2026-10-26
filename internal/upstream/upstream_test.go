@@ -20,13 +20,13 @@ import (
 func TestTokens(t *testing.T) {
 	tokens := NewTokens(map[string]string{"laptop": "secret-a", "phone": "secret-b"})
 	for secret, want := range map[string]string{"secret-a": "laptop", "secret-b": "phone", "secret-c": "", "": "", "secret-": ""} {
-		name, ok := tokens.Lookup(secret)
+		name, ok := tokens.lookup(secret)
 		if name != want || ok != (want != "") {
-			t.Errorf("Lookup(%q) = %q %v, want %q", secret, name, ok, want)
+			t.Errorf("lookup(%q) = %q %v, want %q", secret, name, ok, want)
 		}
 	}
 	var none *Tokens
-	if _, ok := none.Lookup("x"); ok {
+	if _, ok := none.lookup("x"); ok {
 		t.Error("a nil token set matched")
 	}
 }
@@ -42,8 +42,8 @@ func TestCredential(t *testing.T) {
 		"":             "",
 		"Basic abc":    "Basic abc",
 	} {
-		if got := Credential(header); got != want {
-			t.Errorf("Credential(%q) = %q, want %q", header, got, want)
+		if got := credential(header); got != want {
+			t.Errorf("credential(%q) = %q, want %q", header, got, want)
 		}
 	}
 }
@@ -321,7 +321,12 @@ func TestShutdownClosesUnusedConns(t *testing.T) {
 }
 
 func TestAuthenticate(t *testing.T) {
-	tokens := NewTokens(map[string]string{"laptop": "secret-a", "phone": "secret-b"})
+	// The last three hold whitespace, which config validation refuses: the header check must
+	// refuse them on its own.
+	tokens := NewTokens(map[string]string{
+		"laptop": "secret-a", "phone": "secret-b",
+		"spaced": "secret-a extra", "tabbed": "secret-a\tb", "schemed": "Bearer\tsecret-a",
+	})
 	for header, want := range map[string]string{
 		"Bearer secret-a":       "laptop",
 		"bearer secret-b":       "phone",
