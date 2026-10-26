@@ -41,6 +41,8 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 | Secret vault for the owner | ✅ | ❌ | ❌ | ❌ | ❌ |
 | OAuth to remote servers | ✅ | ✅ | ✅ | ✅ | ➖ |
 | One binary, no database | ✅ | ✅ | ❌ | ❌ | ✅ |
+| All tools behind one URL | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Different tools for different agents | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Web UI | ❌ | ❌ | ➖ | ✅ | ✅ |
 | SSO and roles | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Kubernetes deployment | ❌ | ❌ | ❌ | ✅ | ✅ |
@@ -48,7 +50,7 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 
 <sub>➖ partly: tools only; Docker blocks the whole call instead of hiding the secret; ContextForge and agentgateway hide secrets through plugins; agentgateway's OAuth is token exchange. – not documented. Checked against each project's docs in October 2026, corrections welcome.</sub>
 
-mcp-gate suits a handful of MCP servers on one machine. If you need those last rows, or all tools behind one URL, look at ContextForge, agentgateway, [MetaMCP](https://github.com/metatool-ai/metamcp) or [MCPJungle](https://github.com/mcpjungle/MCPJungle).
+mcp-gate suits a handful of MCP servers on one machine. If you need what the lower rows list, look at ContextForge, agentgateway, [MetaMCP](https://github.com/metatool-ai/metamcp) or [MCPJungle](https://github.com/mcpjungle/MCPJungle).
 
 ## Quick start
 
