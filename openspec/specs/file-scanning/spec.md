@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Some tools download a file to the gate's host and report its local path instead of returning its content, so its secrets would never pass through result redaction. File scanning reads the files that a server's download tools write, after their results are redacted, and withholds from the result every file that holds secrets: the path is replaced by a marker, and the file is kept in the escrow when it is on. Only files the tool wrote under the configured roots during the call are read, so that neither a client nor a server can make the gate read another file.
+Some tools download a file to the gate's host and report its local path instead of returning its content, so its secrets would never pass through result redaction. File scanning reads the files that a server's download tools write, after their results are redacted, and withholds from the result every file that holds secrets: the path is replaced by a marker, and the file is kept in the escrow when it is on and was written since the gate started. Only files under the configured roots are read, and a path only the client named only when the call wrote it, so that neither a client nor a server can make the gate read a file outside the roots, nor a client an older one, and a server cannot pull an old file into the escrow.
 
 ## Requirements
 
@@ -17,19 +17,29 @@ File scanning SHALL apply to the tools listed in a server's `redact.files.tools`
 
 ### Requirement: Paths
 
-The paths of a call SHALL be the absolute paths in its result and arguments: string members named `path`, `file_path`, `filePath`, `outputPath`, `output_path`, `localPath`, `local_path`, `savedTo` or `saved_to` of the structured content, of text content that is JSON, and of the arguments, at a depth of at most 8; strings starting with `file://` (percent-decoded) among them; the URIs of resource links and embedded resources; and the path after `downloaded to`, `saved to` or `written to` in text content, quoted or starting with `/`. Trailing `.`, `,` and `;` SHALL be dropped, and relative paths ignored. A call that names more than 64 paths SHALL withhold its result (see Failing closed).
+The paths of a call SHALL be the absolute paths in its result and arguments: string members named `path`, `file_path`, `filePath`, `outputPath`, `output_path`, `localPath`, `local_path`, `savedTo` or `saved_to` of the structured content, of text content that is JSON, and of the arguments, at a depth of at most 8; strings starting with `file://` (percent-decoded) among them; the URIs of resource links and embedded resources; and the path after `downloaded to`, `saved to` or `written to` in text content, quoted or starting with `/`. An unquoted path SHALL be the longest of the first 16 space-separated words of the rest of its line (up to a quote or angle bracket, and within 4096 bytes) that lies under a root as written and names a regular file, or its first word when none does. The budget SHALL be per call, however the result is split into content items: collecting paths SHALL stop as soon as more than 64 are found, the call's texts hold more than 64 such mentions in all, or more than 1024 files have been looked up for unquoted paths, so that the work stays bounded. Trailing `.`, `,` and `;` SHALL be dropped, and relative paths ignored. A call that exceeds this budget SHALL withhold its result (see Failing closed).
 
-A path SHALL be read only when, with every symlink resolved, it lies strictly under one of `redact.files.roots` (also resolved) and names a regular file with one link whose inode changed at or after the call started; for a path that only the arguments name, at or after the start, and for one the result names, 2 seconds before it. The file SHALL be opened through its root without following a symlink, and every check SHALL run on the opened file. Any other path SHALL be passed over: it names no file this call wrote. A path that does not exist SHALL be passed over; one written under a root whose symlinks cannot be resolved for another reason (such as a directory it cannot enter) SHALL fail.
+A path SHALL be read only when, with every symlink resolved, it lies strictly under one of `redact.files.roots` (also resolved) and names a regular file with one link; a path that only the arguments name SHALL also have had its inode changed at or after the call started. A path the result names SHALL be read whatever its age, as a tool that caches its downloads reports the same file again, also across a restart of the gate. The file SHALL be opened through its root without following a symlink, and every check SHALL run on the opened file. Any other path SHALL be passed over: it names no file this call wrote. A path that does not exist SHALL be passed over; one written under a root whose symlinks cannot be resolved for another reason (such as a directory it cannot enter) SHALL fail.
 
 #### Scenario: Paths a caller or server cannot use
 
-- **WHEN** a file tool names a file outside the roots, a symlink inside a root that leads out of it, a file with a second hard link, a file whose inode predates the call, a directory or a missing file
+- **WHEN** a file tool names a file outside the roots, a symlink inside a root that leads out of it, a file with a second hard link, a directory or a missing file, or only its arguments name a file whose inode predates the call
 - **THEN** none is read and the result is unchanged
 
 #### Scenario: Ways to report a path
 
-- **WHEN** a file tool reports a path as `Media downloaded to <path>.`, as a `path` member of structured content, nested in a member of an object, or as a `file://` resource link
+- **WHEN** a file tool reports a path as `Media downloaded to <path>.`, as `Downloaded to <path with spaces>` unquoted, as a `path` member of structured content, nested in a member of an object, or as a `file://` resource link
 - **THEN** each file is scanned
+
+#### Scenario: Cached download
+
+- **WHEN** a file tool reports the path of a file with secrets that it wrote before the call
+- **THEN** the file is scanned and withheld
+
+#### Scenario: Cached download from before the gate started
+
+- **WHEN** a file tool reports the path of a file with secrets that it wrote before the gate started
+- **THEN** the file is withheld with the marker `[REDACTED:file]` and is not kept
 
 ### Requirement: Scanning
 
@@ -42,7 +52,7 @@ A file whose name ends in `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx` or `.ppk`
 
 ### Requirement: Withholding
 
-A file with secrets SHALL be withheld: kept in the escrow when it is on, and every content block whose text, URI or embedded resource text mentions its path (as reported, cleaned or resolved) SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
+A file with secrets SHALL be withheld: kept in the escrow when it is on and its inode changed at or after 2 seconds before the gate started (an older file is withheld without being kept), and every content block whose text, URI or embedded resource text mentions its path (as reported, cleaned or resolved) SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
 
 #### Scenario: File with a password
 
@@ -56,7 +66,7 @@ A file with secrets SHALL be withheld: kept in the escrow when it is on, and eve
 
 ### Requirement: Failing closed
 
-When a file that is to be scanned cannot be, the whole result SHALL be withheld, as a result that cannot be redacted is: the client gets an error saying the result was withheld, and the audit outcome is `withheld`. That covers a call naming more than 64 paths, a path under a root that cannot be resolved, a file under a root that cannot be opened (other than missing or a symlink) or checked, a text or credential-store file larger than `redact.files.maxBytes` (default `20MiB`; for a larger file only the first 8 KiB decide whether it is binary), a read error, a size that changes while it is read, text that is not valid UTF-8, the call ending before the file was read, and a panic. The error and the log SHALL NOT name the file's path or quote its content.
+When a file that is to be scanned cannot be, the whole result SHALL be withheld, as a result that cannot be redacted is: the client gets an error saying the result was withheld, and the audit outcome is `withheld`. That covers a call over its budget of paths, mentions or lookups (see Paths), a path under a root that cannot be resolved, a file under a root that cannot be opened (other than missing or a symlink) or checked, a text or credential-store file larger than `redact.files.maxBytes` (default `20MiB`; for a larger file only the first 8 KiB decide whether it is binary), a read error, a size that changes while it is read, text that is not valid UTF-8, the call ending before the file was read, and a panic. The error and the log SHALL NOT name the file's path or quote its content.
 
 #### Scenario: Too large
 

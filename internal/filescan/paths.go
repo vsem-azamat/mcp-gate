@@ -17,8 +17,45 @@ const maxDepth = 8
 // pathKeys are result and argument members that name a downloaded file.
 var pathKeys = []string{"path", "file_path", "filePath", "outputPath", "output_path", "localPath", "local_path", "savedTo", "saved_to"}
 
-// downloadedToRE finds "downloaded to <path>" and the like in text.
+// downloadedToRE finds "downloaded to <path>" and the like in text. An unquoted path may hold
+// spaces, so it is matched only as far as its first word; see unquotedPath.
 var downloadedToRE = regexp.MustCompile(`(?i)(?:downloaded|saved|written)\s+to\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|(/[^\s"'<>]+))`)
+
+const (
+	// maxPathWords bounds the words of an unquoted path tried, so a long line costs little.
+	maxPathWords = 16
+	// maxTailBytes bounds the rest of a line an unquoted path is looked for in.
+	maxTailBytes = 4096
+	// maxMentions bounds the "downloaded to" mentions of one call.
+	maxMentions = 64
+	// maxLookups bounds the file lookups of one call's unquoted paths.
+	maxLookups = maxMentions * maxPathWords
+)
+
+// unquotedPath returns the path an unquoted "downloaded to" names in tail, the rest of its line:
+// the longest of its first maxPathWords words, trailing punctuation dropped, that isFile
+// accepts, or the first word when none is accepted or isFile is nil.
+func unquotedPath(tail string, isFile func(string) bool) string {
+	const space = "\t\n\f\r " // what \s matches in downloadedToRE
+	tail = strings.TrimRight(tail, space)
+	var ends []int // the end of each word, the last being the end of the tail
+	for i := 1; i < len(tail) && len(ends) < maxPathWords-1; i++ {
+		if strings.IndexByte(space, tail[i]) >= 0 && strings.IndexByte(space, tail[i-1]) < 0 {
+			ends = append(ends, i)
+		}
+	}
+	if len(ends) < maxPathWords-1 {
+		ends = append(ends, len(tail))
+	}
+	if isFile != nil {
+		for i := len(ends) - 1; i > 0; i-- {
+			if p := strings.TrimRight(tail[:ends[i]], ".,;"); isFile(p) {
+				return p
+			}
+		}
+	}
+	return tail[:ends[0]]
+}
 
 // candidate is an absolute path a file tool's call names.
 type candidate struct {
@@ -30,11 +67,30 @@ type candidate struct {
 
 // candidates collects the absolute paths a file tool reported in its result (path members of
 // structured content and of JSON text at any depth, file:// URIs, "downloaded to" in text) or
-// that its arguments name (an output path the caller chose).
-func candidates(args map[string]any, res *mcp.CallToolResult) []candidate {
-	var out []candidate
+// that its arguments name (an output path the caller chose). isFile, which may be nil, tells
+// where an unquoted path with spaces ends. The budget is per call: collecting stops, and
+// overflow is set, as soon as more than maxCandidates paths are found, the texts hold more than
+// maxMentions "downloaded to" mentions in all, or isFile would be called more than maxLookups
+// times, so that the work stays bounded however the result is split into content items.
+func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string) bool) (out []candidate, overflow bool) {
 	fromArguments := false
+	mentions, lookups := 0, 0
+	var lookup func(string) bool
+	if isFile != nil {
+		lookup = func(path string) bool {
+			if lookups >= maxLookups {
+				overflow = true
+				return false
+			}
+			lookups++
+			return isFile(path)
+		}
+	}
+	full := func() bool { return overflow || len(out) > maxCandidates }
 	add := func(raw string) {
+		if full() {
+			return
+		}
 		c := strings.TrimSpace(raw)
 		if rest, ok := strings.CutPrefix(c, "file://"); ok {
 			unescaped, err := url.PathUnescape(rest)
@@ -59,7 +115,7 @@ func candidates(args map[string]any, res *mcp.CallToolResult) []candidate {
 	}
 	var walk func(key string, value any, depth int)
 	walk = func(key string, value any, depth int) {
-		if depth > maxDepth {
+		if depth > maxDepth || full() {
 			return
 		}
 		switch v := value.(type) {
@@ -81,6 +137,9 @@ func candidates(args map[string]any, res *mcp.CallToolResult) []candidate {
 		walk("", res.StructuredContent, 0)
 	}
 	for _, c := range res.Content {
+		if full() {
+			break
+		}
 		if uri := contentURI(c); uri != "" {
 			add(uri)
 		}
@@ -92,12 +151,26 @@ func candidates(args map[string]any, res *mcp.CallToolResult) []candidate {
 		if json.Unmarshal([]byte(text), &decoded) == nil {
 			walk("", decoded, 0)
 		}
-		for _, m := range downloadedToRE.FindAllStringSubmatch(text, -1) {
-			for _, group := range m[1:] {
-				if group != "" {
-					add(group)
-					break
+		matches := downloadedToRE.FindAllStringSubmatchIndex(text, maxMentions+1-mentions)
+		if mentions += len(matches); mentions > maxMentions {
+			overflow = true
+		}
+		for _, m := range matches {
+			if full() {
+				break
+			}
+			switch {
+			case m[2] >= 0:
+				add(text[m[2]:m[3]])
+			case m[4] >= 0:
+				add(text[m[4]:m[5]])
+			case m[6] >= 0:
+				// The rest of the line, up to a quote or angle bracket.
+				tail := text[m[6]:min(len(text), m[6]+maxTailBytes)]
+				if end := strings.IndexAny(tail, "\r\n\"'<>"); end >= 0 {
+					tail = tail[:end]
 				}
+				add(unquotedPath(tail, lookup))
 			}
 		}
 	}
@@ -105,7 +178,7 @@ func candidates(args map[string]any, res *mcp.CallToolResult) []candidate {
 	if args != nil {
 		walk("", args, 0)
 	}
-	return out
+	return out, full()
 }
 
 func contentText(c mcp.Content) string {

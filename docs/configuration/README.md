@@ -115,7 +115,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `redact.disableRules` | none | Redaction kinds never reported, such as `jwt` |
 | `redact.escrowTTL` | `escrow.ttl` | How long the escrow keeps this server's secrets |
 | `redact.files.tools` | required with `files` | Tools that save a file locally and report its path; the files they write are scanned and withheld when they hold secrets. Needs `redact.enabled` |
-| `redact.files.roots` | required with `files` | Absolute directories the tools write to (not `/`); only files under them, written during the call, are read |
+| `redact.files.roots` | required with `files` | Absolute directories the tools write to (not `/`, not `$HOME` or a directory above it); only files under them are read, and a path only the arguments name when written during the call; without a usable `$HOME` the check is skipped with a warning |
 | `redact.files.maxBytes` | `20MiB` | Largest file scanned, `1KiB` to `1GiB`. A larger text file withholds the whole result; a larger binary file passes |
 | `forwardMeta` | none | `_meta` keys of a client request passed to the server, by exact name, such as `example.com/trace`. Others are dropped: they describe the client. `progressToken` and `mcp`/`modelcontextprotocol`-prefixed keys are the gate's and cannot be listed |
 

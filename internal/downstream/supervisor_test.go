@@ -623,3 +623,22 @@ func TestAcknowledgedListen(t *testing.T) {
 		})
 	}
 }
+
+func TestHideURL(t *testing.T) {
+	const u = "https://mcp.example.com/k-secret/mcp?a=1&b=2"
+	s, err := New(Options{Name: "remote", HTTP: &HTTP{URL: u}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := json.Marshal(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{
+		"Post " + u, string(enc), strings.ReplaceAll(u, "/", `\/`), strings.ReplaceAll(string(enc), "/", `\/`),
+	} {
+		if got := s.HideURL(text); strings.Contains(got, "k-secret") || !strings.Contains(got, "<servers.remote.http.url>") {
+			t.Errorf("HideURL(%q) = %q", text, got)
+		}
+	}
+}

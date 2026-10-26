@@ -264,10 +264,15 @@ func (p *pass) plainText(s, where string) string {
 	return p.engine.RedactText(s, p.replacer)
 }
 
-// blob redacts a blob with a text MIME type. A text blob over MaxBlobBytes or not valid
-// UTF-8 cannot be scanned and fails the result; blobs of other types pass through unchanged.
+// blob redacts a text blob: one with a text MIME type, or with no MIME type or
+// application/octet-stream whose bytes are UTF-8 text without NUL. A text blob over
+// MaxBlobBytes or not valid UTF-8 cannot be scanned and fails the result; other blobs pass
+// through unchanged.
 func (p *pass) blob(b []byte, mimeType, where string) []byte {
-	if len(b) == 0 || p.err != nil || !textMIMEType(mimeType) {
+	if len(b) == 0 || p.err != nil {
+		return b
+	}
+	if !textMIMEType(mimeType) && (!untypedMIMEType(mimeType) || bytes.IndexByte(b, 0) >= 0 || !utf8.Valid(b)) {
 		return b
 	}
 	if len(b) > MaxBlobBytes {
@@ -344,6 +349,14 @@ func (p *pass) meta(m mcp.Meta, where string) mcp.Meta {
 }
 
 // textMIMEType reports whether a blob of this type is text worth scanning.
+// untypedMIMEType reports whether a MIME type says nothing of the content: empty or
+// application/octet-stream.
+func untypedMIMEType(mimeType string) bool {
+	mimeType, _, _ = strings.Cut(mimeType, ";")
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	return mimeType == "" || mimeType == "application/octet-stream"
+}
+
 func textMIMEType(mimeType string) bool {
 	mimeType, _, _ = strings.Cut(mimeType, ";")
 	mimeType = strings.ToLower(strings.TrimSpace(mimeType))

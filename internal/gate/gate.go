@@ -108,6 +108,9 @@ func New(opts Options) (*Gate, error) {
 	if cfg.Listen.BehindProxy && len(cfg.Listen.AllowedHosts) == 0 {
 		g.logger.Warn("listen.behindProxy is set without listen.allowedHosts: no Host is checked, so the proxy must check it")
 	}
+	if cfg.FileRootsUnchecked {
+		g.logger.Warn("$HOME is unset or relative, so redact.files.roots were not checked against the home directory")
+	}
 	if opts.EscrowKeyHash != nil {
 		// The API answers on the listener ahead of every MCP route check (Host, tokens), as the
 		// contract it keeps was served; its own key and failed-auth limit guard it.

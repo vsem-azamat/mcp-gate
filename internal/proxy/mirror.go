@@ -43,6 +43,8 @@ type Downstream interface {
 	Call(ctx context.Context, fn func(context.Context, *mcp.ClientSession) error) error
 	// ErrorText returns an error's message fit for logs and clients.
 	ErrorText(err error) string
+	// HideURL returns a text with the server's URL replaced by its config path.
+	HideURL(text string) string
 }
 
 // Options configure a Mirror.
@@ -354,8 +356,9 @@ func same(a, b any) bool {
 
 // syncSet updates the entries of one kind. want maps keys to the entries to register; add
 // registers one entry and reports an error for an entry the SDK rejects; remove drops keys.
-// It returns the entries now registered: an entry that fails keeps its previous version.
-func syncSet[T any](logger *slog.Logger, what string, have, want map[string]*T, add func(*T) error, remove func(...string)) map[string]*T {
+// It returns the entries now registered: an entry that fails keeps its previous version. A
+// rejection is logged with its key and error made fit for the log by logText.
+func syncSet[T any](logger *slog.Logger, logText func(string) string, what string, have, want map[string]*T, add func(*T) error, remove func(...string)) map[string]*T {
 	var gone []string
 	for k := range have {
 		if _, ok := want[k]; !ok {
@@ -372,7 +375,7 @@ func syncSet[T any](logger *slog.Logger, what string, have, want map[string]*T, 
 			continue
 		}
 		if err := add(v); err != nil {
-			logger.Warn("skipping a catalog entry the SDK rejects", "kind", what, "key", k, "error", err.Error())
+			logger.Warn("skipping a catalog entry the SDK rejects", "kind", what, "key", logText(k), "error", logText(err.Error()))
 			if old, ok := have[k]; ok {
 				out[k] = old
 			}
@@ -398,7 +401,7 @@ func (m *Mirror) applyTools(list []*mcp.Tool) map[string]*mcp.Tool {
 		}
 		want[t.Name] = t
 	}
-	return syncSet(m.logger, "tool", m.tools, want, func(t *mcp.Tool) error {
+	return syncSet(m.logger, m.logText, "tool", m.tools, want, func(t *mcp.Tool) error {
 		return guard(func() { m.server.AddTool(t, m.callTool) })
 	}, m.server.RemoveTools)
 }
@@ -426,7 +429,7 @@ func (m *Mirror) applyPrompts(list []*mcp.Prompt) map[string]*mcp.Prompt {
 			want[p.Name] = p
 		}
 	}
-	return syncSet(m.logger, "prompt", m.prompts, want, func(p *mcp.Prompt) error {
+	return syncSet(m.logger, m.logText, "prompt", m.prompts, want, func(p *mcp.Prompt) error {
 		return guard(func() { m.server.AddPrompt(p, m.getPrompt) })
 	}, m.server.RemovePrompts)
 }
@@ -449,7 +452,7 @@ func (m *Mirror) applyResources(list []*mcp.Resource) (map[string]*mcp.Resource,
 		}
 		want[r.URI] = r
 	}
-	return syncSet(m.logger, "resource", m.resources, want, func(r *mcp.Resource) error {
+	return syncSet(m.logger, m.logText, "resource", m.resources, want, func(r *mcp.Resource) error {
 		return guard(func() { m.server.AddResource(r, m.readResource) })
 	}, m.server.RemoveResources), hidden
 }
@@ -464,7 +467,7 @@ func (m *Mirror) applyTemplates(list []*mcp.ResourceTemplate) map[string]*mcp.Re
 			want[t.URITemplate] = t
 		}
 	}
-	return syncSet(m.logger, "resource template", m.templates, want, func(t *mcp.ResourceTemplate) error {
+	return syncSet(m.logger, m.logText, "resource template", m.templates, want, func(t *mcp.ResourceTemplate) error {
 		return guard(func() { m.server.AddResourceTemplate(t, m.readResource) })
 	}, m.server.RemoveResourceTemplates)
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -171,19 +172,13 @@ func TestOnlyFilesTheToolWroteAreRead(t *testing.T) {
 	if err := os.Link(filepath.Join(f.dir, "orig.env"), hard); err != nil {
 		t.Fatal(err)
 	}
-	old := filepath.Join(f.dir, "old.env")
-	writeFile(t, old, "OLD_PASS"+"WORD="+"old-pass-1\n")
 	sub := filepath.Join(f.dir, "sub")
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{tokens, link, hard, old, sub, f.dir, filepath.Join(f.dir, "missing.env"), filepath.Join(f.dir, "sub", "..", "..", filepath.Base(outside), "tokens.env")} {
-		start := f.start
-		if path == old {
-			start = time.Now().Add(time.Minute) // its inode changed before this call started
-		}
+	for _, path := range []string{tokens, link, hard, sub, f.dir, filepath.Join(f.dir, "missing.env"), filepath.Join(f.dir, "sub", "..", "..", filepath.Base(outside), "tokens.env")} {
 		in := textResult("Media downloaded to " + path + ".")
-		res, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"file_path": path} }, in, start)
+		res, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"file_path": path} }, in, f.start)
 		if err != nil || n != 0 || text(t, res) != text(t, in) {
 			t.Errorf("%s was scanned: %q, %d, %v", path, text(t, res), n, err)
 		}
@@ -197,6 +192,96 @@ func TestOnlyFilesTheToolWroteAreRead(t *testing.T) {
 	}
 	if _, n, err := f.scan(t, "download_media", map[string]any{"output_path": argOnly}, in); err != nil || n != 1 {
 		t.Errorf("an argument path written during the call = %d, %v", n, err)
+	}
+}
+
+// TestCachedDownload checks that a file the result names is scanned even when it was written
+// before the call, as a download tool that caches its files reports the same path again.
+func TestCachedDownload(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, true)
+	cached := filepath.Join(f.dir, "cached.env")
+	writeFile(t, cached, "OLD_PASS"+"WORD="+"old-pass-1\n")
+	in := textResult("Media downloaded to " + cached + ".")
+	later := time.Now().Add(time.Minute) // the inode changed long before this call started
+	res, n, err := f.scanner.Scan(t.Context(), "download_media", nil, in, later)
+	if err != nil || n != 1 || strings.Contains(text(t, res), cached) {
+		t.Errorf("a cached file = %q, %d, %v", text(t, res), n, err)
+	}
+	if !markerRE.MatchString(text(t, res)) {
+		t.Errorf("a cached file is not kept: %q", text(t, res))
+	}
+	// A file that predates the gate, as a cache kept across a restart, is withheld but not kept.
+	o := f.scanner.o
+	o.Started = time.Now().Add(time.Minute)
+	res, n, err = New(o).Scan(t.Context(), "download_media", nil, in, later)
+	if got := text(t, res); err != nil || n != 1 || strings.Contains(got, cached) || markerRE.MatchString(got) ||
+		!strings.HasPrefix(got, "[REDACTED:file] ") || strings.Contains(got, "release") {
+		t.Errorf("a file older than the gate = %q, %d, %v", got, n, err)
+	}
+}
+
+// TestLongLineStaysCheap checks that a text built to make the search for unquoted paths slow
+// costs a bounded number of file lookups.
+func TestLongLineStaysCheap(t *testing.T) {
+	t.Parallel()
+	for _, line := range []string{
+		strings.Repeat("saved to /a ", 3<<20/12),
+		"saved to /a" + strings.Repeat(" w", 2<<20),
+	} {
+		lookups := 0
+		begin := time.Now()
+		_, _ = candidates(nil, textResult(line), func(string) bool { lookups++; return false })
+		// The time bound only catches quadratic work, which took minutes on such a line; the race
+		// detector makes the linear scan of a few MiB take seconds.
+		if lookups > (maxCandidates+1)*maxPathWords || time.Since(begin) > time.Minute {
+			t.Errorf("%d lookups in %v", lookups, time.Since(begin))
+		}
+	}
+	if _, overflow := candidates(nil, textResult(strings.Repeat("saved to /a ", maxMentions+1)), nil); !overflow {
+		t.Error("more than maxMentions mentions do not overflow")
+	}
+	// The budget is per call: many content items, each under the limit, still overflow it.
+	res := &mcp.CallToolResult{}
+	item := strings.Repeat("saved to /r/x"+strings.Repeat(" w", maxPathWords)+"\n", maxMentions)
+	for range 64 {
+		res.Content = append(res.Content, &mcp.TextContent{Text: item})
+	}
+	lookups := 0
+	if _, overflow := candidates(nil, res, func(string) bool { lookups++; return false }); !overflow || lookups > maxLookups {
+		t.Errorf("many items: overflow %v after %d lookups", overflow, lookups)
+	}
+	// 64 mentions with long tails stay within the lookup budget and pass.
+	var b strings.Builder
+	for i := range maxMentions {
+		fmt.Fprintf(&b, "saved to /r/x%d%s\n", i, strings.Repeat(" w", 2*maxPathWords))
+	}
+	lookups = 0
+	if _, overflow := candidates(nil, textResult(b.String()), func(string) bool { lookups++; return false }); overflow || lookups > maxLookups {
+		t.Errorf("64 long mentions: overflow %v after %d lookups", overflow, lookups)
+	}
+}
+
+// TestUnquotedPathWithSpaces checks that an unquoted path after "downloaded to" may hold
+// spaces: the longest part of the line that names a file is taken.
+func TestUnquotedPathWithSpaces(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, true)
+	if err := os.Mkdir(filepath.Join(f.dir, "my"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spaced := filepath.Join(f.dir, "my report.env")
+	writeFile(t, spaced, "DB_PASS"+"WORD="+"hunter2!x\n")
+	for _, line := range []string{
+		"Downloaded to " + spaced,
+		"Downloaded to " + spaced + ". Open it with care",
+		"Saved to " + spaced + " (12 bytes)\nnext line",
+	} {
+		in := textResult(line)
+		res, n, err := f.scan(t, "download_media", nil, in)
+		if err != nil || n != 1 || strings.Contains(text(t, res), spaced) {
+			t.Errorf("%q = %q, %d, %v", line, text(t, res), n, err)
+		}
 	}
 }
 
@@ -283,7 +368,11 @@ func TestCandidates(t *testing.T) {
 		StructuredContent: map[string]any{"saved_to": "/d/i.txt"},
 	}
 	got := map[string]bool{}
-	for _, c := range candidates(map[string]any{"output_path": "/d/j.txt", "path": "/d/e.txt"}, res) {
+	cands, overflow := candidates(map[string]any{"output_path": "/d/j.txt", "path": "/d/e.txt"}, res, nil)
+	if overflow {
+		t.Error("overflow")
+	}
+	for _, c := range cands {
 		got[c.path] = c.fromArguments
 	}
 	want := map[string]bool{
@@ -358,5 +447,26 @@ func TestPathThroughAFileFailsClosed(t *testing.T) {
 	_, _, err := f.scan(t, "download_media", nil, textResult("Media downloaded to "+filepath.Join(p, "x")+"."))
 	if !errors.Is(err, ErrUnscannable) {
 		t.Errorf("a path through a file under a root = %v, want ErrUnscannable", err)
+	}
+}
+
+func TestUnquotedPath(t *testing.T) {
+	t.Parallel()
+	files := map[string]bool{"/d/my report.env": true, "/d/a": true}
+	isFile := func(p string) bool { return files[p] }
+	for _, c := range []struct{ tail, want string }{
+		{"/d/my report.env", "/d/my report.env"},
+		{"/d/my report.env. Done", "/d/my report.env"},
+		{"/d/my  report.env", "/d/my"},
+		{"/d/a b c", "/d/a"},
+		{"/d/none here", "/d/none"},
+		{"/d/x" + strings.Repeat(" w", 40) + " /d/my report.env", "/d/x"},
+	} {
+		if got := unquotedPath(c.tail, isFile); got != c.want {
+			t.Errorf("unquotedPath(%q) = %q, want %q", c.tail, got, c.want)
+		}
+	}
+	if got := unquotedPath("/d/my report.env", nil); got != "/d/my" {
+		t.Errorf("without isFile = %q", got)
 	}
 }

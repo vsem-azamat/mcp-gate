@@ -68,11 +68,8 @@ func (m *Mirror) logMessage(ctx context.Context, p *mcp.LoggingMessageParams) { 
 	if err != nil {
 		return
 	}
-	text := m.scrub(string(data))
-	if len(text) > 4096 {
-		text = text[:4096] + "…"
-	}
-	m.logger.DebugContext(ctx, "server log message", "level", string(p.Level), "logger", p.Logger, "data", text)
+	text := redact.Cut(m.scrub(string(data)), 4096)
+	m.logger.DebugContext(ctx, "server log message", "level", m.logText(string(p.Level)), "logger", m.logText(p.Logger), "data", text)
 }
 
 // progressTable maps the progress tokens sent downstream to the upstream calls they belong to.

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // Options select the rules an Engine runs.
@@ -106,6 +107,18 @@ func (Marker) Replace(f Finding) string { return MarkerText(f.Kind) }
 // MarkerText is the default replacement for a finding of the given kind: "[REDACTED:<kind>]".
 func MarkerText(kind string) string {
 	return markerPrefix + kind + "]"
+}
+
+// Cut returns text cut to at most n bytes, followed by "…" when it was cut. A UTF-8 character
+// is never split; in text that is not UTF-8 the cut moves back by at most utf8.UTFMax-1 bytes.
+func Cut(text string, n int) string {
+	if len(text) <= n {
+		return text
+	}
+	for back := 0; back < utf8.UTFMax-1 && n > 0 && !utf8.RuneStart(text[n]); back++ {
+		n--
+	}
+	return text[:n] + "…"
 }
 
 // markerPrefix starts every marker; a value that contains it is never reported again.
