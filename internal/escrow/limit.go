@@ -6,18 +6,18 @@ import (
 	"time"
 )
 
-// The failed-authentication limit: a token bucket per client address. A presented key that is
-// wrong spends a token; a client earns one back every failRefill, up to failBurst. A client
-// without a token gets 429 for any request, so that a guess that happens to be right is refused
-// too. A request that presents no key is refused but costs nothing: it cannot be a guess, and a
-// web page can send such requests to a local listener without the owner knowing.
+// The failed-authentication limit. The key is checked first: a request with the right key is
+// always served, so no one can lock the owner out, after a restart, from a new address or from
+// behind a proxy that makes every client 127.0.0.1. A wrong key spends a token of its client's
+// bucket (failBurst, one more every failRefill) and of a global one (globalBurst, one more
+// every globalRefill) that bounds clients rotating addresses; while either is empty, a wrong
+// key gets 429 instead of 401. A request that presents no key costs nothing: it cannot be a
+// guess, and a web page can send such requests to a local listener without the owner knowing.
+// The limit slows guessing and keeps the log readable; a key of 128 random bits or more is what
+// makes guessing hopeless.
 //
-// Clients that rotate addresses get a fresh budget with each one, so a global bucket bounds
-// them all: every keyed request from a client that has not presented the right key within
-// trustedFor spends one of globalBurst tokens, earned back one every globalRefill, and gets it
-// back when the key is right. While it is empty, a request that presents a key is refused
-// unless its client is trusted, so the owner keeps the addresses it used recently and an
-// attacker gets globalBurst guesses plus one per globalRefill, however many addresses it has.
+// A client that presented the right key within trustedFor is trusted: its wrong keys (a stale
+// key in a script) spend only its own bucket, not the global one that others share.
 const (
 	failBurst  = 20
 	failRefill = 3 * time.Second
@@ -72,10 +72,10 @@ func (b *budget) wait(every time.Duration) time.Duration {
 	return time.Duration((1 - b.tokens) * float64(every))
 }
 
-// isTrusted reports whether the client of key presented the right key within trustedFor.
-// The caller holds l.mu.
-func (l *limiter) isTrusted(key string, now time.Time) bool {
-	at, ok := l.trusted[key]
+// isTrusted reports whether the client with client key ck presented the right key within
+// trustedFor. The caller holds l.mu.
+func (l *limiter) isTrusted(ck string, now time.Time) bool {
+	at, ok := l.trusted[ck]
 	return ok && now.Sub(at) < trustedFor
 }
 
@@ -92,40 +92,13 @@ func clientKey(client string) string {
 	return p.String()
 }
 
-// allow reports whether client may try now, and if not, how long until it may. withKey says
-// whether the request presents a key; one that does not is never refused by the global bucket.
-// A keyed request from a client that is not trusted reserves a global token before its key is
-// checked, so that concurrent guesses cannot all pass on the same token; reserved reports it,
-// and succeed gives it back.
-func (l *limiter) allow(client string, withKey bool) (wait time.Duration, reserved, ok bool) {
+// succeed records that client presented the right key.
+func (l *limiter) succeed(client string) {
 	now := l.clock.Now()
-	key := clientKey(client)
+	ck := clientKey(client)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if b := l.budgets[key]; b != nil && b.refill(now) < 1 {
-		return b.wait(failRefill), false, false
-	}
-	if !withKey || l.isTrusted(key, now) {
-		return 0, false, true
-	}
-	if l.global.refillAt(now, globalBurst, globalRefill) < 1 {
-		return l.global.wait(globalRefill), false, false
-	}
-	l.global.tokens--
-	return 0, true, true
-}
-
-// succeed records that client presented the right key, giving back the global token its
-// request reserved, if any.
-func (l *limiter) succeed(client string, reserved bool) {
-	now := l.clock.Now()
-	key := clientKey(client)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if reserved {
-		l.global.tokens = min(globalBurst, l.global.tokens+1)
-	}
-	if _, ok := l.trusted[key]; !ok && len(l.trusted) >= maxTrusted {
+	if _, ok := l.trusted[ck]; !ok && len(l.trusted) >= maxTrusted {
 		oldest, first := "", true
 		for k, at := range l.trusted {
 			if first || at.Before(l.trusted[oldest]) {
@@ -134,17 +107,28 @@ func (l *limiter) succeed(client string, reserved bool) {
 		}
 		delete(l.trusted, oldest)
 	}
-	l.trusted[key] = now
+	l.trusted[ck] = now
 }
 
-// fail counts a wrong key presented by client; the global token, when the client is not
-// trusted, was spent by allow.
-func (l *limiter) fail(client string) {
+// fail counts a wrong key presented by client. It reports false, with how long until the
+// client may try again, when the client's bucket or, for a client that is not trusted, the
+// global one is empty; nothing is spent then.
+func (l *limiter) fail(client string) (time.Duration, bool) {
 	now := l.clock.Now()
-	key := clientKey(client)
+	ck := clientKey(client)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.budgets[key]
+	b := l.budgets[ck]
+	if b != nil && b.refill(now) < 1 {
+		return b.wait(failRefill), false
+	}
+	charged := !l.isTrusted(ck, now)
+	if charged && l.global.refillAt(now, globalBurst, globalRefill) < 1 {
+		return l.global.wait(globalRefill), false
+	}
+	if charged {
+		l.global.tokens--
+	}
 	if b == nil {
 		if len(l.budgets) >= maxClients {
 			// Linear in the table, under the lock, once per wrong key from a new client.
@@ -158,8 +142,8 @@ func (l *limiter) fail(client string) {
 			delete(l.budgets, fullest)
 		}
 		b = &budget{tokens: failBurst, at: now}
-		l.budgets[key] = b
+		l.budgets[ck] = b
 	}
-	b.refill(now)
 	b.tokens = max(0, b.tokens-1)
+	return 0, true
 }

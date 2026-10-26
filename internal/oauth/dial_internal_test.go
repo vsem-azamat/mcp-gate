@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -92,6 +93,8 @@ func TestGuardRefusesNonPublicEndpoints(t *testing.T) {
 		{"local server, IPv6 metadata endpoint", "http://127.0.0.1:9/mcp", "http://[fd00:ec2::254]:1/token", true},
 		{"local server, NAT64 of a metadata endpoint", "http://127.0.0.1:9/mcp", "http://[64:ff9b::a9fe:a9fe]:1/token", true},
 		{"local server, other metadata endpoint", "http://127.0.0.1:9/mcp", "http://100.100.100.200:1/token", true},
+		{"local server, IPv4-compatible metadata endpoint", "http://127.0.0.1:9/mcp", "http://[::a9fe:a9fe]:1/token", true},
+		{"local server, IPv4-translated metadata endpoint", "http://127.0.0.1:9/mcp", "http://[::ffff:0:a9fe:a9fe]:1/token", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -125,6 +128,8 @@ func TestGuardBehindProxy(t *testing.T) {
 	}
 	for _, target := range []string{
 		"http://169.254.169.254/latest", "http://localhost:8080/token", "http://[::1]/token",
+		"http://metadata/computeMetadata", "http://metadata.google.internal/computeMetadata",
+		"http://nas.lan/token", "http://printer.local/token", "http://router.home.arpa/token",
 		"http://127.0.0.1./token", "http://127.1/token", "http://2130706433/token",
 		"http://0x7f000001/token", "http://017700000001/token", "http://localhost./token",
 	} {
@@ -141,7 +146,46 @@ func TestGuardBehindProxy(t *testing.T) {
 	if err := get(t, local, "http://localhost:8080/token"); err != nil {
 		t.Errorf("a local target of a local server through the proxy: %v", err)
 	}
+	if err := get(t, local, "http://nas.lan/token"); err != nil {
+		t.Errorf("an internal name for a local server through the proxy: %v", err)
+	}
 	if err := get(t, local, "http://169.254.169.254/latest"); !errors.Is(err, errNonPublic) {
 		t.Errorf("a metadata target of a local server through the proxy: err = %v", err)
+	}
+}
+
+func TestAlwaysRefused(t *testing.T) {
+	t.Parallel()
+	for addr, want := range map[string]bool{
+		"169.254.169.254": true, "::a9fe:a9fe": true, "::ffff:0:a9fe:a9fe": true, "fe80::1": true,
+		"::1": false, "127.0.0.1": false, "10.0.0.1": false, "192.168.1.1": false, "::ffff:127.0.0.1": false,
+	} {
+		if got := alwaysRefused(netip.MustParseAddr(addr)); got != want {
+			t.Errorf("alwaysRefused(%s) = %v, want %v", addr, got, want)
+		}
+	}
+}
+
+// The configured server's own host:port is reached whatever it resolves to (its MCP traffic
+// goes there anyway), so a server on a LAN or tailnet name can answer the challenge; metadata
+// addresses stay refused, and other ports of the same host are guarded.
+func TestGuardExemptsTheServerItself(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(srv.Close)
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(other.Close)
+	u, _ := url.Parse(srv.URL)
+	g := &guard{server: hostPort(u), proxy: noProxy, proxies: map[string]bool{}, dialer: &net.Dialer{}} // as for a name that resolves privately
+	tr := g.transport()
+	if err := get(t, tr, srv.URL+"/mcp"); err != nil {
+		t.Errorf("the server itself: %v", err)
+	}
+	if err := get(t, tr, other.URL+"/token"); !errors.Is(err, errNonPublic) {
+		t.Errorf("another port on the same address: err = %v, want a refusal", err)
+	}
+	g.server = "169.254.169.254:80"
+	if err := get(t, g.transport(), "http://169.254.169.254/latest"); !errors.Is(err, errNonPublic) {
+		t.Errorf("a server on a metadata address: err = %v, want a refusal", err)
 	}
 }

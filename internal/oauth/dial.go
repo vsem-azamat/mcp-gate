@@ -57,15 +57,19 @@ func isLocalName(host string) bool {
 	return host == "localhost" || strings.HasSuffix(host, ".localhost")
 }
 
-// alwaysRefused reports addresses that are refused even for a local server: link-local ones
-// and others where cloud metadata services answer, and IPv6 forms that embed an IPv4 address
-// (NAT64, 6to4, Teredo), which could reach one.
+// alwaysRefused reports addresses that are refused even for a local server and for the
+// server's own host: link-local ones and others where cloud metadata services answer, and IPv6
+// forms that embed an IPv4 address (IPv4-compatible, IPv4-translated, NAT64, 6to4, Teredo),
+// which could reach one.
 func alwaysRefused(a netip.Addr) bool {
 	a = a.Unmap()
+	if a.IsLoopback() {
+		return false // ::1 lies in ::/96
+	}
 	if a.IsLinkLocalUnicast() {
 		return true
 	}
-	for _, p := range metadataPrefixes {
+	for _, p := range alwaysRefusedPrefixes {
 		if p.Contains(a) {
 			return true
 		}
@@ -73,15 +77,39 @@ func alwaysRefused(a netip.Addr) bool {
 	return false
 }
 
-var metadataPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("fd00:ec2::254/128"),  // AWS, IPv6
-	netip.MustParsePrefix("100.100.100.200/32"), // Alibaba Cloud
-	netip.MustParsePrefix("192.0.0.192/32"),     // Oracle Cloud
-	netip.MustParsePrefix("64:ff9b::/96"),
-	netip.MustParsePrefix("64:ff9b:1::/48"),
-	netip.MustParsePrefix("2002::/16"),
-	netip.MustParsePrefix("2001::/32"),
+var alwaysRefusedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("fd00:ec2::254/128"),  // AWS metadata, IPv6
+	netip.MustParsePrefix("100.100.100.200/32"), // Alibaba Cloud metadata
+	netip.MustParsePrefix("192.0.0.192/32"),     // Oracle Cloud metadata
+	netip.MustParsePrefix("::/96"),              // IPv4-compatible; ::1, loopback, is let through above
+	netip.MustParsePrefix("::ffff:0:0:0/96"),    // IPv4-translated
+	netip.MustParsePrefix("64:ff9b::/96"),       // NAT64
+	netip.MustParsePrefix("64:ff9b:1::/48"),     // local NAT64
+	netip.MustParsePrefix("2002::/16"),          // 6to4
+	netip.MustParsePrefix("2001::/32"),          // Teredo
 }
+
+// internalSuffixes are name suffixes of private networks, refused behind a proxy for a server
+// that is not local, as are single-label names.
+var internalSuffixes = []string{".internal", ".local", ".lan", ".home.arpa", ".localdomain", ".intranet", ".corp"}
+
+// internalName reports a name that only resolves inside a private network: a single label
+// ("metadata") or one under a private suffix ("metadata.google.internal", "nas.lan").
+func internalName(host string) bool {
+	host = strings.ToLower(host)
+	if !strings.Contains(host, ".") {
+		return true
+	}
+	for _, s := range internalSuffixes {
+		if strings.HasSuffix(host, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultPorts are the ports of server and proxy URLs that name none.
+var defaultPorts = map[string]string{"http": "80", "https": "443", "socks5": "1080", "socks5h": "1080"}
 
 // localHost reports whether a configured server host is written as a non-public address or a
 // local name. A name that merely resolves to such an address does not count: whoever runs the
@@ -110,7 +138,11 @@ func numericHost(host string) bool {
 // such an address or a local name: then its authorization server may be local too. Link-local
 // addresses are refused either way.
 type guard struct {
-	local  bool // the configured server is local; decided once
+	local bool // the configured server is local; decided once
+	// server is the configured server's host:port, lower-case. Its own traffic goes there
+	// unguarded anyway (the MCP connection), so requests to it are checked only against
+	// alwaysRefused, which lets a server on a LAN or tailnet name answer the challenge.
+	server string
 	dialer *net.Dialer
 	proxy  func(*http.Request) (*url.URL, error)
 
@@ -138,6 +170,19 @@ func (g *guard) control(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
+// controlServer checks a connection to the configured server's own host:port.
+func (g *guard) controlServer(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil || alwaysRefused(a) {
+		return fmt.Errorf("%w %s", errNonPublic, host)
+	}
+	return nil
+}
+
 // dialContext dials address, checking the address dialed unless it is a proxy that a request
 // goes through, which the environment configures.
 func (g *guard) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -149,6 +194,9 @@ func (g *guard) dialContext(ctx context.Context, network, address string) (net.C
 	}
 	d := *g.dialer
 	d.Control = g.control
+	if strings.EqualFold(address, g.server) {
+		d.Control = g.controlServer
+	}
 	return d.DialContext(ctx, network, address)
 }
 
@@ -163,17 +211,20 @@ func (g *guard) proxyFor(req *http.Request) (*url.URL, error) {
 	}
 	host := strings.TrimSuffix(req.URL.Hostname(), ".")
 	a, aerr := netip.ParseAddr(host)
+	ownServer := strings.EqualFold(hostPort(req.URL), g.server)
 	switch {
 	case aerr == nil:
-		if g.refused(a) {
+		if alwaysRefused(a) || (!ownServer && g.refused(a)) {
 			return nil, fmt.Errorf("%w %s", errNonPublic, host)
 		}
-	case numericHost(host) || (isLocalName(host) && !g.local):
+	case numericHost(host):
+		return nil, fmt.Errorf("%w %s", errNonPublic, host)
+	case !ownServer && !g.local && (isLocalName(host) || internalName(host)):
 		return nil, fmt.Errorf("%w %s", errNonPublic, host)
 	}
 	port := u.Port()
 	if port == "" {
-		port = map[string]string{"http": "80", "https": "443", "socks5": "1080", "socks5h": "1080"}[u.Scheme]
+		port = defaultPorts[u.Scheme]
 	}
 	g.mu.Lock()
 	g.proxies[net.JoinHostPort(u.Hostname(), port)] = true
@@ -181,17 +232,30 @@ func (g *guard) proxyFor(req *http.Request) (*url.URL, error) {
 	return u, nil
 }
 
+// hostPort returns the host:port a URL is dialed at.
+func hostPort(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = defaultPorts[u.Scheme]
+	}
+	return net.JoinHostPort(u.Hostname(), port)
+}
+
 // guardedTransport returns a transport for requests on behalf of the server at serverURL, which
 // picks proxies with proxy.
 func guardedTransport(serverURL string, proxy func(*http.Request) (*url.URL, error)) *http.Transport {
-	var host string
+	var host, server string
 	if u, err := url.Parse(serverURL); err == nil {
-		host = u.Hostname()
+		host, server = u.Hostname(), strings.ToLower(hostPort(u))
 	}
-	g := &guard{
-		local: localHost(host), proxy: proxy, proxies: map[string]bool{},
+	return (&guard{
+		local: localHost(host), server: server, proxy: proxy, proxies: map[string]bool{},
 		dialer: &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second},
-	}
+	}).transport()
+}
+
+// transport returns a transport that dials and picks proxies through g.
+func (g *guard) transport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the standard library's default transport
 	t.DisableKeepAlives = true
 	t.DialContext = g.dialContext

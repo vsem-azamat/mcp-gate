@@ -52,28 +52,52 @@ func TestBoundWritesStalledReader(t *testing.T) {
 	}
 }
 
-// The deadline bounds each write, not the response: a client that reads slowly but steadily
-// gets the whole answer, and the next request on the connection is not failed by a deadline
-// the previous one left.
-func TestBoundWritesSlowReaderAndKeepAlive(t *testing.T) {
-	t.Parallel()
-	const timeout = 300 * time.Millisecond
-	body := strings.Repeat("x", 1<<20)
-	srv := httptest.NewServer(BoundWrites(timeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/big" {
-			_, _ = io.WriteString(w, body)
-			return
-		}
-		time.Sleep(2 * timeout) // a call that answers after the previous request's deadline
-		_, _ = io.WriteString(w, "ok")
-	})))
+// smallBuffers is a listener whose connections have small send buffers, so that a large
+// response cannot sit in the kernel and each write waits for the reader.
+type smallBuffers struct{ net.Listener }
+
+func (l smallBuffers) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetWriteBuffer(128 << 10)
+	}
+	return c, err
+}
+
+// serveSmall serves h with small socket buffers and returns a client connection whose receive
+// buffer is small too.
+func serveSmall(t *testing.T, h http.Handler) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	srv.Listener = smallBuffers{srv.Listener}
+	srv.Start()
 	t.Cleanup(srv.Close)
 	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(128 << 10)
+	}
 	t.Cleanup(func() { _ = conn.Close() })
-	br := bufio.NewReaderSize(conn, 4<<10)
+	return conn, bufio.NewReaderSize(conn, 64<<10)
+}
+
+// The deadline bounds each write of at most 64 KiB, not the response: a client that reads
+// slowly but steadily gets the whole answer, written in one Write that takes far longer than the
+// timeout, and the next request on the connection is not failed by a deadline the previous one
+// left.
+func TestBoundWritesSlowReaderAndKeepAlive(t *testing.T) {
+	t.Parallel()
+	const timeout = 500 * time.Millisecond
+	body := strings.Repeat("x", 4<<20)
+	conn, br := serveSmall(t, BoundWrites(timeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/big" {
+			_, _ = io.WriteString(w, body) // one Write; BoundWrites cuts it
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	})))
 	if _, err := io.WriteString(conn, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -82,22 +106,27 @@ func TestBoundWritesSlowReaderAndKeepAlive(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	buf := make([]byte, 16<<10)
+	buf := make([]byte, 64<<10)
 	n := 0
 	for {
-		m, err := resp.Body.Read(buf)
+		// 64 KiB every 25 ms: each piece well within the timeout, the whole body not.
+		m, err := io.ReadFull(resp.Body, buf)
 		n += m
 		if err != nil {
 			break
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
 	_ = resp.Body.Close()
+	took := time.Since(start)
 	if n != len(body) {
-		t.Fatalf("read %d of %d bytes in %v", n, len(body), time.Since(start))
+		t.Fatalf("read %d of %d bytes in %v", n, len(body), took)
+	}
+	if took < timeout {
+		t.Errorf("the body took %v, which does not test a response longer than the timeout", took)
 	}
 	time.Sleep(2 * timeout)
-	if _, err := io.WriteString(conn, "GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
+	if _, err := io.WriteString(conn, "GET /small HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
 	resp, err = http.ReadResponse(br, nil)
@@ -108,6 +137,31 @@ func TestBoundWritesSlowReaderAndKeepAlive(t *testing.T) {
 	_ = resp.Body.Close()
 	if err != nil || string(got) != "ok" {
 		t.Errorf("the next request = %q, %v", got, err)
+	}
+}
+
+// A stream that is idle for longer than the timeout between two writes, as an event stream is,
+// is not cut: the deadline is set before each write, not kept between them.
+func TestBoundWritesIdleStream(t *testing.T) {
+	t.Parallel()
+	const timeout = 200 * time.Millisecond
+	conn, br := serveSmall(t, BoundWrites(timeout, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "first\n")
+		_ = http.NewResponseController(w).Flush()
+		time.Sleep(3 * timeout)
+		_, _ = io.WriteString(w, "second\n")
+	})))
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || string(got) != "first\nsecond\n" {
+		t.Errorf("stream = %q, %v", got, err)
 	}
 }
 

@@ -103,7 +103,7 @@ $ curl -s -X DELETE -H "Authorization: Bearer $key" http://127.0.0.1:9090/_escro
 | `GET /_escrow/<handle>` | The value (or the file, while unchanged) as `application/octet-stream` |
 | `DELETE /_escrow/<handle>` | 204; the entry is gone |
 
-A wrong or missing key is 401 on every path; 20 wrong keys from one client address give 429 until it has waited (one more attempt every 3 seconds). Requests without a key do not count. Behind a reverse proxy on the same host, set `listen.behindProxy` so that the limit is kept per client (`X-Forwarded-For`), not for the proxy as a whole. Files that a server's `redact.files.tools` write are kept the same way, as `[REDACTED:file #<handle>]`.
+The right key is always served. A wrong or missing key is 401 on every path; 20 wrong keys from one client address, or 100 from all clients together, give 429 to further wrong keys until they have waited (one more attempt every 3 seconds per client, one a second in all). Requests without a key do not count. The limit only slows guessing: generate the key with at least 128 random bits, as above. Behind a reverse proxy on the same host, set `listen.behindProxy` so that the limit is kept per client (`X-Forwarded-For`), not for the proxy as a whole; the gate warns at start when the escrow is on a loopback listener without it. Files that a server's `redact.files.tools` write are kept the same way, as `[REDACTED:file #<handle>]`.
 
 ### Escrow socket
 

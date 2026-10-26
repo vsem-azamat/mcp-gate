@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -299,22 +300,23 @@ func TestFailedAuthLimit(t *testing.T) {
 			t.Fatalf("failure %d = %d, want 401", i+1, rec.Code)
 		}
 	}
-	rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", client)
+	rec := request(t, e, http.MethodGet, Route+h, "Bearer wrong", "X-Client", client)
 	if rec.Code != http.StatusTooManyRequests || rec.Body.String() != "Too Many Requests\n" ||
 		rec.Header().Get("Retry-After") != "3" || rec.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("over the limit, even with the key = %d %q %v", rec.Code, rec.Body, rec.Header())
+		t.Fatalf("a wrong key over the limit = %d %q %v", rec.Code, rec.Body, rec.Header())
 	}
-	if rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", "203.0.113.6"); rec.Code != http.StatusOK {
-		t.Errorf("another client = %d, want 200", rec.Code)
+	// The right key is checked first and always served, even with the client's bucket empty.
+	if rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", client); rec.Code != http.StatusOK {
+		t.Errorf("the right key over the limit = %d, want 200", rec.Code)
+	}
+	if rec := request(t, e, http.MethodGet, Route+h, "Bearer wrong", "X-Client", "203.0.113.6"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("another client = %d, want 401", rec.Code)
 	}
 	clk.add(failRefill)
-	if rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", client); rec.Code != http.StatusOK {
-		t.Errorf("after a refill = %d, want 200", rec.Code)
-	}
 	if rec := request(t, e, http.MethodGet, Route+h, "Bearer wrong", "X-Client", client); rec.Code != http.StatusUnauthorized {
 		t.Errorf("the earned attempt = %d, want 401", rec.Code)
 	}
-	if rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", client); rec.Code != http.StatusTooManyRequests {
+	if rec := request(t, e, http.MethodGet, Route+h, "Bearer wrong", "X-Client", client); rec.Code != http.StatusTooManyRequests {
 		t.Errorf("after spending it = %d, want 429", rec.Code)
 	}
 }
@@ -327,16 +329,17 @@ func TestLimiterTableIsBounded(t *testing.T) {
 		l.fail("198.51.100.1") // the client that failed most
 	}
 	for i := range maxClients + 100 {
+		l.global.tokens = globalBurst // the table alone, without the global bucket
 		l.fail("client-" + strconv.Itoa(i))
 	}
 	if len(l.budgets) > maxClients {
 		t.Fatalf("%d budgets, cap %d", len(l.budgets), maxClients)
 	}
-	l.global.tokens = globalBurst // the table alone, without the global bucket
-	if _, _, ok := l.allow("198.51.100.1", true); ok {
+	l.global.tokens = globalBurst
+	if _, ok := l.fail("198.51.100.1"); ok {
 		t.Error("a full table forgot the client that failed most")
 	}
-	if _, _, ok := l.allow("198.51.100.2", true); !ok {
+	if _, ok := l.fail("198.51.100.2"); !ok {
 		t.Error("a client that never failed is refused")
 	}
 }
@@ -354,65 +357,53 @@ func TestGlobalFailLimit(t *testing.T) {
 	if code := get("Bearer "+testKey, owner); code != http.StatusOK {
 		t.Fatalf("the owner = %d, want 200", code)
 	}
-	// One guess from each of many addresses: no client budget runs out, the global one does.
+	// One guess from each of many addresses: no client bucket runs out, the global one does.
 	for i := range globalBurst {
 		if code := get("Bearer wrong", "198.51.100."+strconv.Itoa(i)); code != http.StatusUnauthorized {
 			t.Fatalf("guess %d = %d, want 401", i+1, code)
 		}
 	}
-	rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", "203.0.113.9")
+	rec := request(t, e, http.MethodGet, Route+h, "Bearer wrong", "X-Client", "203.0.113.9")
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1" {
-		t.Fatalf("a new client with the right key, global budget spent = %d %v, want 429", rec.Code, rec.Header())
-	}
-	if code := get("Bearer wrong", "203.0.113.10"); code != http.StatusTooManyRequests {
-		t.Errorf("another guess, global budget spent = %d, want 429", code)
+		t.Fatalf("another guess, global bucket empty = %d %v, want 429", rec.Code, rec.Header())
 	}
 	if code := get("", "203.0.113.11"); code != http.StatusUnauthorized {
-		t.Errorf("a request without a key, global budget spent = %d, want 401", code)
+		t.Errorf("a request without a key, global bucket empty = %d, want 401", code)
 	}
-	if code := get("Bearer "+testKey, owner); code != http.StatusOK {
-		t.Errorf("the trusted owner, global budget spent = %d, want 200", code)
+	// The right key is served from any client, a new one included, with the bucket empty.
+	if code := get("Bearer "+testKey, "203.0.113.12"); code != http.StatusOK {
+		t.Errorf("the right key from a new client, global bucket empty = %d, want 200", code)
 	}
-	// A trusted client's wrong key spends only its own budget.
+	// A trusted client's wrong key spends only its own bucket.
 	if code := get("Bearer wrong", owner); code != http.StatusUnauthorized {
-		t.Errorf("the owner's wrong key = %d, want 401", code)
+		t.Errorf("the trusted owner's wrong key, global bucket empty = %d, want 401", code)
 	}
 	clk.add(globalRefill)
-	if code := get("Bearer wrong", "203.0.113.12"); code != http.StatusUnauthorized {
+	if code := get("Bearer wrong", "203.0.113.13"); code != http.StatusUnauthorized {
 		t.Errorf("the earned guess = %d, want 401", code)
 	}
-	if code := get("Bearer "+testKey, "203.0.113.13"); code != http.StatusTooManyRequests {
+	if code := get("Bearer wrong", "203.0.113.14"); code != http.StatusTooManyRequests {
 		t.Errorf("after spending it = %d, want 429", code)
-	}
-	clk.add(trustedFor)
-	e.limit.mu.Lock()
-	e.limit.global.tokens = 0
-	e.limit.global.at = clk.now()
-	e.limit.mu.Unlock()
-	if code := get("Bearer "+testKey, owner); code != http.StatusTooManyRequests {
-		t.Errorf("the owner after trustedFor, global budget spent = %d, want 429", code)
 	}
 }
 
-// Concurrent guesses cannot share one global token: each reserves its own before its key is
-// checked.
-func TestGlobalTokensAreReserved(t *testing.T) {
+// Concurrent wrong keys cannot share one global token: each is spent under the lock.
+func TestGlobalTokensAreNotShared(t *testing.T) {
 	t.Parallel()
 	c := &clock{now: func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }}
 	l := newLimiter(c)
-	passed := 0
-	for i := range globalBurst + 50 { // all checked before any key is
-		if _, _, ok := l.allow("198.51.100."+strconv.Itoa(i%250), true); ok {
-			passed++
-		}
+	var wg sync.WaitGroup
+	var passed atomic.Int64
+	for i := range globalBurst + 50 {
+		wg.Go(func() {
+			if _, ok := l.fail("198.51.100." + strconv.Itoa(i%250)); ok {
+				passed.Add(1)
+			}
+		})
 	}
-	if passed != globalBurst {
-		t.Errorf("%d keyed requests passed at once, want %d", passed, globalBurst)
-	}
-	// A right key gives its token back.
-	l.succeed("198.51.100.1", true)
-	if _, _, ok := l.allow("203.0.113.1", true); !ok {
-		t.Error("the token a right key gave back is not available")
+	wg.Wait()
+	if passed.Load() != globalBurst {
+		t.Errorf("%d wrong keys counted, want %d", passed.Load(), globalBurst)
 	}
 }
 
@@ -424,7 +415,7 @@ func TestTrustedClientsAreBounded(t *testing.T) {
 	l := newLimiter(c)
 	for i := range maxTrusted + 10 {
 		now = start.Add(time.Duration(i) * time.Second)
-		l.succeed("client-"+strconv.Itoa(i), false)
+		l.succeed("client-" + strconv.Itoa(i))
 	}
 	if len(l.trusted) != maxTrusted {
 		t.Fatalf("%d trusted, cap %d", len(l.trusted), maxTrusted)
@@ -444,10 +435,10 @@ func TestLimiterGroupsIPv6(t *testing.T) {
 	for i := range failBurst {
 		l.fail("2001:db8:1:2::" + strconv.FormatInt(int64(i+1), 16))
 	}
-	if _, _, ok := l.allow("2001:db8:1:2:ffff::1", true); ok {
+	if _, ok := l.fail("2001:db8:1:2:ffff::1"); ok {
 		t.Error("another address of the same /64 is allowed")
 	}
-	if _, _, ok := l.allow("2001:db8:1:3::1", true); !ok {
+	if _, ok := l.fail("2001:db8:1:3::1"); !ok {
 		t.Error("another /64 is refused")
 	}
 }

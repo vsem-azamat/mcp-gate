@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The escrow keeps the secrets that redaction replaces, in memory, under random handles, so that the owner can release a secret through an authenticated HTTP API without its value ever entering a client's context. Its HTTP API is a frozen contract: paths, methods, the authentication scheme, the response fields, status codes and bodies are those of the mcp-proxy escrow it replaces, so that its consumers work unchanged. The one addition is a limit on failed authentication, per client address and for all clients together.
+The escrow keeps the secrets that redaction replaces, in memory, under random handles, so that the owner can release a secret through an authenticated HTTP API without its value ever entering a client's context. Its HTTP API is a frozen contract: paths, methods, the authentication scheme, the response fields, status codes and bodies are those of the mcp-proxy escrow it replaces, so that its consumers work unchanged. The one addition is a limit on failed authentication, per client address and for all clients together, which never refuses the right key.
 
 ## Requirements
 
@@ -121,19 +121,21 @@ On the socket, the client SHALL be the peer's user ID as the kernel reports it w
 
 ### Requirement: Failed-authentication limit
 
-Each client SHALL have a budget of 20 attempts, of which a request presenting a wrong key (`Bearer` with a non-empty key) SHALL spend one, and which SHALL earn one back every 3 seconds up to 20. A request presenting no key, or another scheme, SHALL get 401 without spending any, since it cannot be a guess. A client with less than one attempt left SHALL get 429 with `Retry-After` (in whole seconds) and the body `Too Many Requests` for every request, even one with the right key. The client SHALL be the peer address unless `listen.behindProxy` is set and the peer is in `listen.trustedProxies`; then it SHALL be the right-most `X-Forwarded-For` entry that is not in `listen.trustedProxies`. IPv6 addresses SHALL count by their /64. At most 4096 clients SHALL be tracked; a new one SHALL then replace the client with the most attempts left, so that a client that never presented a wrong key is never refused. Trusting a proxy on loopback trusts every local process to name its own client address.
+The key SHALL be checked first: a request presenting the right key SHALL be served whatever the state of the limit, so that no guessing can lock the owner out, after a restart, from a new address, or behind a proxy that makes every client the same address. A request presenting no key, or another scheme, SHALL get 401 and spend nothing, since it cannot be a guess. Each client SHALL have a budget of 20 attempts, earning one back every 3 seconds up to 20, and all clients together a global budget of 100, earning one back every second up to 100. A request presenting a wrong key (`Bearer` with a non-empty key) SHALL spend one attempt of its client's budget and one of the global budget, and get 401; while its client's budget, or the global one, has less than one attempt left, it SHALL instead get 429 with `Retry-After` (in whole seconds) and the body `Too Many Requests`, spending nothing. A client that presented the right key within the last 24 hours SHALL be trusted, at most 256 being kept, a new one replacing the one that presented it longest ago; a trusted client's wrong keys SHALL spend only its own budget. The client SHALL be the peer address unless `listen.behindProxy` is set and the peer is in `listen.trustedProxies`; then it SHALL be the right-most `X-Forwarded-For` entry that is not in `listen.trustedProxies`. IPv6 addresses SHALL count by their /64. At most 4096 clients SHALL be tracked; a new one SHALL then replace the client with the most attempts left. Trusting a proxy on loopback trusts every local process to name its own client address.
 
-A client that presented the right key within the last 24 hours SHALL be trusted; at most 256 clients SHALL be kept trusted, a new one replacing the one that presented the key longest ago. All clients together SHALL have a global budget of 100 attempts, of which a wrong key from a client that is not trusted SHALL spend one, and which SHALL earn one back every second up to 100. While less than one attempt is left in it, a request that presents a key from a client that is not trusted SHALL get 429 with `Retry-After`, even with the right key, while a request presenting no key SHALL still get 401. So guessing from many addresses is bounded as a whole, and the owner keeps the addresses it used recently; while someone guesses, an owner address that is not trusted can be refused, which after a restart, since trust is kept in memory only, is every one until it presents the key while the global budget has attempts left. A keyed request from a client that is not trusted SHALL take its global attempt before its key is checked and get it back when the key is right, so that concurrent requests cannot share one attempt.
+The limit only slows guessing and keeps the log readable; what protects the escrow is the key, which SHALL be generated with at least 128 random bits (such as `openssl rand -hex 32`, 256 bits): at 100 guesses plus one a second, such a key is never guessed.
+
+When the escrow is served on the listener (`escrow.tcp`), `listen.behindProxy` is not set and the listen address is a loopback address, `serve` SHALL log a warning at start: a reverse proxy on the same host makes every client `127.0.0.1`, so all clients share one budget.
 
 #### Scenario: Guesses from many addresses
 
-- **WHEN** a client has been served with the right key, and then 100 other clients present one wrong key each
-- **THEN** a request with the right key from yet another client gets 429, a request without a key gets 401, and the first client is still served
+- **WHEN** 100 clients present one wrong key each
+- **THEN** a wrong key from yet another client gets 429, a request without a key gets 401, and a request with the right key from any client is served
 
 #### Scenario: Behind a proxy
 
 - **WHEN** `behindProxy` is set and 20 requests from the proxy with `X-Forwarded-For: 203.0.113.5` present a wrong key
-- **THEN** a request with the right key and the same `X-Forwarded-For` gets 429, and one with `X-Forwarded-For: 203.0.113.6` is served
+- **THEN** a wrong key with the same `X-Forwarded-For` gets 429, one with `X-Forwarded-For: 203.0.113.6` gets 401, and the right key with either is served
 
 #### Scenario: Requests without a key
 
@@ -143,7 +145,7 @@ A client that presented the right key within the last 24 hours SHALL be trusted;
 #### Scenario: Not behind a proxy
 
 - **WHEN** `behindProxy` is not set and the same requests arrive
-- **THEN** `X-Forwarded-For` is ignored and the second client gets 429 too, since both come from the same peer
+- **THEN** `X-Forwarded-For` is ignored and a wrong key from the second client gets 429 too, since both come from the same peer
 
 ### Requirement: API
 

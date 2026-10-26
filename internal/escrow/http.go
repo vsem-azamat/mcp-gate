@@ -87,31 +87,26 @@ func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		e.logger.Info("escrow access", "op", op, "handle", logHandle, "status", status, "remote", client)
 	}()
 
-	// A keyless peer skips the limit, so that wrong keys from inside the gate's tree, under the
-	// same user ID, cannot lock it out.
-	key := presentedKey(r)
-	var reserved bool
+	// The API key is checked first, so that the right one is always served. A keyless peer
+	// skips the limit, so that wrong keys from inside the gate's tree, under the same user ID,
+	// cannot lock it out.
 	if !keyless {
-		var wait time.Duration
-		var ok bool
-		if wait, reserved, ok = e.limit.allow(client, key != ""); !ok {
-			status = http.StatusTooManyRequests
-			w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
-			http.Error(w, "Too Many Requests", status)
-			return
-		}
-	}
-	if !keyless {
-		if !e.authorized(key) {
-			if key != "" {
-				e.limit.fail(client) // only a presented key can be a guess
+		apiKey := presentedKey(r)
+		if !e.authorized(apiKey) {
+			if apiKey != "" { // only a presented key can be a guess
+				if wait, ok := e.limit.fail(client); !ok {
+					status = http.StatusTooManyRequests
+					w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
+					http.Error(w, "Too Many Requests", status)
+					return
+				}
 			}
 			status = http.StatusUnauthorized
 			w.Header().Set("WWW-Authenticate", `Bearer realm="escrow"`)
 			http.Error(w, "Unauthorized", status)
 			return
 		}
-		e.limit.succeed(client, reserved)
+		e.limit.succeed(client)
 	}
 	if !HandleRE.MatchString(handle) || (sub != "" && sub != "meta") {
 		status = http.StatusNotFound
