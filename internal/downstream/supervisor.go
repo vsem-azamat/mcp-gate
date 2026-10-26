@@ -301,9 +301,10 @@ func (s Status) Connected() bool { return s.State == Ready || s.State == Degrade
 // mcp-gate auth: it does not connect on its own.
 func (s Status) AwaitsLogin() bool { return s.State == NeedsLogin }
 
-// ConnectsOnItsOwn reports whether the server, while not connected, gets connected without anyone
-// acting: in every state but needs-login. A request for such a server is worth holding while it
-// starts.
+// ConnectsOnItsOwn reports whether the server needs no one to act before it can connect: every
+// state but needs-login. A request for such a server is worth holding while the gate starts or
+// the server restarts. Stopped and disabled count too: a server is stopped only once the
+// shutdown has begun, which refuses held requests, and a disabled one is not served.
 func (s Status) ConnectsOnItsOwn() bool { return !s.AwaitsLogin() }
 
 // NotReadyError is returned by Call when the server has no usable session.

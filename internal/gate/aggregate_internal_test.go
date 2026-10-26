@@ -27,7 +27,7 @@ func TestAccessOfHeader(t *testing.T) {
 		{"bare", "secret-laptop", map[string]string{"open": "", "shared": "laptop", "twin": "laptop-twin"}},
 		{"phone", "bearer secret-phone", map[string]string{"open": "", "private": "phone"}},
 		{"wrong", "Bearer secret-wrong", nil},
-		{"empty", "Bearer  ", nil},
+		{"a scheme alone", "Bearer  ", nil},
 		{"with a space", "Bearer secret-laptop x", nil},
 		{"a prefix", "Bearer secret-lap", nil},
 	} {

@@ -330,6 +330,8 @@ func TestAuthenticate(t *testing.T) {
 		"Bearer secret-c":       "",
 		"Bearer secret-a extra": "",
 		"Bearer secret-a\tb":    "",
+		"Bearer\tsecret-a":      "",
+		"Bearer":                "",
 		"Bearer ":               "",
 		"":                      "",
 		"Basic secret-a":        "",
