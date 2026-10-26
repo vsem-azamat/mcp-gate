@@ -240,11 +240,30 @@ func TestLineLogLimits(t *testing.T) {
 	}
 	ll.Consume(strings.NewReader(in.String()))
 	tail := ll.Tail()
-	if len(tail) == 0 || tail[len(tail)-1] != "line 499" || len(strings.Join(tail, "")) > 100 {
+	if len(tail) == 0 || tail[len(tail)-1] != "line 499" || len(strings.Join(tail, "\n"))+1 > 100 {
 		t.Errorf("tail = %q", tail)
 	}
 	if n := strings.Count(logs.String(), "child stderr\""); n == 0 || n > lineBurst+5 {
 		t.Errorf("%d lines logged, want at most about %d", n, lineBurst)
+	}
+}
+
+// TestLineLogEmptyLines checks that empty lines count towards the size of the ring, so a child
+// writing only newlines cannot grow it without bound.
+func TestLineLogEmptyLines(t *testing.T) {
+	t.Parallel()
+	ll := NewLineLog(slog.New(slog.DiscardHandler), nil, 100, nil)
+	ll.Consume(strings.NewReader("first\n" + strings.Repeat("\n", 100_000) + "last\n"))
+	tail := ll.Tail()
+	if len(tail) > 100 || len(tail) < 2 || tail[len(tail)-1] != "last" || tail[len(tail)-2] != "" {
+		t.Errorf("tail has %d lines, ending %q", len(tail), tail[max(0, len(tail)-2):])
+	}
+	size := 0
+	for _, line := range tail {
+		size += len(line) + 1
+	}
+	if size > 100 {
+		t.Errorf("tail holds %d bytes with newlines, want at most 100", size)
 	}
 }
 

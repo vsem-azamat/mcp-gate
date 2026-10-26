@@ -18,7 +18,7 @@ type LineLog struct {
 
 	mu       sync.Mutex
 	ring     []string
-	ringSize int // bytes in ring
+	ringSize int // bytes in ring, each line counted with its newline, so that empty lines count
 	ringMax  int
 	tokens   float64
 	last     time.Time
@@ -92,9 +92,9 @@ func (l *LineLog) add(line string, truncated bool) {
 	}
 	l.mu.Lock()
 	l.ring = append(l.ring, line)
-	l.ringSize += len(line)
+	l.ringSize += len(line) + 1
 	for l.ringSize > l.ringMax && len(l.ring) > 1 {
-		l.ringSize -= len(l.ring[0])
+		l.ringSize -= len(l.ring[0]) + 1
 		l.ring = l.ring[1:]
 	}
 	now := time.Now()

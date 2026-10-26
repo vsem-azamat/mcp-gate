@@ -32,7 +32,7 @@ The gate does not use the SDK's `CommandTransport`, which signals only the leade
 
 Errors kept in the status and logged go through `Supervisor.ErrorText`, which replaces the server's URL (Go's HTTP errors quote it whole) with `<servers.NAME.http.url>` (`Supervisor.HideURL`) before redacting, and cuts at a character boundary (`redact.Cut`).
 
-Child stderr goes through a `LineLog`: up to 8 KiB of each line is read and redacted (minus a margin at the cut, so a secret across it is not half kept), then cut at 4 KiB, logged under a rate limit (20 lines a second, bursts of 100) and kept in a 64 KiB ring that outlives restarts. Each kept line wakes `Wait`, since the ring is part of `Status`.
+Child stderr goes through a `LineLog`: up to 8 KiB of each line is read and redacted (minus a margin at the cut, so a secret across it is not half kept), then cut at 4 KiB, logged under a rate limit (20 lines a second, bursts of 100) and kept in a 64 KiB ring that outlives restarts, in which each line counts with its newline, so empty lines are evicted too. Each kept line wakes `Wait`, since the ring is part of `Status`.
 
 ## HTTP
 
