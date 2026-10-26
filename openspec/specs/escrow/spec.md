@@ -125,7 +125,7 @@ The limit SHALL bound guessing per client address and shed the load of wrong key
 
 Each client SHALL have a budget of 20 attempts, of which a request presenting a wrong key (`Bearer` with a non-empty key) SHALL spend one, and which SHALL earn one back every 3 seconds up to 20. A client with less than one attempt left SHALL get 429 with `Retry-After` (in whole seconds) and the body `Too Many Requests` for every request that presents a key, even the right one, before its key is checked, so that guessing from one address is bounded. A request presenting no key, or another scheme, SHALL get 401 without spending any, since it cannot be a guess. The client SHALL be the peer address unless `listen.behindProxy` is set and the peer is in `listen.trustedProxies`; then it SHALL be the right-most `X-Forwarded-For` entry that is not in `listen.trustedProxies`. IPv6 addresses SHALL count by their /64. At most 4096 clients SHALL be tracked; a new one SHALL then replace the client with the most attempts left, so that a client that never presented a wrong key is never refused. Whoever shares a client's address can empty its budget: devices behind one NAT, and, behind a reverse proxy on the same host without `listen.behindProxy`, every client, which all come from `127.0.0.1`. Trusting a proxy on loopback trusts every local process to name its own client address.
 
-All clients together SHALL have a global budget of 100 attempts, earning one back every second up to 100, which a wrong key SHALL spend unless its client presented the right key within the last 24 hours (at most 256 such trusted clients kept, a new one replacing the one that presented it longest ago). While less than one attempt is left in it, a wrong key SHALL get 429 with `Retry-After` instead of 401, spending nothing. The global budget SHALL never refuse the right key: it limits the load of guessing from many addresses and cannot lock anyone out.
+All clients together SHALL have a global budget of 100 attempts, earning one back every second up to 100, which a wrong key SHALL spend unless its client presented the right key within the last 24 hours (at most 256 such trusted clients kept, a new one replacing the one that presented it longest ago). While less than one attempt is left in it, a wrong key SHALL get 429 with `Retry-After` instead of 401, spending nothing from the global budget but still spending its client's attempt. The global budget SHALL never refuse the right key: it limits the load of guessing from many addresses and cannot lock anyone out.
 
 When the escrow is served on the listener (`escrow.tcp`), `listen.behindProxy` is not set and the listen address is a loopback address, `serve` SHALL log a warning at start: a reverse proxy on the same host makes every client `127.0.0.1`, so all clients share one budget and anyone can empty the owner's.
 
@@ -133,6 +133,11 @@ When the escrow is served on the listener (`escrow.tcp`), `listen.behindProxy` i
 
 - **WHEN** 100 clients present one wrong key each
 - **THEN** a wrong key from yet another client gets 429, a request without a key gets 401, and a request with the right key from any client whose own budget has attempts left is served
+
+#### Scenario: Guesses while the global budget is empty
+
+- **WHEN** the global budget is empty and one client presents 20 wrong keys, each getting 429
+- **THEN** a request with the right key from that client gets 429
 
 #### Scenario: Behind a proxy
 

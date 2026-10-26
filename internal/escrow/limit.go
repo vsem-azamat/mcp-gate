@@ -127,20 +127,15 @@ func (l *limiter) allow(client string) (time.Duration, bool) {
 }
 
 // fail counts a wrong key presented by client. It reports false, with how long until a wrong
-// key is counted again, when the global bucket is empty for a client that is not trusted;
-// nothing is spent then.
+// key is counted again, when the global bucket is empty for a client that is not trusted; the
+// client's own bucket is spent either way.
 func (l *limiter) fail(client string) (time.Duration, bool) {
 	now := l.clock.Now()
 	ck := clientKey(client)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	charged := !l.isTrusted(ck, now)
-	if charged && l.global.refillAt(now, globalBurst, globalRefill) < 1 {
-		return l.global.wait(globalRefill), false
-	}
-	if charged {
-		l.global.tokens--
-	}
+	// The client's bucket is spent first, so a wrong key the global bucket refuses still counts
+	// against its address.
 	b := l.budgets[ck]
 	if b == nil {
 		if len(l.budgets) >= maxClients {
@@ -159,5 +154,12 @@ func (l *limiter) fail(client string) (time.Duration, bool) {
 	}
 	b.refill(now)
 	b.tokens = max(0, b.tokens-1)
+	if l.isTrusted(ck, now) {
+		return 0, true
+	}
+	if l.global.refillAt(now, globalBurst, globalRefill) < 1 {
+		return l.global.wait(globalRefill), false
+	}
+	l.global.tokens--
 	return 0, true
 }

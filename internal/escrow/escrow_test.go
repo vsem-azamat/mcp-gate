@@ -384,6 +384,17 @@ func TestGlobalFailLimit(t *testing.T) {
 	if code := get("Bearer wrong", owner); code != http.StatusUnauthorized {
 		t.Errorf("the trusted owner's wrong key, global bucket empty = %d, want 401", code)
 	}
+	// A wrong key refused by the empty global bucket still spends its client's bucket, so the
+	// global bucket running out does not lift the bound on guessing from one address.
+	guesser := "203.0.113.20"
+	for i := range failBurst {
+		if code := get("Bearer wrong", guesser); code != http.StatusTooManyRequests {
+			t.Fatalf("guess %d, global bucket empty = %d, want 429", i+1, code)
+		}
+	}
+	if code := get("Bearer "+testKey, guesser); code != http.StatusTooManyRequests {
+		t.Errorf("the right key after guesses refused by the global bucket = %d, want 429", code)
+	}
 	clk.add(globalRefill)
 	if code := get("Bearer wrong", "203.0.113.13"); code != http.StatusUnauthorized {
 		t.Errorf("the earned guess = %d, want 401", code)
