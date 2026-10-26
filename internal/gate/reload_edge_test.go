@@ -149,3 +149,90 @@ func TestReloadHoldsCallsWhileRestarting(t *testing.T) {
 		t.Errorf("a call while the server restarts: %q %v", got, err)
 	}
 }
+
+// TestShutdownEndsStartupHold checks that a request held during startup is refused with 503 as
+// soon as the shutdown begins, rather than held through its grace.
+func TestShutdownEndsStartupHold(t *testing.T) {
+	srv := stdioServer(t, testkit.Fake{StartDelay: 20 * time.Second}, "")
+	r := startGate(t, tokensDoc(srv, `laptop: "${LAPTOP}"`, "startupGracePeriod: 30s\n"), gateOpts{})
+	held := make(chan int, 1)
+	go func() {
+		code, _ := rawCall(r, laptopToken, strings.NewReader(revokedCall))
+		held <- code
+	}()
+	time.Sleep(300 * time.Millisecond) // the request is held
+	begun := time.Now()
+	r.stop()
+	if took := time.Since(begun); took > 5*time.Second {
+		t.Errorf("the shutdown took %s", took)
+	}
+	if code := <-held; code != http.StatusServiceUnavailable {
+		t.Errorf("the held request: %d", code)
+	}
+}
+
+// TestShutdownEndsRestartHold checks the same for a call held while a reload restarts its server.
+func TestShutdownEndsRestartHold(t *testing.T) {
+	fast := stdioServer(t, testkit.Fake{}, "")
+	slow := stdioServer(t, testkit.Fake{StartDelay: 25 * time.Second}, "")
+	doc := func(srv string) string { return configDoc("startupGracePeriod: 30s\n", map[string]string{"s": srv}) }
+	r := startGate(t, doc(fast), gateOpts{})
+	r.waitReady(t, "s")
+	cs := r.connect(t, "s", clientOpts{})
+	r.reload(t, doc(slow))
+	held := make(chan error, 1)
+	go func() {
+		_, err := echoText(t, cs, "x")
+		held <- err
+	}()
+	time.Sleep(time.Second) // the call is held
+	begun := time.Now()
+	r.stop()
+	if took := time.Since(begun); took > 5*time.Second {
+		t.Errorf("the shutdown took %s", took)
+	}
+	select {
+	case err := <-held:
+		if err == nil {
+			t.Error("the held call succeeded during the shutdown")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the held call was not answered")
+	}
+}
+
+// TestHandOnToPublicRoute checks that a request a reload overtakes, handed on to a route the
+// reload made public, keeps nothing of the old route's token check: its audit line names no
+// principal, and the request line of the old route says it was handed on.
+func TestHandOnToPublicRoute(t *testing.T) {
+	srv := stdioServer(t, testkit.Fake{}, "log: {requests: true}\n")
+	r := startGate(t, tokensDoc(srv, `laptop: "${LAPTOP}"`, ""), gateOpts{})
+	r.waitReady(t, "s")
+	pr, pw := io.Pipe()
+	done := make(chan int, 1)
+	go func() {
+		code, _ := rawCall(r, laptopToken, pr)
+		done <- code
+	}()
+	_, _ = pw.Write([]byte(revokedCall[:24]))
+	time.Sleep(300 * time.Millisecond) // the headers reach the gate
+	r.reload(t, tokensDoc(srv+"    auth: {public: true}\n", `laptop: "${LAPTOP}"`, ""))
+	_, _ = pw.Write([]byte(revokedCall[24:]))
+	_ = pw.Close()
+	if code := <-done; code != http.StatusOK {
+		t.Fatalf("the handed-on request: %d", code)
+	}
+	calls := r.logs.lines("call")
+	if len(calls) != 1 || calls[0]["principal"] != "" {
+		t.Errorf("audit lines %v", calls)
+	}
+	var handedOn int
+	for _, l := range r.logs.lines("request") {
+		if l["handedOn"] == true {
+			handedOn++
+		}
+	}
+	if handedOn != 1 {
+		t.Errorf("request lines %v", r.logs.lines("request"))
+	}
+}

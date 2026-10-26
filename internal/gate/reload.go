@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"slices"
 	"sync"
 	"time"
@@ -150,22 +151,27 @@ func (g *Gate) apply(ctx context.Context, cfg *config.Config) error {
 				s.rt.src.Close()
 				return
 			}
-			// The old process has not ended: its replacement must wait for it.
+			// The old process has not ended: a runtime with the same downstream settings, whatever
+			// its server's name, waits for it.
 			g.logger.Error("server did not stop; its replacement starts once it has", "server", s.name)
 			mu.Lock()
 			defer mu.Unlock()
 			g.leftover = append(g.leftover, s)
-			done := make(chan struct{})
-			g.stopping[s.name] = done
+			p := &pendingStop{key: s.rt.key, done: make(chan struct{})}
+			g.stopping = append(g.stopping, p)
 			g.retiring.Go(func() {
-				defer close(done)
-				_ = s.sup.Stop(g.retireCtx) // ends with the shutdown, which stops it in turn
+				// Ends early with the shutdown, which stops it in turn; done then stays open, and
+				// nothing is started.
+				if s.sup.Stop(g.retireCtx) == nil {
+					s.rt.src.Close()
+					close(p.done)
+				}
 			})
 		})
 	}
 	wg.Wait()
 	for _, rt := range fresh {
-		g.startRuntime(ctx, sn, rt)
+		g.startRuntime(ctx, rt)
 	}
 	// A dropped mirror goes on taking listings while the retired routes that hold it serve
 	// requests, at most ShutdownGrace; a call in flight needs only its source.
@@ -219,37 +225,54 @@ func (g *Gate) awaitRoutes(match func(*route) bool) bool {
 	return g.retireCtx.Err() == nil
 }
 
-// startRuntime starts a runtime of sn at once, or, when the old process of its server has not
-// stopped yet, once it has, as long as the runtime is still the server's and the gate is not
-// shutting down. The caller holds mu.
-func (g *Gate) startRuntime(ctx context.Context, sn *snapshot, rt *serverRuntime) {
+// pendingStop is the old process of a replaced server that had not ended when its stop timed
+// out; done is closed once it has.
+type pendingStop struct {
+	key  map[string]any
+	done chan struct{}
+}
+
+// startRuntime starts a runtime of the current snapshot at once, or, when an old process with the same downstream
+// settings has not ended yet, once it has, as long as the runtime is still in the current
+// snapshot and the gate is not shutting down. The caller holds mu.
+func (g *Gate) startRuntime(ctx context.Context, rt *serverRuntime) {
 	hold := g.boot.StartupGracePeriod.D()
-	var name string
-	for n, s := range sn.servers {
-		if s.rt == rt {
-			name = n
+	g.stopping = slices.DeleteFunc(g.stopping, func(p *pendingStop) bool {
+		select {
+		case <-p.done:
+			return true
+		default:
+			return false
+		}
+	})
+	var waits []chan struct{}
+	for _, p := range g.stopping {
+		if reflect.DeepEqual(p.key, rt.key) {
+			waits = append(waits, p.done)
 		}
 	}
-	done := g.stopping[name]
-	if done == nil {
+	if len(waits) == 0 {
 		rt.start(ctx, hold)
 		return
 	}
 	g.retiring.Go(func() {
-		select {
-		case <-done:
-		case <-g.retireCtx.Done():
-			return
+		for _, done := range waits {
+			select {
+			case <-done:
+			case <-g.retireCtx.Done():
+				return
+			}
 		}
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		if g.stopping[name] == done {
-			delete(g.stopping, name)
+		current := false
+		for _, s := range g.snap.Load().servers {
+			current = current || s.rt == rt
 		}
-		if cur := g.snap.Load().servers[name]; g.closing || cur == nil || cur.rt != rt {
+		if g.closing || g.retireCtx.Err() != nil || !current {
 			return
 		}
-		g.logger.Info("the server's old process has stopped; starting its replacement", "server", name)
+		g.logger.Info("the old process has stopped; starting its replacement", "server", rt.src.Name())
 		rt.start(ctx, hold)
 	})
 }

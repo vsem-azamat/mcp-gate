@@ -103,8 +103,14 @@ type route struct {
 	idle    chan struct{} // closed once retired with no request in flight
 }
 
-// clientAuthKey holds, in a request's context, the Authorization header the client sent.
-type clientAuthKey struct{}
+// arrived is a request as it reached a route: its context before the route's handlers added to
+// it, and the Authorization header the client sent.
+type arrived struct {
+	ctx  context.Context
+	auth []string
+}
+
+type arrivedKey struct{}
 
 func newRoute(key map[string]any, again http.Handler) *route {
 	return &route{key: key, again: again, ended: make(chan struct{}), idle: make(chan struct{})}
@@ -120,8 +126,9 @@ func (rt *route) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rt.active++
 	rt.mu.Unlock()
-	// The aggregate's token check rewrites the header; a request handed back keeps the client's.
-	r = r.WithContext(context.WithValue(r.Context(), clientAuthKey{}, r.Header.Values("Authorization")))
+	// A request handed back starts again as it arrived: the aggregate's token check rewrites the
+	// header, and the token checks put what they found in the context.
+	r = r.WithContext(context.WithValue(r.Context(), arrivedKey{}, &arrived{ctx: r.Context(), auth: r.Header.Values("Authorization")}))
 	defer func() {
 		rt.mu.Lock()
 		rt.active--
@@ -382,15 +389,17 @@ func (g *Gate) chain(sn *snapshot, rt *route, name string, logRequests bool, aut
 		// current snapshot, which checks it again: a token the reload revoked runs nothing.
 		select {
 		case <-rt.ended:
-			r = r.Clone(r.Context())
+			upstream.MarkHandedOn(r.Context())
+			first, _ := r.Context().Value(arrivedKey{}).(*arrived)
+			again := r.Clone(first.ctx) //nolint:contextcheck // the request's own context as it reached the route, an ancestor of r.Context(): only what the old route added is dropped
 			if body, ok := upstream.BodyBytes(r); ok {
-				r.Body = io.NopCloser(bytes.NewReader(body))
+				again.Body = io.NopCloser(bytes.NewReader(body))
 			}
-			r.Header.Del("Authorization")
-			if auth, ok := r.Context().Value(clientAuthKey{}).([]string); ok {
-				r.Header["Authorization"] = auth
+			again.Header.Del("Authorization")
+			if first.auth != nil {
+				again.Header["Authorization"] = first.auth
 			}
-			rt.again.ServeHTTP(w, r)
+			rt.again.ServeHTTP(w, again)
 			return
 		default:
 		}

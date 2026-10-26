@@ -106,9 +106,9 @@ type Gate struct {
 	// leftover are servers that reloads replaced and did not stop: the shutdown began first, or
 	// the old process did not end in time. The shutdown stops them.
 	leftover []*server
-	// stopping holds, by server name, a channel closed once the old process of a server that a
-	// reload replaced has ended, while it has not; its replacement starts after that.
-	stopping map[string]chan struct{}
+	// stopping are the old processes of replaced servers whose stop timed out; a runtime with
+	// the same downstream settings starts only once they have ended.
+	stopping []*pendingStop
 	// retireCtx is cancelled when shutdown begins, which ends the waits of reloads for calls in
 	// flight; drained is closed once the shutdown has drained the listener, after which the
 	// mirrors of replaced routes are closed; retiring counts those not closed yet.
@@ -127,7 +127,7 @@ func New(opts Options) (*Gate, error) {
 	cfg := opts.Config
 	g := &Gate{
 		opts: opts, boot: cfg, logger: opts.Logger, drain: make(chan struct{}), startupOver: make(chan struct{}),
-		running: make(chan struct{}), drained: make(chan struct{}), stopping: map[string]chan struct{}{},
+		running: make(chan struct{}), drained: make(chan struct{}),
 	}
 	g.retireCtx, g.stopRetiring = context.WithCancel(context.Background())
 	var err error
@@ -416,6 +416,9 @@ func (g *Gate) awaitReady(r *http.Request, ready func(*http.Request) (ok, pendin
 			ok, _ = ready(r)
 			return ok
 		case <-r.Context().Done():
+			return false
+		case <-g.drain:
+			// The shutdown began: refuse at once rather than hold the grace.
 			return false
 		case <-g.startupOver:
 		case <-t.C:

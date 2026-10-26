@@ -435,10 +435,27 @@ func LogRequests(logger *slog.Logger, route string, remote RemoteFunc, next http
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(sw, r)
-		logger.Info("request", "server", route, "method", r.Method, "status", sw.status,
-			"durMs", time.Since(start).Milliseconds(), "remote", remote(r))
+		handedOn := new(atomic.Bool)
+		next.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), handedOnKey{}, handedOn)))
+		attrs := []any{
+			"server", route, "method", r.Method, "status", sw.status,
+			"durMs", time.Since(start).Milliseconds(), "remote", remote(r),
+		}
+		if handedOn.Load() {
+			attrs = append(attrs, "handedOn", true)
+		}
+		logger.Info("request", attrs...)
 	})
+}
+
+type handedOnKey struct{}
+
+// MarkHandedOn records that the request of ctx was handed on to another route, which logs it
+// too; the request line of the route that handed it on says so.
+func MarkHandedOn(ctx context.Context) {
+	if p, ok := ctx.Value(handedOnKey{}).(*atomic.Bool); ok {
+		p.Store(true)
+	}
 }
 
 // statusWriter records the status code. Unwrap lets http.ResponseController reach the

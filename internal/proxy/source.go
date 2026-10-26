@@ -78,6 +78,9 @@ func (s *Source) Inherit(prev *Source) {
 	s.stats.dropped.Store(prev.stats.dropped.Load())
 }
 
+// Name is the server's name in the config.
+func (s *Source) Name() string { return s.name }
+
 // Ready reports whether the catalog was listed once.
 func (s *Source) Ready() bool { return s.ready.Load() }
 
