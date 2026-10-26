@@ -354,3 +354,18 @@ func TestEscrowSocketWhileOff(t *testing.T) {
 		t.Errorf("warnings = %v", w)
 	}
 }
+
+func TestEscrowSocketOwnUIDWarning(t *testing.T) {
+	dir, err := os.MkdirTemp("", "esc") //nolint:usetesting // t.TempDir can exceed the socket path limit of about 100 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	r := startGate(t, configDoc(fmt.Sprintf("escrow:\n  socket: {path: %q, allowUIDs: [%d]}\n", filepath.Join(dir, "e.sock"), os.Geteuid()), map[string]string{
+		"chat": stdioServer(t, testkit.Fake{}, ""),
+	}), gateOpts{escrowKey: escrowKey})
+	r.waitReady(t, "chat")
+	if w := r.logs.lines("escrow.socket.allowUIDs lists the gate's own user"); len(w) != 1 || w[0]["level"] != "WARN" {
+		t.Errorf("warnings = %v", w)
+	}
+}

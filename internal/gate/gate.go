@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -124,6 +126,11 @@ func New(opts Options) (*Gate, error) {
 			g.mux.Handle(escrow.Route, api)
 		}
 		if cfg.Escrow.Socket != nil {
+			if slices.Contains(cfg.Escrow.Socket.AllowUIDs, os.Geteuid()) {
+				g.logger.Warn("escrow.socket.allowUIDs lists the gate's own user",
+					"risk", "the stdio servers run as that user and can start processes outside the gate's tree "+
+						"(through systemd-run, tmux, ssh or ptrace) that read secrets without the key")
+			}
 			mux := http.NewServeMux()
 			mux.Handle(escrow.Route, api)
 			g.sock = upstream.NewServer("", mux, g.logger)

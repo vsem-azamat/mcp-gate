@@ -33,20 +33,31 @@ systemd gives the service a private read-only copy (mode 0400, owned by the serv
 
 ### Escrow socket
 
-To serve the escrow API on a unix socket (see [serve](../commands/serve.md#escrow-socket)), give the unit a runtime directory in a drop-in and put the socket in it:
+To serve the escrow API on a unix socket (see [serve](../commands/serve.md#escrow-socket)) to another account, the reader, give the socket a group that only the reader is in. With the system unit, as root:
+
+```sh
+sudo groupadd --system mcp-gate-escrow
+sudo usermod -aG mcp-gate-escrow reader      # the account that reads the secrets
+```
+
+and in a drop-in:
 
 ```ini
 [Service]
 RuntimeDirectory=mcp-gate
-RuntimeDirectoryMode=0700
+ExecStartPre=+/usr/bin/chgrp mcp-gate-escrow /run/mcp-gate
+ExecStartPre=+/usr/bin/chmod 2750 /run/mcp-gate
 ```
 
 ```yaml
 escrow:
-  socket: {path: /run/mcp-gate/escrow.sock, allowUIDs: [1001]}   # the user unit: ${XDG_RUNTIME_DIR}/mcp-gate/escrow.sock
+  socket: {path: /run/mcp-gate/escrow.sock, mode: "0660", allowUIDs: [1001]}   # 1001: the reader's user ID
+  tcp: false
 ```
 
-systemd creates the directory before the start, writable despite `ProtectSystem=strict`, and removes it at stop. Every process of a listed user then reads secrets without the key, except the gate and its descendants, such as the stdio servers (see [serve](../commands/serve.md#escrow-socket)); other local users, and a reverse proxy in front of the TCP listener, still need it. With the system unit, list the user ID of the account that reads the secrets, not `mcp-gate`. Add `escrow.tcp: false` when nothing should reach the API over TCP.
+systemd creates `/run/mcp-gate` before the start, owned by `mcp-gate` and writable despite `ProtectSystem=strict`, and removes it at stop. The two `+` lines run as root: they give the directory the group and the setgid bit, so the socket the gate creates in it belongs to `mcp-gate-escrow`, and mode `0660` lets the group's members connect. The reader then reads secrets without the key; another member of the group would need it. With the default mode `0600`, only the gate's user and root can connect at all. List the reader's user ID in `allowUIDs`, never `mcp-gate`'s: the stdio servers run as `mcp-gate` and can start processes outside the gate's tree. `escrow.tcp: false` keeps the API off the TCP listener.
+
+The user unit is for one account that is both the gate's user and the reader, which `allowUIDs` cannot safely list: there, leave `allowUIDs` out and use the key on the socket too (`${XDG_RUNTIME_DIR}/mcp-gate/escrow.sock`).
 
 ## Install the system unit
 

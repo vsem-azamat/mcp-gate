@@ -87,11 +87,15 @@ func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		e.logger.Info("escrow access", "op", op, "handle", logHandle, "status", status, "remote", client)
 	}()
 
-	if wait, ok := e.limit.allow(client); !ok {
-		status = http.StatusTooManyRequests
-		w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
-		http.Error(w, "Too Many Requests", status)
-		return
+	// A keyless peer skips the limit, so that wrong keys from inside the gate's tree, under the
+	// same user ID, cannot lock it out.
+	if !keyless {
+		if wait, ok := e.limit.allow(client); !ok {
+			status = http.StatusTooManyRequests
+			w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
+			http.Error(w, "Too Many Requests", status)
+			return
+		}
 	}
 	if key := presentedKey(r); !keyless && !e.authorized(key) {
 		if key != "" {

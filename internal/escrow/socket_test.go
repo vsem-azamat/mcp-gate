@@ -156,6 +156,32 @@ func TestListenSocket(t *testing.T) {
 	}
 	_ = ln.Close()
 
+	// The socket's directory must be the gate's or root's, and writable by nobody else.
+	for i, mode := range []os.FileMode{0o770, 0o777, os.ModeSticky | 0o777} { // sticky, but not root's
+		shared := filepath.Join(dir, "shared"+strconv.Itoa(i))
+		if err := os.Mkdir(shared, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(shared, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ListenSocket(t.Context(), filepath.Join(shared, "e.sock"), 0o600); err == nil || !strings.Contains(err.Error(), "writable by") {
+			t.Errorf("a directory with mode %o: %v", mode, err)
+		}
+	}
+	group := filepath.Join(dir, "group")
+	if err := os.Mkdir(group, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if ln, err := ListenSocket(t.Context(), filepath.Join(group, "e.sock"), 0o660); err != nil {
+		t.Errorf("a 0750 directory: %v", err)
+	} else {
+		_ = ln.Close()
+	}
+	if entries, _ := os.ReadDir(group); len(entries) != 0 {
+		t.Errorf("left behind in the directory: %v", entries)
+	}
+
 	// Anything else at the path is left alone.
 	file := filepath.Join(dir, "file.sock")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {

@@ -113,6 +113,10 @@ func TestSocketProcessTree(t *testing.T) {
 	if got := clientRequest(t, sock, "/_escrow/"+handle, false); !strings.HasPrefix(got, "401 ") {
 		t.Errorf("a child of the gate without a key = %q, want 401", got)
 	}
+	// Wrong keys from inside the tree do not lock out the allowed client outside it.
+	for range 25 {
+		_, _ = socketGet(t, sock, http.MethodGet, "/_escrow/"+handle, "wrong")
+	}
 	// Another process of the listed user is served without one.
 	if got := clientRequest(t, sock, "/_escrow/"+handle, true); got != "200 Qwerty-12345" {
 		t.Errorf("a process outside the gate's tree without a key = %q, want the value", got)
