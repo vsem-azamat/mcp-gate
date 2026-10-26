@@ -29,9 +29,10 @@ type rule struct {
 	prefilter []string
 	// precheck, when set, is a cheap scan that must pass for the rule to run.
 	precheck func(text string) bool
-	// regions, when set, returns the parts of the text the expression runs over, in order and
-	// apart, each starting and ending at a line boundary, so that ^ and $ match there as in the
-	// whole text. None means the rule does not run.
+	// regions, when set, returns the parts of the text the expression runs over, each starting
+	// and ending at a line boundary, so that ^ and $ match there as in the whole text. They may
+	// overlap, but what is accepted in one must end before what is accepted in the next starts.
+	// None means the rule does not run.
 	regions func(text string) [][2]int
 	// accept validates a candidate and may narrow it or change its kind ("" keeps the rule's
 	// kind). It receives the whole text, the submatch indexes and the selected span.
@@ -256,11 +257,11 @@ var coreRules = []*rule{
 		// "password:" at the end of a line and the value alone on the next one ("password:\n
 		// hunter22", YAML's "password:\n  hunter22"). A separate rule rather than an optional
 		// line break in the rule above, so that a next line it rejects is still scanned by that
-		// rule. The value cannot end with a colon, so a key line after it ("token:\nabc…") is
-		// matched with its own value.
+		// rule. Each key line is matched on its own region, so a key line after it
+		// ("token:\nabc…", "API_KEY=\nabc…") is matched with its own value.
 		kind:     kindSecret,
 		priority: priorityKeyValueNextLine,
-		re:       regexp.MustCompile(`(?im)` + keyValueKey + `[ \t\x{00A0}]*\r?\n[ \t\x{00A0}]*(?:"([^"\r\n]{1,})"|'([^'\r\n]{1,})'|([^\s"'<>&]*[^\s"'<>&:]))[,;]?[ \t\x{00A0}]*\r?$`),
+		re:       regexp.MustCompile(`(?im)` + keyValueKey + `[ \t\x{00A0}\x01\x{200B}-\x{200D}\x{2060}\x{FEFF}]*\r?\n[ \t\x{00A0}]*(?:"([^"\r\n]{1,})"|'([^'\r\n]{1,})'|([^\s"'<>&]*[^\s"'<>&:]))[,;]?[ \t\x{00A0}]*\r?$`),
 		groups:   []int{2, 3, 4},
 		regions:  keyLineRegions,
 		accept:   nextLineValueAccept,
@@ -566,15 +567,24 @@ var assignmentLine = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.\-]*=[^=]`)
 
 var keyValueOnNextLine = keyValueAccept(proseKeyKind, 3)
 
+// keyLine matches a line that is only a key and its separator ("API_KEY=", "token:=").
+var keyLine = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(?::=|=>|[:=])$`)
+
 // nextLineValueAccept accepts a value written alone on the line after its key, as
 // keyValueAccept does, unless an unquoted one is the structure of the text rather than a value:
-// a Markdown code fence, a URL ("Reset your password:\nhttps://…") or an assignment of its own.
+// a Markdown code fence, a URL ("Reset your password:\nhttps://…"), an assignment of its own,
+// or a secret key of its own whose value is on the line after it.
 func nextLineValueAccept(text string, match []int, start, end int) (int, int, string, bool) {
 	if g := keyValueNextLineGroup; match[2*g] >= 0 {
 		value := text[match[2*g]:match[2*g+1]]
 		if strings.HasPrefix(value, "```") || strings.HasPrefix(value, "~~~") ||
 			strings.Contains(value, "://") || assignmentLine.MatchString(value) {
 			return 0, 0, "", false
+		}
+		if m := keyLine.FindStringSubmatch(value); m != nil {
+			if _, ok := proseKeyKind(m[1]); ok {
+				return 0, 0, "", false
+			}
 		}
 	}
 	return keyValueOnNextLine(text, match, start, end)
@@ -650,9 +660,10 @@ func hasURLUserinfo(text string) bool {
 }
 
 // keyLineRegions returns, for the next-line key-value rule, each line that ends, before spaces
-// and tabs, with a key-value separator (":", "=", "=>", "：") and holds a key word, together with the
-// line after it; regions that overlap are joined. Matching only there keeps the rule's cost to
-// the lines it can match.
+// and tabs, with a key-value separator (":", "=", "=>", "：") and holds a key word, together with
+// the line after it. Matching only there keeps the rule's cost to the lines it can match, and
+// gives every key line its own match even when the line before it is a key line too. A region
+// holds at most one match, whose value is on its last line, so the matches stay in order.
 func keyLineRegions(text string) [][2]int {
 	var regions [][2]int
 	lineStart := 0
@@ -671,19 +682,18 @@ func keyLineRegions(text string) [][2]int {
 		if j := strings.IndexByte(text[lineStart:], '\n'); j >= 0 {
 			end = lineStart + j
 		}
-		if n := len(regions); n > 0 && regions[n-1][1] >= start {
-			regions[n-1][1] = end
-		} else {
-			regions = append(regions, [2]int{start, end})
-		}
+		regions = append(regions, [2]int{start, end})
 	}
 	return regions
 }
 
-// endsWithSeparator reports whether line ends with a key-value separator before spaces, tabs,
-// no-break spaces and a carriage return.
+// lineEndSpace is what may follow the separator of a key line: spaces, tabs, an escaped tab
+// (maskedTab), no-break and zero-width spaces, and a carriage return.
+const lineEndSpace = " \t\r\u00a0\x01\u200b\u200c\u200d\u2060\ufeff"
+
+// endsWithSeparator reports whether line ends with a key-value separator before lineEndSpace.
 func endsWithSeparator(line string) bool {
-	line = strings.TrimRight(line, " \t\r\u00a0")
+	line = strings.TrimRight(line, lineEndSpace)
 	return strings.HasSuffix(line, ":") || strings.HasSuffix(line, "=") || strings.HasSuffix(line, "=>") || strings.HasSuffix(line, "：")
 }
 

@@ -203,8 +203,9 @@ func shape(t *testing.T, data []byte) string {
 	}
 }
 
-// FuzzKeyLineRegions checks that the next-line key-value rule finds the same spans when it
-// matches only the regions keyLineRegions returns as when it matches the whole text.
+// FuzzKeyLineRegions checks that the next-line key-value rule, matching only the regions
+// keyLineRegions returns, finds spans in order and apart, and every span it finds when it
+// matches the whole text (which misses a key line right after another).
 func FuzzKeyLineRegions(f *testing.F) {
 	for _, seed := range fuzzSeeds() {
 		f.Add(seed)
@@ -221,12 +222,18 @@ func FuzzKeyLineRegions(f *testing.F) {
 	f.Fuzz(func(t *testing.T, text string) {
 		masked := maskEscapedBreaks(text)
 		got := e.ruleSpans(regional, masked)
-		var want []span
-		if containsAny(strings.ToLower(masked), keyValuePrefilter) {
-			want = e.ruleSpans(&whole, masked)
+		for i := 1; i < len(got); i++ {
+			if got[i].start < got[i-1].end {
+				t.Fatalf("spans out of order or overlapping: %+v", got)
+			}
 		}
-		if !slices.Equal(got, want) {
-			t.Fatalf("regions give %+v, the whole text %+v", got, want)
+		if !containsAny(strings.ToLower(masked), keyValuePrefilter) {
+			return
+		}
+		for _, s := range e.ruleSpans(&whole, masked) {
+			if !slices.Contains(got, s) {
+				t.Fatalf("the whole text gives %+v, the regions %+v", s, got)
+			}
 		}
 	})
 }
