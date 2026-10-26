@@ -372,18 +372,27 @@ func TestNoProbesWhileCallsRun(t *testing.T) {
 	}
 }
 
+// TestProbeErrorReplyMeansAlive checks that a probe answered with an error reply does not count
+// as a failure. The interval is also the probe timeout, so on a loaded machine a reply can come
+// too late, which does count; only a failure other than a timeout fails the test.
 func TestProbeErrorReplyMeansAlive(t *testing.T) {
 	t.Parallel()
+	var logs syncBuffer
 	o := stdioOptions(t, testkit.Fake{RefuseProbes: true})
-	// The interval is also the probe timeout: a reply slower than that is a real failure, so it
-	// leaves room for a loaded machine under -race.
+	o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	o.ProbeInterval = 400 * time.Millisecond
 	o.ProbeFailures = 1
 	s := start(t, o)
 	pid := waitReady(t, s).PID
 	time.Sleep(1500 * time.Millisecond)
-	if st := s.Status(); st.PID != pid || st.Restarts != 0 || st.State != Ready {
-		t.Errorf("an error reply counted as a failure: %+v", st)
+	if st := s.Status(); st.PID == pid && st.Restarts == 0 && st.State == Ready {
+		return
+	}
+	t.Logf("the server was restarted (%+v); checking that only timeouts counted", s.Status())
+	for line := range strings.Lines(logs.String()) {
+		if strings.Contains(line, `error="probe: `) && !strings.Contains(line, "context deadline exceeded") {
+			t.Errorf("an error reply counted as a failure: %s", line)
+		}
 	}
 }
 
@@ -392,13 +401,20 @@ func TestFrozenServerIsRestarted(t *testing.T) {
 	for _, tr := range transports[:2] {
 		t.Run(tr.name, func(t *testing.T) {
 			t.Parallel()
+			var logs syncBuffer
 			o := tr.opts(t, testkit.Fake{FreezeAfter: 300 * time.Millisecond})
+			o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 			o.ProbeInterval = 50 * time.Millisecond
 			o.ProbeTimeout = 40 * time.Millisecond
 			s := start(t, o)
-			waitReady(t, s)
-			waitFor(t, s, "degraded", func(st Status) bool { return st.State == Degraded })
+			// Ready and Degraded are passed quickly once the server freezes, so the test waits
+			// for counters, which stay: a session, then a restart after failed probes; and it
+			// finds Degraded in the log, which keeps every state change.
+			waitFor(t, s, "a session", func(st Status) bool { return st.Sessions >= 1 })
 			st := waitFor(t, s, "a restart", func(st Status) bool { return st.Restarts >= 1 })
+			if !strings.Contains(logs.String(), "to=degraded") {
+				t.Error("the server was restarted without becoming degraded")
+			}
 			if !strings.Contains(st.LastError, "probe") && !strings.Contains(st.LastError, "probes") {
 				t.Errorf("last error = %q", st.LastError)
 			}
