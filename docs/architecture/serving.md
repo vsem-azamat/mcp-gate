@@ -2,7 +2,7 @@
 
 [Docs](../README.md) / [Architecture](README.md) / **Serving**
 
-How `mcp-gate serve` puts the downstream servers behind one listener. The behaviour is specified in [`openspec/specs/serving/spec.md`](../../openspec/specs/serving/spec.md).
+How `mcp-gate serve` puts the downstream servers behind one listener. The behaviour is specified in `openspec/specs/`, one spec per capability: [`serving`](../../openspec/specs/serving/spec.md) (the catalog mirror, filters, forwarding, redaction and the audit line), [`routes-and-auth`](../../openspec/specs/routes-and-auth/spec.md) (the routes and their tokens), [`aggregate-endpoint`](../../openspec/specs/aggregate-endpoint/spec.md) (`/mcp`), [`token-policies`](../../openspec/specs/token-policies/spec.md), [`reload`](../../openspec/specs/reload/spec.md), and [`gate-lifecycle`](../../openspec/specs/gate-lifecycle/spec.md) (`serve` itself, its listener and shutdown, health, status and learned pins).
 
 ## Packages
 
