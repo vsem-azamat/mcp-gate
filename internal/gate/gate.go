@@ -355,7 +355,7 @@ func (g *Gate) awaitStartup(ctx context.Context) {
 			s := sn.servers[name]
 			// A server waiting for a login does not connect without someone; it does not hold
 			// the startup.
-			all = all && (s.mirror.Ready() || s.sup.Status().State == downstream.NeedsLogin)
+			all = all && (s.mirror.Ready() || s.sup.Status().AwaitsLogin())
 		}
 		if all {
 			g.markStarted()
@@ -495,15 +495,15 @@ func (g *Gate) Readiness() upstream.Readiness {
 	sn := g.snap.Load()
 	for _, name := range sn.names {
 		s := sn.servers[name]
-		st := s.sup.Status().State
-		if st == downstream.NeedsLogin {
+		st := s.sup.Status()
+		if st.AwaitsLogin() {
 			r.NeedsLogin = append(r.NeedsLogin, name)
 		}
 		if !s.mirror.Ready() {
 			continue
 		}
 		r.Mounted++
-		if st != downstream.Ready && st != downstream.Degraded {
+		if !st.Connected() {
 			r.Unhealthy = append(r.Unhealthy, name)
 		}
 	}

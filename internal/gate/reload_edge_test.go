@@ -63,6 +63,53 @@ func TestReloadRevokesSlowBody(t *testing.T) {
 	}
 }
 
+// TestReloadKeepsSlowBodyOfKeptToken checks that a request whose body arrives after a reload
+// that replaced its route, but kept its token, is served: the current snapshot checks the
+// header the client sent, not what the first route's token check left in the request.
+func TestReloadKeepsSlowBodyOfKeptToken(t *testing.T) {
+	srv := stdioServer(t, testkit.Fake{}, "")
+	r := startGate(t, tokensDoc(srv, `laptop: "${LAPTOP}", phone: "${PHONE}"`, "aggregate: {}\n"), gateOpts{})
+	r.waitReady(t, "s")
+	for i, c := range []struct{ path, tool string }{{"/s/mcp", "echo"}, {config.AggregatePath, "s__echo"}} {
+		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + c.tool + `","arguments":{"text":"kept-and-ran"}}}`
+		pr, pw := io.Pipe()
+		done := make(chan string, 1)
+		go func() {
+			code, out := rawCallTo(r, c.path, laptopToken, pr)
+			done <- strconv.Itoa(code) + " " + out
+		}()
+		_, _ = pw.Write([]byte(body[:24]))
+		time.Sleep(300 * time.Millisecond) // the headers reach the gate
+		// Each reload changes the tokens, which replaces both routes.
+		if i%2 == 0 {
+			r.reload(t, tokensDoc(srv, `laptop: "${LAPTOP}"`, "aggregate: {}\n"))
+		} else {
+			r.reload(t, tokensDoc(srv, `laptop: "${LAPTOP}", phone: "${PHONE}"`, "aggregate: {}\n"))
+		}
+		_, _ = pw.Write([]byte(body[24:]))
+		_ = pw.Close()
+		if got := <-done; !strings.HasPrefix(got, "200") || !strings.Contains(got, "kept-and-ran") {
+			t.Errorf("%s: a kept token whose body arrived after a reload: %s", c.path, got)
+		}
+	}
+}
+
+// rawCallTo posts a JSON-RPC body to path with a token, and returns the status and the response.
+func rawCallTo(r *running, path, token string, body io.Reader) (int, string) {
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, r.base+path, body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2025-06-18")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return -1, err.Error()
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(b)
+}
+
 // TestReloadRevokesHeldRequest checks that a request held during startup with a token that a
 // reload then revokes runs nothing.
 func TestReloadRevokesHeldRequest(t *testing.T) {

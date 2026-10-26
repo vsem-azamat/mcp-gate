@@ -189,10 +189,10 @@ func connectOne(ctx context.Context, cfg *config.Config, name string, s *config.
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err = sup.Wait(wctx, func(st downstream.Status) bool {
-		return st.State == downstream.Ready || st.State == downstream.Backoff || st.State == downstream.NeedsLogin
+		return st.State == downstream.Ready || st.State == downstream.Backoff || st.AwaitsLogin()
 	})
 	st := sup.Status()
-	if st.State == downstream.NeedsLogin {
+	if st.AwaitsLogin() {
 		return fmt.Sprintf("%s: %s", name, st.LastError), false
 	}
 	if err != nil || st.State != downstream.Ready {

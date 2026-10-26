@@ -76,7 +76,7 @@ func HealthHandler(info HealthInfo, readiness func() Readiness) http.HandlerFunc
 func StatusHandler(admin *Tokens, status func() any) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if _, ok := admin.Lookup(Credential(r.Header.Get("Authorization"))); !ok {
+		if _, ok := admin.Authenticate(r.Header.Get("Authorization")); !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

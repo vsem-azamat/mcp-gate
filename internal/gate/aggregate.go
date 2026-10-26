@@ -12,7 +12,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
-	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -112,7 +111,11 @@ func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*r
 		}
 	}
 	for _, secret := range secrets {
-		access, ok := a.access(secret, secret != "")
+		header := ""
+		if secret != "" {
+			header = "Bearer " + secret
+		}
+		access, ok := a.access(header)
 		if !ok {
 			continue
 		}
@@ -132,7 +135,7 @@ func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*r
 		}
 		// A member that a reload restarts holds the request, as on its own route.
 		for name := range gr.access {
-			if sn.servers[name].rt.restarting.Load() && sn.servers[name].sup.Status().State != downstream.NeedsLogin {
+			if sn.servers[name].rt.restarting.Load() && sn.servers[name].sup.Status().ConnectsOnItsOwn() {
 				return false, true
 			}
 		}
@@ -141,7 +144,7 @@ func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*r
 		}
 		for name := range gr.access {
 			s := sn.servers[name]
-			if !agg.Listed(name) && s.sup.Status().State != downstream.NeedsLogin {
+			if !agg.Listed(name) && s.sup.Status().ConnectsOnItsOwn() {
 				return false, true
 			}
 		}
@@ -160,13 +163,12 @@ func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*r
 	return rt, nil
 }
 
-// access returns the members a request may reach, given the credential of its Authorization
-// header and whether it had one. A request without one reaches the public members; one with a
-// credential that no member accepts reaches nothing, as on the members' own routes.
-func (a *aggregate) access(secret string, present bool) (map[string]string, bool) {
-	if present && (secret == "" || strings.ContainsAny(secret, " \t")) {
-		return nil, false
-	}
+// access returns the members a request may reach, given its Authorization header, each with the
+// name of the token it accepted (see upstream.Tokens.Authenticate). A request without the header
+// reaches the public members; one whose header no member accepts reaches nothing, as on the
+// members' own routes.
+func (a *aggregate) access(header string) (map[string]string, bool) {
+	present := strings.TrimSpace(header) != ""
 	access := map[string]string{}
 	matched := false
 	for _, name := range a.members {
@@ -178,7 +180,7 @@ func (a *aggregate) access(secret string, present bool) (map[string]string, bool
 		if !present {
 			continue
 		}
-		if principal, ok := t.Lookup(secret); ok {
+		if principal, ok := t.Authenticate(header); ok {
 			access[name] = principal
 			matched = true
 		}
@@ -193,31 +195,18 @@ func (a *aggregate) access(secret string, present bool) (map[string]string, bool
 // context and their access in the TokenInfo the MCP handlers see. Others get 401 with the body
 // "Unauthorized".
 func (a *aggregate) authorize(next http.Handler) http.Handler {
-	verify := func(_ context.Context, _ string, r *http.Request) (*auth.TokenInfo, error) {
-		gr, _ := r.Context().Value(grantKey{}).(*grant)
-		if gr == nil {
-			return nil, auth.ErrInvalidToken
+	return upstream.Authorize(func(r *http.Request) (context.Context, *auth.TokenInfo, bool) {
+		access, ok := a.access(r.Header.Get("Authorization"))
+		if !ok {
+			return nil, nil, false
 		}
-		return proxy.AccessInfo(gr.principal, gr.access), nil
-	}
-	inner := auth.RequireBearerToken(verify, &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})(next)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
-		access, ok := a.access(upstream.Credential(header), strings.TrimSpace(header) != "")
-		var view *proxy.View
-		if ok {
-			view = a.views[a.viewKey(access)]
-		}
+		view := a.views[a.viewKey(access)]
 		if view == nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
+			return nil, nil, false
 		}
 		gr := &grant{access: access, principal: principals(access), view: view}
-		r = r.Clone(context.WithValue(r.Context(), grantKey{}, gr))
-		// The SDK middleware reads a bearer header; the grant above is what it passes on.
-		r.Header.Set("Authorization", "Bearer aggregate")
-		inner.ServeHTTP(w, r)
-	})
+		return context.WithValue(r.Context(), grantKey{}, gr), proxy.AccessInfo(gr.principal, gr.access), true
+	}, next)
 }
 
 // principals joins the distinct token names of an access, sorted.

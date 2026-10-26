@@ -20,13 +20,13 @@ import (
 func TestTokens(t *testing.T) {
 	tokens := NewTokens(map[string]string{"laptop": "secret-a", "phone": "secret-b"})
 	for secret, want := range map[string]string{"secret-a": "laptop", "secret-b": "phone", "secret-c": "", "": "", "secret-": ""} {
-		name, ok := tokens.Lookup(secret)
+		name, ok := tokens.lookup(secret)
 		if name != want || ok != (want != "") {
-			t.Errorf("Lookup(%q) = %q %v, want %q", secret, name, ok, want)
+			t.Errorf("lookup(%q) = %q %v, want %q", secret, name, ok, want)
 		}
 	}
 	var none *Tokens
-	if _, ok := none.Lookup("x"); ok {
+	if _, ok := none.lookup("x"); ok {
 		t.Error("a nil token set matched")
 	}
 }
@@ -42,8 +42,8 @@ func TestCredential(t *testing.T) {
 		"":             "",
 		"Basic abc":    "Basic abc",
 	} {
-		if got := Credential(header); got != want {
-			t.Errorf("Credential(%q) = %q, want %q", header, got, want)
+		if got := credential(header); got != want {
+			t.Errorf("credential(%q) = %q, want %q", header, got, want)
 		}
 	}
 }
@@ -317,5 +317,52 @@ func TestShutdownClosesUnusedConns(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Errorf("the unused connection was not closed: %v", err)
+	}
+}
+
+func TestAuthenticate(t *testing.T) {
+	// The last three hold whitespace, which config validation refuses: the header check must
+	// refuse them on its own.
+	tokens := NewTokens(map[string]string{
+		"laptop": "secret-a", "phone": "secret-b",
+		"spaced": "secret-a extra", "tabbed": "secret-a\tb", "schemed": "Bearer\tsecret-a",
+	})
+	for header, want := range map[string]string{
+		"Bearer secret-a":       "laptop",
+		"bearer secret-b":       "phone",
+		"BEARER  secret-a ":     "laptop",
+		"secret-b":              "phone",
+		"Bearer secret-c":       "",
+		"Bearer secret-a extra": "",
+		"Bearer secret-a\tb":    "",
+		"Bearer\tsecret-a":      "",
+		"Bearer":                "",
+		"Bearer ":               "",
+		"":                      "",
+		"Basic secret-a":        "",
+	} {
+		got, ok := tokens.Authenticate(header)
+		if got != want || ok != (want != "") {
+			t.Errorf("Authenticate(%q) = %q %v, want %q", header, got, ok, want)
+		}
+	}
+	var none *Tokens
+	if _, ok := none.Authenticate("Bearer secret-a"); ok {
+		t.Error("no tokens accept a header")
+	}
+}
+
+func TestAuthorizeHidesTheSecret(t *testing.T) {
+	var seen []string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Values("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := RequireToken(NewTokens(map[string]string{"laptop": "secret-a"}), next)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/s/mcp", nil)
+	req.Header.Set("Authorization", "Bearer secret-a")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if len(seen) != 1 || strings.Contains(seen[0], "secret-a") {
+		t.Errorf("the handler sees the header %q", seen)
 	}
 }

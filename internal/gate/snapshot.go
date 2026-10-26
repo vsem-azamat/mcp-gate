@@ -79,8 +79,9 @@ func (rt *serverRuntime) start(ctx context.Context, hold time.Duration) {
 			defer rt.restarting.Store(false)
 			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hold)
 			defer cancel()
-			settled := []downstream.State{downstream.Ready, downstream.Degraded, downstream.NeedsLogin, downstream.Stopped}
-			_ = rt.sup.Wait(wctx, func(st downstream.Status) bool { return slices.Contains(settled, st.State) })
+			_ = rt.sup.Wait(wctx, func(st downstream.Status) bool {
+				return st.Connected() || st.AwaitsLogin() || st.State == downstream.Stopped
+			})
 		}()
 	}
 }
@@ -356,7 +357,7 @@ func (g *Gate) serverRoute(sn *snapshot, s *server, prev *route, again http.Hand
 			// for a login does not connect without someone.
 			restarting := s.rt.restarting.Load()
 			return mirror.Ready() && !restarting,
-				(!g.started.Load() || restarting) && s.sup.Status().State != downstream.NeedsLogin
+				(!g.started.Load() || restarting) && s.sup.Status().ConnectsOnItsOwn()
 		},
 		func(r *http.Request) *mcp.Server {
 			return mirror.ServerFor(upstream.Principal(auth.TokenInfoFromContext(r.Context())))
