@@ -145,13 +145,13 @@ const unimplementedDoc = `{
   }
 }`
 
-func TestImportProductionShape(t *testing.T) {
+func TestImportFullShape(t *testing.T) {
 	t.Parallel()
-	res, err := importFile(t, "production-shape.json", Options{})
+	res, err := importFile(t, "full-shape.json", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	golden(t, "production-shape.yaml", res.YAML)
+	golden(t, "full-shape.yaml", res.YAML)
 	c, err := config.Parse(res.YAML, anyValue)
 	if err != nil {
 		t.Fatalf("the import does not load: %v", err)

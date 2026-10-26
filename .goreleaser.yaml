@@ -57,6 +57,20 @@ checksum:
 changelog:
   use: github
   sort: asc
+  # Dependabot titles updates of the product's module fix(deps), so they stay in; updates of the
+  # tools and actions are chore and are left out.
+  filters:
+    exclude:
+      - "^(build|chore|ci|docs|style|test)(\\(.+\\))?!?:"
+  groups:
+    - title: Features
+      regexp: "^feat(\\(.+\\))?!?:"
+      order: 0
+    - title: Fixes
+      regexp: "^fix(\\(.+\\))?!?:"
+      order: 1
+    - title: Other changes
+      order: 999
 
 release:
   draft: false

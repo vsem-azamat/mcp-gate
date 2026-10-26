@@ -255,8 +255,10 @@ func TestSlowReader(t *testing.T) {
 	if _, err := cs.CallTool(t.Context(), params); err != nil {
 		t.Fatal(err)
 	}
-	if d := time.Since(start); d > 3*time.Second || got.Load() == 0 {
-		t.Errorf("the second call took %s and got %d progress notifications", d, got.Load())
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("the second call took %s", d)
 	}
+	// the client runs notification handlers apart from the call, so the result can come first
+	waitFor(t, "a progress notification on the second call", func() bool { return got.Load() > 0 })
 	_, _ = io.CopyN(io.Discard, res.Body, 1)
 }

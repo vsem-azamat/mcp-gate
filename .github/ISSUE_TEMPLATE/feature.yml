@@ -1,0 +1,16 @@
+name: Feature request
+description: Something mcp-gate should do that it does not.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do and why mcp-gate gets in the way now.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How it could work, and what you use instead today.

@@ -7,8 +7,9 @@ updates:
     groups:
       go:
         patterns: ["*"]
+    # fix(deps): the release changelog keeps fix and leaves out chore, and these reach the binary
     commit-message:
-      prefix: chore
+      prefix: fix
       include: scope
 
   # Only the tools themselves are updated. Their other requirements are indirect and are
