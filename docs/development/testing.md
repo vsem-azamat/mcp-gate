@@ -27,7 +27,7 @@ Every fake has the tools `echo`, `sleep`, `big` (a result of a given size), `han
 
 `internal/downstream` runs the downstream half of the version matrix with them: every protocol version the SDK supports, over stdio, HTTP with event streams and HTTP with JSON. `internal/gate` runs the whole matrix through a running gate: clients of each version against servers of each version, over stdio and HTTP. Its tests start a gate on a loopback port with stdio and HTTP fakes behind it, and `TestCompareWithHub` checks with `compare` that the gate serves the catalog of a fake hub unchanged. `internal/procutil` re-executes its test binary the same way, with its own helper modes.
 
-Audit records are checked as records: the unit tests of `internal/proxy` give a mirror or an aggregate a sink that keeps them (`proxy.Options.Audit`) and compare `audit.Record` values. The text of the `call` line is pinned once, by `TestAuditLinesGolden` in `internal/gate` (calls and refusals on a server's route and on `/mcp`, with and without a token policy) and `TestAuditOutcomesGolden` in `internal/proxy` (the outcomes a running gate does not reach easily), which compare whole lines, attribute order included.
+Audit records are checked as records: the unit tests of `internal/proxy` give a mirror or an aggregate a sink that keeps them (`proxy.Options.Audit`, `proxy.AggregateOptions.Audit`) and compare `audit.Record` values. The text of the `call` line is pinned once, by `TestAuditLinesGolden` in `internal/gate` (calls and refusals on a server's route and on `/mcp`, with and without a token policy) and `TestAuditOutcomesGolden` in `internal/proxy` (the outcomes a running gate does not reach easily), which compare whole lines, attribute order included.
 
 ## Binary smoke test
 

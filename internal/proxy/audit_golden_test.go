@@ -98,3 +98,17 @@ func TestAuditOutcomesGolden(t *testing.T) {
 		t.Errorf("no withheld warning: %s", logs.String())
 	}
 }
+
+// TestCallCounters checks the counters /_status reports: every audited request is a call, and
+// every one whose outcome is neither ok nor tool_error a failed one.
+func TestCallCounters(t *testing.T) {
+	m := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{Tools: &config.Filter{Deny: []string{"env"}}})}, newSessionDown(t))
+	for _, name := range []string{"a", "a", "env"} {
+		_, _ = m.callTool(t.Context(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: name}})
+	}
+	refuses := m.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) { return nil, errors.New("unknown tool") })
+	_, _ = refuses(t.Context(), "tools/call", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "missing"}})
+	if st := m.Stats(); st.Calls != 4 || st.Failed != 2 {
+		t.Errorf("calls %d, failed %d; want 4 and 2", st.Calls, st.Failed)
+	}
+}
