@@ -32,15 +32,24 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 
 ## How it compares
 
-| | Endpoints | Clients | Filters | Secrets in results | Runs as |
-| --- | --- | --- | --- | --- | --- |
-| **mcp-gate** | One per server | Named tokens, global or per server; the name is in every audit line | Tools, prompts, resources | Redacted, fails closed; optional escrow; downloaded files scanned | Single binary, no database |
-| [TBXark/mcp-proxy](https://github.com/TBXark/mcp-proxy) | One per server | Unnamed token lists | Tools | Not redacted | Single binary or Docker |
-| [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | One, aggregated | One bearer token | Tools, per profile | The call is blocked if it looks like a secret | Docker, servers in containers |
-| [ContextForge](https://github.com/IBM/mcp-context-forge) | Aggregated, plus virtual servers | JWT, SSO, teams and RBAC | Tools, prompts, resources | Through plugins (PII, regex) | Python service with a database; admin UI |
-| [agentgateway](https://github.com/agentgateway/agentgateway) | Aggregated or one per server | JWT, API keys, MCP OAuth | CEL rules per caller | Through external guardrails | Single binary or Kubernetes; UI |
-| [MetaMCP](https://github.com/metatool-ai/metamcp) | Aggregated per namespace | API keys or MCP OAuth | Tools, per namespace | Not redacted | Docker Compose with Postgres; web UI |
-| [MCPJungle](https://github.com/mcpjungle/MCPJungle) | Aggregated, plus tool groups | Tokens per named client | Per-client server access; tool groups | Not redacted | Binary with SQLite or Postgres; web UI |
+| | **mcp-gate** | [mcp-proxy](https://github.com/TBXark/mcp-proxy) | [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | [ContextForge](https://github.com/IBM/mcp-context-forge) | [agentgateway](https://github.com/agentgateway/agentgateway) | [MetaMCP](https://github.com/metatool-ai/metamcp) | [MCPJungle](https://github.com/mcpjungle/MCPJungle) |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Language | Go | Go | Go | Python | Rust | TypeScript | Go |
+| A URL per server | ✅ | ✅ | ❌ | ➖ ⁷ | ✅ | ❌ | ➖ ⁸ |
+| A named token per agent | ✅ | ❌ | ❌ | ✅ | ✅ | – | ✅ |
+| Allow and deny lists for tools | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ➖ ⁸ |
+| …and for prompts and resources | ✅ | ❌ | – | ✅ | ✅ | ❌ | ❌ |
+| Hides secrets in answers | ✅ | ❌ | ➖ ¹ | ➖ ² | ➖ ² | ❌ | ❌ |
+| Secret vault for the owner | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| OAuth to remote servers | ✅ | ✅ | ✅ | ✅ | ➖ ³ | ✅ | ➖ ⁴ |
+| Runs without a database | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ➖ ⁵ |
+| Web UI | ❌ | ❌ | ➖ ⁶ | ✅ | ✅ | ✅ | ✅ |
+| SSO and roles | ❌ | ❌ | ❌ | ✅ | ✅ | ➖ | ➖ |
+| Legacy SSE transport | ❌ | ✅ | – | ✅ | ✅ | ✅ | ➖ |
+
+✅ yes · ➖ partly · ❌ no · – not documented
+
+1. Blocks the whole call when it looks like a secret, instead of hiding the secret. 2. Through plugins or external guardrails. 3. Token exchange. 4. Beta. 5. SQLite file. 6. In Docker Desktop. 7. A URL per virtual server, which can combine several. 8. Tool groups.
 
 <sub>From each project's README and docs, October 2026. Corrections are welcome.</sub>
 
