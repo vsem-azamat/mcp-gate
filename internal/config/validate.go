@@ -115,8 +115,8 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 			continue
 		}
 		s.validate(path, add)
-		if f := s.Redact.Files; f != nil {
-			f.validateHome(path+".redact.files", home, add)
+		if f := s.Redact.Files; f != nil && !f.validateHome(path+".redact.files", home, add) {
+			c.FileRootsUnchecked = true
 		}
 		c.validateServerAuth(name, path+".auth", add)
 	}
@@ -253,22 +253,42 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	}
 }
 
-// validateHome rejects a root that is home or a directory above it: a download tool's files
-// belong in a directory of their own, and the gate would otherwise scan, and could keep, any
-// file in the home directory a result names.
-func (f *Files) validateHome(path, home string, add func(path, format string, args ...any)) {
+// validateHome rejects a root that is home or a directory above it, as written or with its
+// symlinks resolved: a download tool's files belong in a directory of their own, and the gate
+// would otherwise scan, and could keep, any file in the home directory a result names. It
+// reports false when home is unknown (empty or relative), so that nothing could be checked.
+func (f *Files) validateHome(path, home string, add func(path, format string, args ...any)) bool {
 	if home == "" || !filepath.IsAbs(home) {
-		return
+		return false
 	}
-	home = filepath.Clean(home)
+	homes := resolvedForms(home)
 	for i, r := range f.Roots {
 		if !filepath.IsAbs(r) {
 			continue
 		}
-		if x, err := filepath.Rel(filepath.Clean(r), home); err == nil && x != ".." && !strings.HasPrefix(x, ".."+string(filepath.Separator)) {
+		if slices.ContainsFunc(resolvedForms(r), func(root string) bool {
+			return slices.ContainsFunc(homes, func(h string) bool { return within(root, h) })
+		}) {
 			add(fmt.Sprintf("%s.roots[%d]", path, i), "must not be $HOME or a directory that contains it")
 		}
 	}
+	return true
+}
+
+// resolvedForms returns path cleaned and, when it exists and differs, with its symlinks
+// resolved.
+func resolvedForms(path string) []string {
+	forms := []string{filepath.Clean(path)}
+	if r, err := filepath.EvalSymlinks(path); err == nil && r != forms[0] {
+		forms = append(forms, r)
+	}
+	return forms
+}
+
+// within reports whether path is dir or lies under it.
+func within(dir, path string) bool {
+	x, err := filepath.Rel(dir, path)
+	return err == nil && x != ".." && !strings.HasPrefix(x, ".."+string(filepath.Separator))
 }
 
 func (f *Files) validate(path string, add func(path, format string, args ...any)) {

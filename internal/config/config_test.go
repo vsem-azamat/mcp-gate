@@ -479,4 +479,29 @@ func TestFileRootsExcludeHome(t *testing.T) {
 			t.Errorf("root %s: error %v", root, err)
 		}
 	}
+	// A root that reaches home through a symlink is refused too.
+	dir := t.TempDir()
+	realHome := filepath.Join(dir, "home")
+	if err := os.Mkdir(realHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(realHome, link); err != nil {
+		t.Fatal(err)
+	}
+	inHome := func(name string) (string, bool) { return realHome, name == "HOME" }
+	if _, err := Parse([]byte(head+link+"]}}\n"), inHome); err == nil || !strings.Contains(err.Error(), "must not be $HOME") {
+		t.Errorf("a symlink to home: %v", err)
+	}
+	// Without a usable $HOME nothing is checked, and the config says so.
+	for _, h := range []string{"", "relative/home"} {
+		env := func(name string) (string, bool) { return h, name == "HOME" && h != "" }
+		cfg, err := Parse([]byte(head+"/home/example]}}\n"), env)
+		if err != nil || !cfg.FileRootsUnchecked {
+			t.Errorf("HOME %q: %v, unchecked %v", h, err, cfg != nil && cfg.FileRootsUnchecked)
+		}
+	}
+	if cfg, err := Parse([]byte(head+"/srv/dl]}}\n"), home); err != nil || cfg.FileRootsUnchecked {
+		t.Errorf("with HOME: %v", err)
+	}
 }

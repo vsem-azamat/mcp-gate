@@ -391,12 +391,14 @@ func (s *Supervisor) HideURL(text string) string {
 	if u, perr := url.Parse(h.URL); perr == nil {
 		forms = append(forms, u.String(), u.Redacted())
 	}
-	// The forms in JSON, as error data carries them: escaped by encoding/json, and with the
-	// slashes escaped as some encoders do.
+	// The forms in JSON, as error data carries them: escaped by encoding/json, and each of those
+	// with its slashes escaped too, as some encoders do.
 	for _, f := range slices.Clone(forms) {
 		if j, err := json.Marshal(f); err == nil {
 			forms = append(forms, strings.Trim(string(j), `"`))
 		}
+	}
+	for _, f := range slices.Clone(forms) {
 		forms = append(forms, strings.ReplaceAll(f, "/", `\/`))
 	}
 	for _, f := range forms {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -207,11 +208,16 @@ func TestCachedDownload(t *testing.T) {
 	if err != nil || n != 1 || strings.Contains(text(t, res), cached) {
 		t.Errorf("a cached file = %q, %d, %v", text(t, res), n, err)
 	}
-	// A file that predates the gate is not one this gate's calls wrote.
+	if !markerRE.MatchString(text(t, res)) {
+		t.Errorf("a cached file is not kept: %q", text(t, res))
+	}
+	// A file that predates the gate, as a cache kept across a restart, is withheld but not kept.
 	o := f.scanner.o
 	o.Started = time.Now().Add(time.Minute)
-	if res, n, err := New(o).Scan(t.Context(), "download_media", nil, in, later); err != nil || n != 0 || text(t, res) != text(t, in) {
-		t.Errorf("a file older than the gate = %q, %d, %v", text(t, res), n, err)
+	res, n, err = New(o).Scan(t.Context(), "download_media", nil, in, later)
+	if got := text(t, res); err != nil || n != 1 || strings.Contains(got, cached) || markerRE.MatchString(got) ||
+		!strings.HasPrefix(got, "[REDACTED:file] ") || strings.Contains(got, "release") {
+		t.Errorf("a file older than the gate = %q, %d, %v", got, n, err)
 	}
 }
 
@@ -232,8 +238,27 @@ func TestLongLineStaysCheap(t *testing.T) {
 			t.Errorf("%d lookups in %v", lookups, time.Since(begin))
 		}
 	}
-	if _, overflow := candidates(nil, textResult(strings.Repeat("saved to /a ", maxCandidates+1)), nil); !overflow {
-		t.Error("more than maxCandidates mentions do not overflow")
+	if _, overflow := candidates(nil, textResult(strings.Repeat("saved to /a ", maxMentions+1)), nil); !overflow {
+		t.Error("more than maxMentions mentions do not overflow")
+	}
+	// The budget is per call: many content items, each under the limit, still overflow it.
+	res := &mcp.CallToolResult{}
+	item := strings.Repeat("saved to /r/x"+strings.Repeat(" w", maxPathWords)+"\n", maxMentions)
+	for range 64 {
+		res.Content = append(res.Content, &mcp.TextContent{Text: item})
+	}
+	lookups := 0
+	if _, overflow := candidates(nil, res, func(string) bool { lookups++; return false }); !overflow || lookups > maxLookups {
+		t.Errorf("many items: overflow %v after %d lookups", overflow, lookups)
+	}
+	// 64 mentions with long tails stay within the lookup budget and pass.
+	var b strings.Builder
+	for i := range maxMentions {
+		fmt.Fprintf(&b, "saved to /r/x%d%s\n", i, strings.Repeat(" w", 2*maxPathWords))
+	}
+	lookups = 0
+	if _, overflow := candidates(nil, textResult(b.String()), func(string) bool { lookups++; return false }); overflow || lookups > maxLookups {
+		t.Errorf("64 long mentions: overflow %v after %d lookups", overflow, lookups)
 	}
 }
 

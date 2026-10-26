@@ -26,6 +26,10 @@ const (
 	maxPathWords = 16
 	// maxTailBytes bounds the rest of a line an unquoted path is looked for in.
 	maxTailBytes = 4096
+	// maxMentions bounds the "downloaded to" mentions of one call.
+	maxMentions = 64
+	// maxLookups bounds the file lookups of one call's unquoted paths.
+	maxLookups = maxMentions * maxPathWords
 )
 
 // unquotedPath returns the path an unquoted "downloaded to" names in tail, the rest of its line:
@@ -64,11 +68,24 @@ type candidate struct {
 // candidates collects the absolute paths a file tool reported in its result (path members of
 // structured content and of JSON text at any depth, file:// URIs, "downloaded to" in text) or
 // that its arguments name (an output path the caller chose). isFile, which may be nil, tells
-// where an unquoted path with spaces ends. Collecting stops, and overflow is set, as soon as
-// more than maxCandidates paths are found or a text holds more than maxCandidates "downloaded
-// to" mentions, so that the work, and the calls of isFile, stay bounded.
+// where an unquoted path with spaces ends. The budget is per call: collecting stops, and
+// overflow is set, as soon as more than maxCandidates paths are found, the texts hold more than
+// maxMentions "downloaded to" mentions in all, or isFile would be called more than maxLookups
+// times, so that the work stays bounded however the result is split into content items.
 func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string) bool) (out []candidate, overflow bool) {
 	fromArguments := false
+	mentions, lookups := 0, 0
+	var lookup func(string) bool
+	if isFile != nil {
+		lookup = func(path string) bool {
+			if lookups >= maxLookups {
+				overflow = true
+				return false
+			}
+			lookups++
+			return isFile(path)
+		}
+	}
 	full := func() bool { return overflow || len(out) > maxCandidates }
 	add := func(raw string) {
 		if full() {
@@ -134,8 +151,8 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 		if json.Unmarshal([]byte(text), &decoded) == nil {
 			walk("", decoded, 0)
 		}
-		matches := downloadedToRE.FindAllStringSubmatchIndex(text, maxCandidates+1)
-		if len(matches) > maxCandidates {
+		matches := downloadedToRE.FindAllStringSubmatchIndex(text, maxMentions+1-mentions)
+		if mentions += len(matches); mentions > maxMentions {
 			overflow = true
 		}
 		for _, m := range matches {
@@ -153,7 +170,7 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 				if end := strings.IndexAny(tail, "\r\n\"'<>"); end >= 0 {
 					tail = tail[:end]
 				}
-				add(unquotedPath(tail, isFile))
+				add(unquotedPath(tail, lookup))
 			}
 		}
 	}

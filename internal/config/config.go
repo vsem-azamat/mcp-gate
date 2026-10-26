@@ -58,6 +58,9 @@ const PartialMarker = "NOT IMPLEMENTED IN THIS BUILD"
 // Config is a loaded configuration with defaults applied.
 type Config struct {
 	Version int `yaml:"version"`
+	// FileRootsUnchecked is set by Parse when a server scans files but $HOME was unset or
+	// relative, so its file roots could not be checked against it.
+	FileRootsUnchecked bool `yaml:"-"`
 	// Name is sent as the client name to downstream servers and named by /_healthz and /_readyz.
 	Name   string `yaml:"name,omitempty"`
 	Listen Listen `yaml:"listen,omitempty"`

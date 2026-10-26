@@ -5,9 +5,9 @@
 // a call, the paths its result or its arguments name are looked up. A file is considered only
 // when it lies under one of the server's roots, so that neither a client (through arguments)
 // nor a server (through its result) can make the gate read a file outside them. A path only the
-// arguments name must also have changed during the call, and one the result names since the
-// gate started, so that an older file is not read. A file with secrets is kept in the escrow
-// when there is one, and every mention of it is replaced by a marker. A file that should be
+// arguments name must also have changed during the call, so that a client cannot have an older
+// file read. A file with secrets is kept in the escrow when there is one and the file changed
+// since the gate started, and every mention of it is replaced by a marker. A file that should be
 // scanned but cannot be is a failure: the caller withholds the whole result.
 package filescan
 
@@ -80,8 +80,8 @@ type Options struct {
 	// has no handle.
 	Keep   func(escrow.File) (string, error)
 	Logger *slog.Logger
-	// Started is when the gate started; a file a result names must have changed after it. Zero
-	// means when New is called.
+	// Started is when the gate started; only a file changed after it is kept. Zero means when
+	// New is called.
 	Started time.Time
 }
 
@@ -135,13 +135,14 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 	})
 	if overflow {
 		s.o.Logger.Warn("file not scanned; withholding the result", "tool", tool, "reason", "too many paths")
-		return nil, 0, fmt.Errorf("%w (the call names more than %d paths)", ErrUnscannable, maxCandidates)
+		return nil, 0, fmt.Errorf("%w (the call names too many paths)", ErrUnscannable)
 	}
 	for _, c := range cands {
 		// A path only the caller named must have changed after the call started, or a client
 		// could have any file under a root read. One the result names may be older, since a tool
-		// that caches its downloads reports the same file again, but not older than the gate.
-		since := s.started.Add(-clockSlack)
+		// that caches its downloads reports the same file again (also across a restart of the
+		// gate), so it is scanned whatever its age.
+		var since time.Time
 		if c.fromArguments {
 			since = start
 		}
@@ -164,7 +165,9 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 		}
 		marker := redact.MarkerText("file")
 		release := ""
-		if s.o.Keep != nil {
+		// Only a file changed since the gate started is kept: an older one is withheld all the
+		// same, but a server cannot pull any old file under a root into the escrow.
+		if s.o.Keep != nil && !f.changed.Before(s.started.Add(-clockSlack)) {
 			handle, err := s.o.Keep(escrow.File{
 				Source: escrow.Source{Server: s.o.Server, Tool: tool, TTL: s.o.TTL, Arguments: func() map[string]any { return arguments }},
 				Root:   f.root, Rel: f.rel, Name: f.name, Size: f.size, Hash: f.hash, Kinds: kinds,
@@ -192,10 +195,11 @@ type opened struct {
 	name      string
 	size      int64
 	hash      [sha256.Size]byte
+	changed   time.Time // the inode change time
 }
 
 // open opens path when it is a candidate: under one of the roots, a regular file with one link,
-// whose inode changed at or after since. It returns nil when path is not a candidate, and an
+// whose inode changed at or after since (at any time when since is zero). It returns nil when path is not a candidate, and an
 // error when it is one but cannot be opened or checked. The file is opened through its root, so
 // no symlink can lead outside it, and every check runs on the opened file.
 func (s *Scanner) open(path string, since time.Time) (*opened, error) {
@@ -253,7 +257,7 @@ func (s *Scanner) open(path string, since time.Time) (*opened, error) {
 		s.o.Logger.Warn("a file a download tool named predates the call; not scanned")
 		return nil, nil
 	}
-	return &opened{file: f, resolved: resolved, root: root, rel: rel, name: filepath.Base(resolved), size: info.Size()}, nil
+	return &opened{file: f, resolved: resolved, root: root, rel: rel, name: filepath.Base(resolved), size: info.Size(), changed: changed}, nil
 }
 
 // regularFile reports whether path names a regular file, following symlinks.

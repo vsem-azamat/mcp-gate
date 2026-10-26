@@ -635,7 +635,7 @@ func TestHideURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, text := range []string{
-		"Post " + u, string(enc), strings.ReplaceAll(u, "/", `\/`),
+		"Post " + u, string(enc), strings.ReplaceAll(u, "/", `\/`), strings.ReplaceAll(string(enc), "/", `\/`),
 	} {
 		if got := s.HideURL(text); strings.Contains(got, "k-secret") || !strings.Contains(got, "<servers.remote.http.url>") {
 			t.Errorf("HideURL(%q) = %q", text, got)
