@@ -293,7 +293,7 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 		if oc := s.HTTP.OAuth; oc != nil {
 			o.HTTP.OAuth = oauth.NewSource(oauth.SourceOptions{
 				Name: name, ServerURL: s.HTTP.URL, ClientID: oc.ClientID, ClientSecret: oc.ClientSecret,
-				Store: store, HTTPClient: oauth.NewHTTPClient(), Logger: logger,
+				Store: store, HTTPClient: oauth.NewHTTPClient(s.HTTP.URL), Logger: logger,
 			})
 		}
 	}

@@ -82,6 +82,8 @@ type Authorizer interface {
 	LoginRequired() bool
 	// Reason says why, when it has none.
 	Reason() string
+	// Close ends a wait for the grant lock in progress and later refreshes; Stop calls it.
+	Close()
 }
 
 // LoginRequiredError is the error of a connect that found no usable OAuth grant.
@@ -425,6 +427,9 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 		s.cancel()
+		if h := s.opts.HTTP; h != nil && h.OAuth != nil {
+			h.OAuth.Close() // the SDK holds its connection lock while it waits for a token
+		}
 	})
 	s.startOnce.Do(func() { close(s.done) }) // never started
 	select {

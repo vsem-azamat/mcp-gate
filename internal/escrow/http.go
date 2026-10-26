@@ -89,22 +89,29 @@ func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// A keyless peer skips the limit, so that wrong keys from inside the gate's tree, under the
 	// same user ID, cannot lock it out.
+	key := presentedKey(r)
+	var reserved bool
 	if !keyless {
-		if wait, ok := e.limit.allow(client); !ok {
+		var wait time.Duration
+		var ok bool
+		if wait, reserved, ok = e.limit.allow(client, key != ""); !ok {
 			status = http.StatusTooManyRequests
 			w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
 			http.Error(w, "Too Many Requests", status)
 			return
 		}
 	}
-	if key := presentedKey(r); !keyless && !e.authorized(key) {
-		if key != "" {
-			e.limit.fail(client) // only a presented key can be a guess
+	if !keyless {
+		if !e.authorized(key) {
+			if key != "" {
+				e.limit.fail(client) // only a presented key can be a guess
+			}
+			status = http.StatusUnauthorized
+			w.Header().Set("WWW-Authenticate", `Bearer realm="escrow"`)
+			http.Error(w, "Unauthorized", status)
+			return
 		}
-		status = http.StatusUnauthorized
-		w.Header().Set("WWW-Authenticate", `Bearer realm="escrow"`)
-		http.Error(w, "Unauthorized", status)
-		return
+		e.limit.succeed(client, reserved)
 	}
 	if !HandleRE.MatchString(handle) || (sub != "" && sub != "meta") {
 		status = http.StatusNotFound

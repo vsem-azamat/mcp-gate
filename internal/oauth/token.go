@@ -26,14 +26,16 @@ const (
 // grant is for another server or client, or the authorization server rejected it.
 var ErrLoginRequired = errors.New("oauth: login required")
 
-// NewHTTPClient returns the client for requests to the authorization server: bounded by
-// RequestTimeout and following no redirects, which would carry codes and secrets elsewhere.
+// NewHTTPClient returns the client for requests to the authorization server of the server at
+// serverURL: bounded by RequestTimeout and following no redirects, which would carry codes and
+// secrets elsewhere. The endpoints come from metadata the server or its authorization server
+// publish, so the client refuses connections to loopback, private, link-local and reserved
+// addresses, checked on every address it dials, unless serverURL itself is written as one
+// or as a local name; link-local addresses are refused even then (see guard).
 // It keeps no idle connections, since its requests are rare.
-func NewHTTPClient() *http.Client {
-	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the standard library's default transport
-	t.DisableKeepAlives = true
+func NewHTTPClient(serverURL string) *http.Client {
 	return &http.Client{
-		Transport: t,
+		Transport: guardedTransport(serverURL, http.ProxyFromEnvironment),
 		Timeout:   RequestTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return errors.New("the authorization server answered with a redirect, which is not followed")

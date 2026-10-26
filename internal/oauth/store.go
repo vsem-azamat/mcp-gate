@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -238,8 +239,9 @@ func (s *Store) Delete(name string) (bool, error) {
 }
 
 // Lock takes the server's lock file, which serialises refreshes and logins between processes
-// (the gate, check -connect, auth login). The returned function releases it.
-func (s *Store) Lock(name string) (func(), error) {
+// (the gate, check -connect, auth login). The returned function releases it. The wait ends
+// when ctx is done.
+func (s *Store) Lock(ctx context.Context, name string) (func(), error) {
 	if err := s.ensureDir(); err != nil {
 		return nil, err
 	}
@@ -258,7 +260,12 @@ func (s *Store) Lock(name string) (func(), error) {
 			_ = f.Close()
 			return nil, fmt.Errorf("cannot take the grant lock: %w", err)
 		}
-		time.Sleep(lockPoll)
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, fmt.Errorf("cannot take the grant lock: %w", ctx.Err())
+		case <-time.After(lockPoll):
+		}
 	}
 	return func() {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)

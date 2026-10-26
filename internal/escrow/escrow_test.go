@@ -332,11 +332,108 @@ func TestLimiterTableIsBounded(t *testing.T) {
 	if len(l.budgets) > maxClients {
 		t.Fatalf("%d budgets, cap %d", len(l.budgets), maxClients)
 	}
-	if _, ok := l.allow("198.51.100.1"); ok {
+	l.global.tokens = globalBurst // the table alone, without the global bucket
+	if _, _, ok := l.allow("198.51.100.1", true); ok {
 		t.Error("a full table forgot the client that failed most")
 	}
-	if _, ok := l.allow("198.51.100.2"); !ok {
+	if _, _, ok := l.allow("198.51.100.2", true); !ok {
 		t.Error("a client that never failed is refused")
+	}
+}
+
+func TestGlobalFailLimit(t *testing.T) {
+	t.Parallel()
+	e := New(Options{KeyHash: testHash(), Remote: func(r *http.Request) string { return r.Header.Get("X-Client") }})
+	clk := withClock(e.store)
+	h, _ := e.store.insert(&entry{kind: "password", value: []byte("Qwerty-12345")}, 0)
+	get := func(auth, client string) int {
+		t.Helper()
+		return request(t, e, http.MethodGet, Route+h, auth, "X-Client", client).Code
+	}
+	owner := "192.0.2.1"
+	if code := get("Bearer "+testKey, owner); code != http.StatusOK {
+		t.Fatalf("the owner = %d, want 200", code)
+	}
+	// One guess from each of many addresses: no client budget runs out, the global one does.
+	for i := range globalBurst {
+		if code := get("Bearer wrong", "198.51.100."+strconv.Itoa(i)); code != http.StatusUnauthorized {
+			t.Fatalf("guess %d = %d, want 401", i+1, code)
+		}
+	}
+	rec := request(t, e, http.MethodGet, Route+h, "Bearer "+testKey, "X-Client", "203.0.113.9")
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("a new client with the right key, global budget spent = %d %v, want 429", rec.Code, rec.Header())
+	}
+	if code := get("Bearer wrong", "203.0.113.10"); code != http.StatusTooManyRequests {
+		t.Errorf("another guess, global budget spent = %d, want 429", code)
+	}
+	if code := get("", "203.0.113.11"); code != http.StatusUnauthorized {
+		t.Errorf("a request without a key, global budget spent = %d, want 401", code)
+	}
+	if code := get("Bearer "+testKey, owner); code != http.StatusOK {
+		t.Errorf("the trusted owner, global budget spent = %d, want 200", code)
+	}
+	// A trusted client's wrong key spends only its own budget.
+	if code := get("Bearer wrong", owner); code != http.StatusUnauthorized {
+		t.Errorf("the owner's wrong key = %d, want 401", code)
+	}
+	clk.add(globalRefill)
+	if code := get("Bearer wrong", "203.0.113.12"); code != http.StatusUnauthorized {
+		t.Errorf("the earned guess = %d, want 401", code)
+	}
+	if code := get("Bearer "+testKey, "203.0.113.13"); code != http.StatusTooManyRequests {
+		t.Errorf("after spending it = %d, want 429", code)
+	}
+	clk.add(trustedFor)
+	e.limit.mu.Lock()
+	e.limit.global.tokens = 0
+	e.limit.global.at = clk.now()
+	e.limit.mu.Unlock()
+	if code := get("Bearer "+testKey, owner); code != http.StatusTooManyRequests {
+		t.Errorf("the owner after trustedFor, global budget spent = %d, want 429", code)
+	}
+}
+
+// Concurrent guesses cannot share one global token: each reserves its own before its key is
+// checked.
+func TestGlobalTokensAreReserved(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }}
+	l := newLimiter(c)
+	passed := 0
+	for i := range globalBurst + 50 { // all checked before any key is
+		if _, _, ok := l.allow("198.51.100."+strconv.Itoa(i%250), true); ok {
+			passed++
+		}
+	}
+	if passed != globalBurst {
+		t.Errorf("%d keyed requests passed at once, want %d", passed, globalBurst)
+	}
+	// A right key gives its token back.
+	l.succeed("198.51.100.1", true)
+	if _, _, ok := l.allow("203.0.113.1", true); !ok {
+		t.Error("the token a right key gave back is not available")
+	}
+}
+
+func TestTrustedClientsAreBounded(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := start
+	c := &clock{now: func() time.Time { return now }}
+	l := newLimiter(c)
+	for i := range maxTrusted + 10 {
+		now = start.Add(time.Duration(i) * time.Second)
+		l.succeed("client-"+strconv.Itoa(i), false)
+	}
+	if len(l.trusted) != maxTrusted {
+		t.Fatalf("%d trusted, cap %d", len(l.trusted), maxTrusted)
+	}
+	if l.isTrusted("client-0", now) {
+		t.Error("the client that authenticated longest ago is kept")
+	}
+	if !l.isTrusted("client-"+strconv.Itoa(maxTrusted+9), now) {
+		t.Error("the latest client is dropped")
 	}
 }
 
@@ -347,10 +444,10 @@ func TestLimiterGroupsIPv6(t *testing.T) {
 	for i := range failBurst {
 		l.fail("2001:db8:1:2::" + strconv.FormatInt(int64(i+1), 16))
 	}
-	if _, ok := l.allow("2001:db8:1:2:ffff::1"); ok {
+	if _, _, ok := l.allow("2001:db8:1:2:ffff::1", true); ok {
 		t.Error("another address of the same /64 is allowed")
 	}
-	if _, ok := l.allow("2001:db8:1:3::1"); !ok {
+	if _, _, ok := l.allow("2001:db8:1:3::1", true); !ok {
 		t.Error("another /64 is refused")
 	}
 }

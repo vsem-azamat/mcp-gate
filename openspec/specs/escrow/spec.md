@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The escrow keeps the secrets that redaction replaces, in memory, under random handles, so that the owner can release a secret through an authenticated HTTP API without its value ever entering a client's context. Its HTTP API is a frozen contract: paths, methods, the authentication scheme, the response fields, status codes and bodies are those of the mcp-proxy escrow it replaces, so that its consumers work unchanged. The one addition is a limit on failed authentication per client address.
+The escrow keeps the secrets that redaction replaces, in memory, under random handles, so that the owner can release a secret through an authenticated HTTP API without its value ever entering a client's context. Its HTTP API is a frozen contract: paths, methods, the authentication scheme, the response fields, status codes and bodies are those of the mcp-proxy escrow it replaces, so that its consumers work unchanged. The one addition is a limit on failed authentication, per client address and for all clients together.
 
 ## Requirements
 
@@ -122,6 +122,13 @@ On the socket, the client SHALL be the peer's user ID as the kernel reports it w
 ### Requirement: Failed-authentication limit
 
 Each client SHALL have a budget of 20 attempts, of which a request presenting a wrong key (`Bearer` with a non-empty key) SHALL spend one, and which SHALL earn one back every 3 seconds up to 20. A request presenting no key, or another scheme, SHALL get 401 without spending any, since it cannot be a guess. A client with less than one attempt left SHALL get 429 with `Retry-After` (in whole seconds) and the body `Too Many Requests` for every request, even one with the right key. The client SHALL be the peer address unless `listen.behindProxy` is set and the peer is in `listen.trustedProxies`; then it SHALL be the right-most `X-Forwarded-For` entry that is not in `listen.trustedProxies`. IPv6 addresses SHALL count by their /64. At most 4096 clients SHALL be tracked; a new one SHALL then replace the client with the most attempts left, so that a client that never presented a wrong key is never refused. Trusting a proxy on loopback trusts every local process to name its own client address.
+
+A client that presented the right key within the last 24 hours SHALL be trusted; at most 256 clients SHALL be kept trusted, a new one replacing the one that presented the key longest ago. All clients together SHALL have a global budget of 100 attempts, of which a wrong key from a client that is not trusted SHALL spend one, and which SHALL earn one back every second up to 100. While less than one attempt is left in it, a request that presents a key from a client that is not trusted SHALL get 429 with `Retry-After`, even with the right key, while a request presenting no key SHALL still get 401. So guessing from many addresses is bounded as a whole, and the owner keeps the addresses it used recently; while someone guesses, an owner address that is not trusted can be refused, which after a restart, since trust is kept in memory only, is every one until it presents the key while the global budget has attempts left. A keyed request from a client that is not trusted SHALL take its global attempt before its key is checked and get it back when the key is right, so that concurrent requests cannot share one attempt.
+
+#### Scenario: Guesses from many addresses
+
+- **WHEN** a client has been served with the right key, and then 100 other clients present one wrong key each
+- **THEN** a request with the right key from yet another client gets 429, a request without a key gets 401, and the first client is still served
 
 #### Scenario: Behind a proxy
 
