@@ -61,7 +61,7 @@ changelog:
   # tools and actions are chore and are left out.
   filters:
     exclude:
-      - "^(chore|docs|test|ci)(\\(.+\\))?!?:"
+      - "^(build|chore|ci|docs|style|test)(\\(.+\\))?!?:"
   groups:
     - title: Features
       regexp: "^feat(\\(.+\\))?!?:"

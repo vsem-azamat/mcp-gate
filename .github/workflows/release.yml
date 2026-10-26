@@ -19,6 +19,8 @@ jobs:
     permissions:
       contents: write # to publish the release
     timeout-minutes: 30
+    outputs:
+      checksums-sha256: ${{ steps.checksums.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,6 +49,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # the pushed tag, also when an rc tag points at the same commit
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+      # the provenance job attests only the checksums.txt this job built
+      - name: Hash of checksums.txt
+        id: checksums
+        run: echo "sha256=$(sha256sum dist/checksums.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
   # A job of its own, so the tests and the build, which run third-party code, never hold the
   # OIDC token that signs attestations. It attests the files as published.
@@ -63,10 +69,16 @@ jobs:
       - name: Download the release archives and checksums
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILT_SHA256: ${{ needs.release.outputs.checksums-sha256 }}
         run: |
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir dist \
             --pattern '*.tar.gz' --pattern checksums.txt
-          cd dist && sha256sum --check checksums.txt
+          cd dist
+          [ -n "$BUILT_SHA256" ] && echo "$BUILT_SHA256  checksums.txt" | sha256sum --check || {
+            echo "the published checksums.txt is not the one the release job built" >&2
+            exit 1
+          }
+          sha256sum --check checksums.txt
       # signed SLSA build provenance for every archive and checksums.txt; verify with gh attestation verify
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
