@@ -150,3 +150,69 @@ func TestServeUsage(t *testing.T) {
 		t.Errorf("a server without tokens: %+v", r)
 	}
 }
+
+func TestCheckEscrow(t *testing.T) {
+	t.Parallel()
+	const (
+		hashA = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+		hashB = "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+	)
+	const servers = "auth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n"
+	hashFile := writeFile(t, "escrow-key-sha256", hashA+"\n")
+	cases := []struct {
+		name, escrow string
+		env          map[string]string
+		want         string
+	}{
+		{"off", "", nil, "escrow: off (no key hash in escrow.keyHash, escrow.keyHashFile, MCP_GATE_ESCROW_KEY_SHA256 or MCP_HUB_ESCROW_KEY_SHA256)\n"},
+		{"new variable", "", map[string]string{"MCP_GATE_ESCROW_KEY_SHA256": hashA}, "escrow: on, key hash from MCP_GATE_ESCROW_KEY_SHA256\n"},
+		{"legacy variable", "", map[string]string{"MCP_HUB_ESCROW_KEY_SHA256": hashA}, "escrow: on, key hash from MCP_HUB_ESCROW_KEY_SHA256 (deprecated: rename it MCP_GATE_ESCROW_KEY_SHA256)\n"},
+		{"config", "escrow: {keyHash: '${H}'}\n", map[string]string{"H": hashA, "MCP_GATE_ESCROW_KEY_SHA256": hashA}, "escrow: on, key hash from escrow.keyHash\n"},
+		{"both variables", "", map[string]string{"MCP_GATE_ESCROW_KEY_SHA256": hashA, "MCP_HUB_ESCROW_KEY_SHA256": hashA}, "escrow: on, key hash from MCP_GATE_ESCROW_KEY_SHA256 (MCP_HUB_ESCROW_KEY_SHA256 is set too, and deprecated)\n"},
+		{"file", "escrow: {keyHashFile: " + quote(hashFile) + "}\n", nil, "escrow: on, key hash from escrow.keyHashFile\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			r := runCmd(t, env(c.env), "check", writeFile(t, "gate.yaml", "version: 1\n"+c.escrow+servers))
+			if r.code != exitOK || !strings.HasSuffix(r.stdout, c.want) || strings.Contains(r.stdout, hashA) {
+				t.Errorf("check = %+v, want the line %q", r, c.want)
+			}
+		})
+	}
+	for _, c := range []struct {
+		escrow string
+		env    map[string]string
+		want   string
+	}{
+		{"", map[string]string{"MCP_GATE_ESCROW_KEY_SHA256": hashA, "MCP_HUB_ESCROW_KEY_SHA256": hashB}, "MCP_GATE_ESCROW_KEY_SHA256 and MCP_HUB_ESCROW_KEY_SHA256 hold different hashes"},
+		{"escrow: {keyHash: " + hashA + "}\n", map[string]string{"MCP_GATE_ESCROW_KEY_SHA256": hashB}, "escrow.keyHash and MCP_GATE_ESCROW_KEY_SHA256 hold different hashes"},
+	} {
+		r := runCmd(t, env(c.env), "check", writeFile(t, "gate.yaml", "version: 1\n"+c.escrow+servers))
+		if r.code != exitUsage || !strings.Contains(r.stderr, c.want) || strings.Contains(r.stderr+r.stdout, hashA) || strings.Contains(r.stderr+r.stdout, hashB) {
+			t.Errorf("conflicting hashes = %+v, want %q", r, c.want)
+		}
+	}
+}
+
+func TestServeEscrowKeyErrors(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, "gate.yaml", "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n")
+	hashFile := writeFile(t, "escrow-key-sha256", strings.Repeat("a", 64))
+	if err := os.Chmod(hashFile, 0o620); err != nil { //nolint:gosec // the test needs a group-writable file
+		t.Fatal(err)
+	}
+	withFile := writeFile(t, "gate.yaml", "version: 1\nescrow: {keyHashFile: "+quote(hashFile)+"}\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n")
+	if r := runCmd(t, noEnv, "serve", withFile); r.code != exitTrouble || !strings.Contains(r.stderr, "escrow.keyHashFile: is writable by its group or others") || strings.Contains(r.stderr, hashFile) {
+		t.Errorf("a group-writable key hash file: %+v", r)
+	}
+	for name, vars := range map[string]map[string]string{
+		"invalid":     {"MCP_GATE_ESCROW_KEY_SHA256": "zz-not-a-hash"},
+		"conflicting": {"MCP_GATE_ESCROW_KEY_SHA256": strings.Repeat("a", 64), "MCP_HUB_ESCROW_KEY_SHA256": strings.Repeat("b", 64)},
+	} {
+		r := runCmd(t, env(vars), "serve", path)
+		if r.code != exitTrouble || !strings.Contains(r.stderr, "cannot start") || strings.Contains(r.stderr, "zz-not") || strings.Contains(r.stderr, "aaaa") {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+}

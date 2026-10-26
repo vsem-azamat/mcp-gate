@@ -204,3 +204,44 @@ func TestFileScanning(t *testing.T) {
 		t.Errorf("audit outcomes (count*1000 + redactions) = %v", outcomes)
 	}
 }
+
+// TestEscrowPerServer checks redact.escrow: false and escrow.sourceArguments.
+func TestEscrowPerServer(t *testing.T) {
+	dir := t.TempDir()
+	r := startGate(t, configDoc("escrow: {sourceArguments: [ticket]}\n", map[string]string{
+		"kept":  stdioServer(t, testkit.Fake{}, ""),
+		"plain": stdioServer(t, testkit.Fake{}, fmt.Sprintf("redact:\n  escrow: false\n  files: {tools: [writefile], roots: [%q]}\n", dir)),
+	}), gateOpts{escrowKey: escrowKey})
+	r.waitReady(t, "kept")
+	r.waitReady(t, "plain")
+	args := map[string]any{"text": "pass" + "word: Summer-Blue-77!", "ticket": "T-1", "chat_id": 42}
+	res, err := r.connect(t, "kept", clientOpts{}).CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: args})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := escrowMarkerRE.FindStringSubmatch(textOf(t, res))
+	if m == nil {
+		t.Fatalf("kept = %q", textOf(t, res))
+	}
+	code, _, body := r.escrowGet(t, http.MethodGet, "/_escrow/"+m[2]+"/meta", "Authorization", "Bearer "+escrowKey)
+	var meta struct{ Source map[string]any }
+	if err := json.Unmarshal([]byte(body), &meta); err != nil || code != http.StatusOK || len(meta.Source) != 1 || meta.Source["ticket"] != "T-1" {
+		t.Errorf("meta = %d %s, want the source {ticket}", code, body)
+	}
+
+	plain := r.connect(t, "plain", clientOpts{})
+	res, err = plain.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: args})
+	if err != nil || textOf(t, res) != "password: [REDACTED:password]" {
+		t.Errorf("plain = %v, %v", res, err)
+	}
+	path := filepath.Join(dir, "a.env")
+	res, err = plain.CallTool(t.Context(), &mcp.CallToolParams{Name: "writefile", Arguments: map[string]any{
+		"path": path, "text": "DB_PASS" + "WORD=" + "hunter2!x\n", "repeat": 1,
+	}})
+	if err != nil || !strings.Contains(textOf(t, res), "[REDACTED:file] file_name=a.env") || strings.Contains(textOf(t, res), dir) {
+		t.Errorf("plain file = %v, %v", res, err)
+	}
+	if n := len(r.logs.lines("escrowed secret")) + len(r.logs.lines("escrowed file")); n != 1 {
+		t.Errorf("%d entries kept, want 1 (from kept)", n)
+	}
+}

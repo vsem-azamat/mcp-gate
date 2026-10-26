@@ -50,6 +50,31 @@ func Expand(s string, lookup LookupFunc) (string, error) {
 	return b.String(), nil
 }
 
+// varNames returns the names of the variables ${NAME} in s refers to, in order, as Expand reads
+// them ($$ is a literal $).
+func varNames(s string) []string {
+	var names []string
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '$' {
+			continue
+		}
+		switch s[i+1] {
+		case '$':
+			i++
+		case '{':
+			end := strings.IndexByte(s[i+2:], '}')
+			if end < 0 {
+				return names
+			}
+			if name := s[i+2 : i+2+end]; varNameRE.MatchString(name) {
+				names = append(names, name)
+			}
+			i += 2 + end
+		}
+	}
+	return names
+}
+
 // expandAll expands every string value in c, recording errors with their field paths. Map keys
 // are not expanded.
 func expandAll(c *Config, lookup LookupFunc, errs *[]error, failed map[string]bool) {

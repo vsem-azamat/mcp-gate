@@ -46,7 +46,7 @@ A server whose `authTokens` are the global ones inherits them. One with its own 
 
 A server whose effective options have a `redact` block keeps it, with `ru: true`. A server without one gets `redact.enabled: false` and a comment, since mcp-proxy did not redact it; mcp-gate redacts by default, so consider removing that line.
 
-The escrow keys map one to one; the key hash stays in `MCP_HUB_ESCROW_KEY_SHA256`. A server's own `escrowMaxEntries`, which mcp-proxy ignored, is dropped with a warning. File scanning is written only where mcp-proxy did scan: roots that are not absolute paths are dropped, and file tools left without a root, or roots without tools, are dropped with a warning.
+The escrow keys map one to one; no key hash is written to the config. mcp-gate reads mcp-proxy's `MCP_HUB_ESCROW_KEY_SHA256` as a deprecated name of `MCP_GATE_ESCROW_KEY_SHA256` (see [serve](serve.md#escrow)). A server's own `escrowMaxEntries`, which mcp-proxy ignored, is dropped with a warning. File scanning is written only where mcp-proxy did scan: roots that are not absolute paths are dropped, and file tools left without a root, or roots without tools, are dropped with a warning.
 
 mcp-proxy children inherited the whole environment; mcp-gate children get only `inheritEnv` and `env`. A command such as `/usr/bin/env -u SECRET -u HOME MODE=fast server --stdio` is unwrapped: the command becomes `server --stdio`, `MODE=fast` goes to `env`, `HOME` is removed from `inheritEnv`, and `SECRET` is dropped with a comment, since it is not inherited anyway. `-i` gives `inheritEnv: []` and `-C dir` gives `cwd`. A form the importer does not understand is kept as it is, with a note.
 

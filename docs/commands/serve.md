@@ -49,11 +49,22 @@ $ curl -s -H "Authorization: Bearer $GATE_ADMIN_TOKEN" http://127.0.0.1:9090/_st
 
 ## Escrow
 
-With `MCP_HUB_ESCROW_KEY_SHA256` set to the hex SHA-256 of an API key, the gate keeps every secret it redacts from results in memory, for `escrow.ttl` (or the server's `redact.escrowTTL`), and writes `[REDACTED:<kind> #<handle>]` in its place. The owner releases a secret with the key; clients' tokens do not open it. Nothing is written to disk, so a restart forgets every secret. A value that is not a hex SHA-256 stops the gate at start.
+With the hex SHA-256 of an API key configured, the gate keeps every secret it redacts from results in memory, for `escrow.ttl` (or the server's `redact.escrowTTL`), and writes `[REDACTED:<kind> #<handle>]` in its place. The owner releases a secret with the key; clients' tokens do not open it. Nothing is written to disk, so a restart forgets every secret. A server with `redact.escrow: false` keeps nothing and gets plain `[REDACTED:<kind>]` markers.
+
+The key hash comes from the first of these that is set:
+
+| Source | Notes |
+| --- | --- |
+| `escrow.keyHash` in the config | As `${VAR}`; prefer setting `MCP_GATE_ESCROW_KEY_SHA256` itself |
+| `escrow.keyHashFile` in the config | A file holding the hash, read at start: a systemd credential, a mounted secret. Regular file, owned by root or the gate's user (any owner when the gate runs as root), not writable by group or others |
+| `MCP_GATE_ESCROW_KEY_SHA256` | The environment variable |
+| `MCP_HUB_ESCROW_KEY_SHA256` | Deprecated name of the same variable, still read; the gate logs a warning at start |
+
+Every source that is set must hold the same hash: two different hashes stop the gate at start, as does a value that is not a hex SHA-256. Neither variable, nor a variable that `escrow.keyHash` names, is passed on to stdio servers. `mcp-gate check` prints whether the escrow would be on and which source the hash comes from (see [check](check.md)).
 
 ```console
 $ key=$(openssl rand -hex 32)
-$ export MCP_HUB_ESCROW_KEY_SHA256=$(printf %s "$key" | sha256sum | cut -d' ' -f1)
+$ export MCP_GATE_ESCROW_KEY_SHA256=$(printf %s "$key" | sha256sum | cut -d' ' -f1)
 $ mcp-gate serve gate.yaml &
 $ curl -s -H "Authorization: Bearer $key" http://127.0.0.1:9090/_escrow/k3j5rz2q7wd/meta
 {"handle":"k3j5rz2q7wd","type":"password","kind":"text","server":"notes","tool":"read_note","source":{},"created_at":"…","expires_at":"…","preview":"Summ…77!"}
@@ -63,7 +74,7 @@ $ curl -s -X DELETE -H "Authorization: Bearer $key" http://127.0.0.1:9090/_escro
 
 | Request | Answer |
 | --- | --- |
-| `GET`/`HEAD /_escrow/<handle>/meta` | JSON: handle, type, kind (`text` or `file`), server, tool, source (identifying arguments such as `chat_id`), times, a short preview; `file_name` and `size` for a file |
+| `GET`/`HEAD /_escrow/<handle>/meta` | JSON: handle, type, kind (`text` or `file`), server, tool, source (the call's arguments named in `escrow.sourceArguments`, such as `chat_id`), times, a short preview; `file_name` and `size` for a file |
 | `GET /_escrow/<handle>` | The value (or the file, while unchanged) as `application/octet-stream` |
 | `DELETE /_escrow/<handle>` | 204; the entry is gone |
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,19 +20,30 @@ import (
 const serveUsage = `Usage: mcp-gate serve [flags] <config.yaml>
 
 Serves the servers of an mcp-gate config: each at /<name>/mcp on listen.addr, behind its tokens,
-with /_healthz, /_readyz and, with admin tokens, /_status. With MCP_HUB_ESCROW_KEY_SHA256 set to
-the hex SHA-256 of an API key, redacted secrets are kept in memory and served at /_escrow/ to
-that key. Logs are JSON lines on stderr. SIGINT and SIGTERM shut it down.
+with /_healthz, /_readyz and, with admin tokens, /_status. With the hex SHA-256 of an API key in
+escrow.keyHash, escrow.keyHashFile or MCP_GATE_ESCROW_KEY_SHA256, redacted secrets are kept in
+memory and served at /_escrow/ to that key. Logs are JSON lines on stderr. SIGINT and SIGTERM
+shut it down.
 
 Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate fails.
 
 Flags:
 `
 
-// withoutEscrowKey drops the escrow key hash from the environment stdio children inherit from,
-// so that no inheritEnv pattern hands it to a child.
-func withoutEscrowKey(environ []string) []string {
-	return slices.DeleteFunc(slices.Clone(environ), func(kv string) bool { return strings.HasPrefix(kv, escrow.KeyHashEnv+"=") })
+// withoutEscrowKey drops the escrow key hash variables, and the variables named in extra (those
+// escrow.keyHash was expanded from), from the environment stdio children inherit from, so that
+// no inheritEnv pattern hands them to a child.
+func withoutEscrowKey(environ []string, extra ...string) []string {
+	names := append([]string{escrow.KeyHashEnv, escrow.LegacyKeyHashEnv}, extra...)
+	return slices.DeleteFunc(slices.Clone(environ), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return slices.Contains(names, name)
+	})
+}
+
+// escrowKey resolves the escrow key hash of a loaded config: nil when the escrow is off.
+func escrowKey(cfg *config.Config, env lookupEnv) (*escrow.Key, error) {
+	return escrow.ResolveKey(escrow.KeyConfig{Hash: cfg.Escrow.KeyHash, HashFile: cfg.Escrow.KeyHashFile}, env)
 }
 
 func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Writer) int {
@@ -73,18 +83,17 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 	if *stateDir == "" {
 		logger.Info("no state directory: learned protocol pins are not kept across restarts, and OAuth servers cannot log in")
 	}
-	var keyHash *[sha256.Size]byte
-	if v, _ := env(escrow.KeyHashEnv); strings.TrimSpace(v) != "" {
-		h, err := escrow.ParseKeyHash(v)
-		if err != nil {
-			logger.Error("cannot start", "error", err.Error())
-			return exitTrouble
-		}
-		keyHash = &h
+	key, err := escrowKey(cfg, env)
+	if err != nil {
+		logger.Error("cannot start", "error", err.Error())
+		return exitTrouble
+	}
+	if key != nil && key.Deprecated {
+		logger.Warn(escrow.LegacyKeyHashEnv+" is deprecated; rename it "+escrow.KeyHashEnv, "keySource", key.Source)
 	}
 	g, err := gate.New(gate.Options{
-		Config: cfg, Environ: withoutEscrowKey(parentEnviron()), StateDir: *stateDir, Version: version.Get().Version, Logger: logger,
-		EscrowKeyHash: keyHash,
+		Config: cfg, Environ: withoutEscrowKey(parentEnviron(), cfg.Escrow.KeyHashVars...), StateDir: *stateDir, Version: version.Get().Version, Logger: logger,
+		EscrowKey: key,
 	})
 	if err != nil {
 		logger.Error("cannot start", "error", err.Error())

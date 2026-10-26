@@ -24,6 +24,7 @@ admin:
 escrow:
   ttl: 24h
   maxEntries: 1000
+  sourceArguments: [chat_id, message_id, ticket]
 servers:
   notes:
     stdio:
@@ -48,6 +49,7 @@ servers:
     maxMessageBytes: 8MiB
     protocolVersion: "2025-11-25"
     resources: {deny: ["shop://orders/private"]}
+    redact: {escrow: false}  # plain [REDACTED:<kind>] markers, nothing kept
     auth:
       inherit: false
       tokens: {shop-bot: "${GATE_TOKEN_SHOP}"}
@@ -80,8 +82,11 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `logLevel` | `info` | `debug`, `info`, `warn` or `error`; `debug` adds the servers' own log messages |
 | `auth.tokens` | none | Client tokens by name, accepted by every server that inherits them. The name identifies the caller in the audit log |
 | `admin.tokens` | none | Tokens by name that may read `/_status`; without them `/_status` is 404 |
-| `escrow.ttl` | `24h` | How long the escrow keeps a secret, unless its server sets `redact.escrowTTL`. The escrow is on only when `MCP_HUB_ESCROW_KEY_SHA256` is set (see [serve](../commands/serve.md#escrow)) |
+| `escrow.keyHash` | none | Hex SHA-256 of the escrow API key, as `${VAR}`. Setting `MCP_GATE_ESCROW_KEY_SHA256` in the environment instead needs no config; a variable named here is kept from the stdio servers too. The escrow is on when a key hash comes from here, `escrow.keyHashFile` or the environment (see [serve](../commands/serve.md#escrow)) |
+| `escrow.keyHashFile` | none | Absolute path of a file that holds the hex SHA-256, such as a systemd credential (`${CREDENTIALS_DIRECTORY}/escrow-key-sha256`) or a mounted secret. Read at start; it must be a regular file owned by root or the gate's user (any owner when the gate runs as root) and not writable by group or others. Excludes `keyHash` |
+| `escrow.ttl` | `24h` | How long the escrow keeps a secret, unless its server sets `redact.escrowTTL` |
 | `escrow.maxEntries` | `1000` | Most secrets and files kept at once, up to 100000; the oldest is evicted |
+| `escrow.sourceArguments` | `chat_id message_id message_ids topic_id reply_to space space_name message_name thread_name attachment_name conversation_id conversationId channel_id chat peer messageId threadId account` | Call arguments copied into an entry's `source` in the API's meta, to tell where a secret came from. Only short single-line strings, numbers, booleans and short lists are copied; `[]` copies none |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |
@@ -113,6 +118,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `redact.ru` | `false` | Add the Russian label rules |
 | `redact.highEntropy` | `false` | Add the high-entropy rule |
 | `redact.disableRules` | none | Redaction kinds never reported, such as `jwt` |
+| `redact.escrow` | `true` | Keep this server's secrets and files in the escrow when it is on; `false` gives them plain `[REDACTED:<kind>]` markers and keeps nothing |
 | `redact.escrowTTL` | `escrow.ttl` | How long the escrow keeps this server's secrets |
 | `redact.files.tools` | required with `files` | Tools that save a file locally and report its path; the files they write are scanned and withheld when they hold secrets. Needs `redact.enabled` |
 | `redact.files.roots` | required with `files` | Absolute directories the tools write to (not `/`, not `$HOME` or a directory above it); only files under them are read, and a path only the arguments name when written during the call; without a usable `$HOME` the check is skipped with a warning |

@@ -39,6 +39,8 @@ const (
 var ServerNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
 var (
+	// keyHashRE is the form of an escrow key hash, which escrow.ParseKeyHash decodes.
+	keyHashRE    = regexp.MustCompile(`^[0-9A-Fa-f]{64}$`)
 	envNameRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	inheritRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\*?$`)
 	headerNameRE = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -95,6 +97,7 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 	if c.Escrow.MaxEntries < 0 || c.Escrow.MaxEntries > MaxEscrowEntries {
 		add("escrow.maxEntries", "must be between 0 (the default, %d) and %d", DefaultEscrowMaxEntries, MaxEscrowEntries)
 	}
+	c.Escrow.validate(add)
 	if len(c.Servers) == 0 {
 		add("servers", "at least one server is required")
 	}
@@ -119,6 +122,35 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 			c.FileRootsUnchecked = true
 		}
 		c.validateServerAuth(name, path+".auth", add)
+	}
+}
+
+func (e *Escrow) validate(add func(path, format string, args ...any)) {
+	if e.KeyHash != "" {
+		if !keyHashRE.MatchString(strings.TrimSpace(e.KeyHash)) {
+			add("escrow.keyHash", "is not a hex SHA-256")
+		}
+	}
+	if e.KeyHashFile != "" {
+		switch {
+		case e.KeyHash != "":
+			add("escrow.keyHashFile", "excludes escrow.keyHash; set one of them")
+		case !filepath.IsAbs(e.KeyHashFile):
+			add("escrow.keyHashFile", "must be an absolute path")
+		}
+	}
+	seen := map[string]bool{}
+	for i, a := range e.SourceArguments {
+		p := fmt.Sprintf("escrow.sourceArguments[%d]", i)
+		switch {
+		case strings.TrimSpace(a) == "":
+			add(p, "cannot be empty")
+		case strings.TrimSpace(a) != a:
+			add(p, "cannot have surrounding space")
+		case seen[a]:
+			add(p, "is listed twice")
+		}
+		seen[a] = true
 	}
 }
 

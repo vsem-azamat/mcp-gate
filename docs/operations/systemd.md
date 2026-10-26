@@ -11,7 +11,25 @@ mcp-gate ships two units, both in the release archives:
 
 Pick the user unit when stdio servers keep state in someone's home (browser profiles, token caches, credentials written by a login tool); pick the system unit when every server can live under `/var/lib/mcp-gate`.
 
-In both, the config is `gate.yaml` and the secrets are in `gate.env` next to it, a `KEY=value` file read through `EnvironmentFile=`: the client and admin tokens and every other value the config names as `${VAR}`, and `MCP_HUB_ESCROW_KEY_SHA256` (see [serve](../commands/serve.md#escrow)). The file must exist, even if empty: a missing one stops the start with `Failed to load environment files` instead of a run of restarts over unset variables. The gate reads its state directory from `$STATE_DIRECTORY`, which systemd sets from `StateDirectory=`, so `serve` needs no `-state-dir`. Logs are JSON lines on stderr, so they go to the journal.
+In both, the config is `gate.yaml` and the secrets are in `gate.env` next to it, a `KEY=value` file read through `EnvironmentFile=`: the client and admin tokens and every other value the config names as `${VAR}`, and `MCP_GATE_ESCROW_KEY_SHA256` (see [serve](../commands/serve.md#escrow)); a `gate.env` that still sets the deprecated `MCP_HUB_ESCROW_KEY_SHA256` works, with a warning at start. The file must exist, even if empty: a missing one stops the start with `Failed to load environment files` instead of a run of restarts over unset variables. The gate reads its state directory from `$STATE_DIRECTORY`, which systemd sets from `StateDirectory=`, so `serve` needs no `-state-dir`. Logs are JSON lines on stderr, so they go to the journal.
+
+### Escrow key hash as a credential
+
+Instead of `gate.env`, the escrow key hash can come from a systemd credential, which keeps it out of the environment. Put the hex hash in a root-owned file and add a drop-in (`systemctl edit mcp-gate`, or `--user`):
+
+```ini
+[Service]
+LoadCredential=escrow-key-sha256:/etc/mcp-gate/escrow-key-sha256
+```
+
+and name it in the config, which expands `$CREDENTIALS_DIRECTORY` like any variable:
+
+```yaml
+escrow:
+  keyHashFile: ${CREDENTIALS_DIRECTORY}/escrow-key-sha256
+```
+
+systemd gives the service a private read-only copy (mode 0400, owned by the service's user or by root), which passes the gate's checks on the file. Commands run through `systemd-run` need the same `-p LoadCredential=…` for the config to load. Remove `MCP_GATE_ESCROW_KEY_SHA256` from `gate.env`, or keep it equal: two different hashes stop the gate.
 
 ## Install the system unit
 

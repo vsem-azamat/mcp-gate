@@ -68,7 +68,7 @@ printf '\nGATE_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" >> ~/.config/mcp-gate
 
 If mcp-proxy's unit sets secrets with `Environment=` lines instead of a file, copy them into `gate.env` as `KEY=value` lines with an editor, not with `echo` on a command line.
 
-and add `admin: {tokens: {owner: "${GATE_ADMIN_TOKEN}"}}` to the config for `/_status`. Keeping `MCP_HUB_ESCROW_KEY_SHA256` means the tools that release secrets keep their key.
+and add `admin: {tokens: {owner: "${GATE_ADMIN_TOKEN}"}}` to the config for `/_status`. Keeping the escrow key hash means the tools that release secrets keep their key: mcp-gate reads `MCP_HUB_ESCROW_KEY_SHA256` as a deprecated name and logs a warning at start; rename the line in `gate.env` to `MCP_GATE_ESCROW_KEY_SHA256` to silence it. The API at `/_escrow/` is unchanged.
 
 ## 4. Check
 

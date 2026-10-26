@@ -8,16 +8,42 @@ The escrow keeps the secrets that redaction replaces, in memory, under random ha
 
 ### Requirement: Enabling
 
-The escrow SHALL be on exactly when the environment variable `MCP_HUB_ESCROW_KEY_SHA256` holds a value other than space: the hex SHA-256 of the API key, 64 hex digits in either letter case, surrounding space ignored. The key itself SHALL never reach the gate. A value that is not a hex SHA-256 SHALL make `serve` exit with status 2 without quoting it. With the escrow off, results SHALL carry `[REDACTED:<kind>]` markers and `/_escrow/` SHALL be 404 like any unknown path.
+The escrow SHALL be on exactly when a key hash, the hex SHA-256 of the API key (64 hex digits in either letter case, surrounding space ignored), comes from one of these sources, in order of precedence: the config's `escrow.keyHash`; the file named by the config's `escrow.keyHashFile`; the environment variable `MCP_GATE_ESCROW_KEY_SHA256`; and `MCP_HUB_ESCROW_KEY_SHA256`, its deprecated name. A variable that holds only space SHALL count as unset. The key itself SHALL never reach the gate. Every source that is set SHALL hold a hex SHA-256, and all of them SHALL hold the same one; otherwise `serve` SHALL exit with status 2, naming the sources but no value. When `MCP_HUB_ESCROW_KEY_SHA256` is set, `serve` SHALL log one warning at start that it is deprecated. Both variables, and every variable that `escrow.keyHash` is expanded from, SHALL be removed from the environment stdio servers inherit from. With the escrow off, results SHALL carry `[REDACTED:<kind>]` markers and `/_escrow/` SHALL be 404 like any unknown path.
+
+`escrow.keyHashFile` SHALL be read once at start, following symlinks; it SHALL be a regular file of at most 1 KiB, writable by neither its group nor others, and owned by root or by the gate's user (by anyone when the gate runs as root), and its content, with surrounding space removed, SHALL be the hex SHA-256. A file that fails these checks SHALL make `serve` exit with status 2, without quoting its path or content.
 
 #### Scenario: Escrow off
 
-- **WHEN** the gate runs without `MCP_HUB_ESCROW_KEY_SHA256`
+- **WHEN** the gate runs with no key hash in the config or the environment
 - **THEN** a tool result with a password carries `[REDACTED:password]`, and `GET /_escrow/kaaaaaaaaaa/meta` with any key is 404 `404 page not found`
+
+#### Scenario: Deprecated variable
+
+- **WHEN** only `MCP_HUB_ESCROW_KEY_SHA256` holds the key hash
+- **THEN** the escrow is on and serves the API exactly as with `MCP_GATE_ESCROW_KEY_SHA256`, and the gate logs one warning at start
+
+#### Scenario: Conflicting key hashes
+
+- **WHEN** `MCP_GATE_ESCROW_KEY_SHA256` and `MCP_HUB_ESCROW_KEY_SHA256`, or `escrow.keyHash` and a variable, hold different hashes
+- **THEN** `serve` exits with status 2 naming both sources, and `check` fails the same way
+
+#### Scenario: Key hash file
+
+- **WHEN** `escrow.keyHashFile` names a file mode 0400 that holds the hash and a line break
+- **THEN** the escrow is on with that hash; when the file is writable by its group, `serve` exits with status 2
+
+### Requirement: Per-server escrow
+
+A server SHALL use the escrow only when its `redact.escrow` is true, the default. With `redact.escrow: false`, its findings SHALL get `[REDACTED:<kind>]` and SHALL NOT be kept, and its files with secrets SHALL be withheld with `[REDACTED:file]` and SHALL NOT be kept, as with the escrow off.
+
+#### Scenario: Server opted out
+
+- **WHEN** the escrow is on and a server with `redact.escrow: false` returns a password
+- **THEN** the client gets `[REDACTED:password]` and no entry is kept
 
 ### Requirement: Markers
 
-With the escrow on, each finding in a result or a JSON-RPC error of a server with redaction SHALL be kept and replaced by `[REDACTED:<kind> #<handle>]`, where the handle is `k` followed by ten characters of lower-case RFC 4648 base32 from a cryptographic random source. A finding whose value is over 64 KiB, or one the store cannot take, SHALL be replaced by `[REDACTED:<kind>]` and not kept. The same value from the same server under the same kind SHALL get the handle it already has while that entry lives, and seeing it again SHALL extend the entry to a full TTL from then. Texts outside results (progress messages, logged texts) SHALL get `[REDACTED:<kind>]` and SHALL NOT be kept.
+With the escrow on, each finding in a result or a JSON-RPC error of a server with redaction and `redact.escrow` SHALL be kept and replaced by `[REDACTED:<kind> #<handle>]`, where the handle is `k` followed by ten characters of lower-case RFC 4648 base32 from a cryptographic random source. A finding whose value is over 64 KiB, or one the store cannot take, SHALL be replaced by `[REDACTED:<kind>]` and not kept. The same value from the same server under the same kind SHALL get the handle it already has while that entry lives, and seeing it again SHALL extend the entry to a full TTL from then. Texts outside results (progress messages, logged texts) SHALL get `[REDACTED:<kind>]` and SHALL NOT be kept.
 
 #### Scenario: Marker in a result
 
@@ -31,7 +57,12 @@ With the escrow on, each finding in a result or a JSON-RPC error of a server wit
 
 ### Requirement: Store
 
-Entries SHALL live only in the process's memory, never on disk or in a log. Each SHALL record its kind (or `file`), server, tool (the tool or prompt name, or the resource URI), creation and expiry times, and a summary of the request's arguments that keeps only the members `chat_id`, `message_id`, `message_ids`, `topic_id`, `reply_to`, `space`, `space_name`, `message_name`, `thread_name`, `attachment_name`, `conversation_id`, `conversationId`, `channel_id`, `chat`, `peer`, `messageId`, `threadId` and `account`, when they are strings of at most 200 bytes without line breaks, numbers, booleans, or lists of at most 20 strings and numbers. An entry SHALL expire after its server's `redact.escrowTTL` (by default `escrow.ttl`, by default `24h`); expired entries SHALL be unreadable and SHALL be dropped every minute. The store SHALL hold at most `escrow.maxEntries` entries (default 1000) and 16 MiB of values: a new entry SHALL first drop expired entries when the store is full, then evict the oldest entries until it fits. A value SHALL be overwritten in memory when its entry is dropped.
+Entries SHALL live only in the process's memory, never on disk or in a log. Each SHALL record its kind (or `file`), server, tool (the tool or prompt name, or the resource URI), creation and expiry times, and a summary of the request's arguments that keeps only the members named in `escrow.sourceArguments` (by default `chat_id`, `message_id`, `message_ids`, `topic_id`, `reply_to`, `space`, `space_name`, `message_name`, `thread_name`, `attachment_name`, `conversation_id`, `conversationId`, `channel_id`, `chat`, `peer`, `messageId`, `threadId` and `account`; an empty list keeps none), when they are strings of at most 200 bytes without line breaks, numbers, booleans, or lists of at most 20 strings and numbers. An entry SHALL expire after its server's `redact.escrowTTL` (by default `escrow.ttl`, by default `24h`); expired entries SHALL be unreadable and SHALL be dropped every minute. The store SHALL hold at most `escrow.maxEntries` entries (default 1000) and 16 MiB of values: a new entry SHALL first drop expired entries when the store is full, then evict the oldest entries until it fits. A value SHALL be overwritten in memory when its entry is dropped.
+
+#### Scenario: Configured source arguments
+
+- **WHEN** `escrow.sourceArguments` is `[ticket]` and a call with `ticket: T-1` and `chat_id: 42` returns a secret
+- **THEN** the entry's meta has `source` `{"ticket":"T-1"}`
 
 #### Scenario: Expiry
 

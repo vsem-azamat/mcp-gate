@@ -7,7 +7,10 @@
 ```console
 $ mcp-gate check gate.yaml
 gate.yaml: valid, 12 servers (1 disabled)
+escrow: on, key hash from MCP_GATE_ESCROW_KEY_SHA256
 ```
+
+The second line says whether the [escrow](serve.md#escrow) would be on and where its key hash comes from (`escrow.keyHash`, `escrow.keyHashFile`, `MCP_GATE_ESCROW_KEY_SHA256`, or the deprecated `MCP_HUB_ESCROW_KEY_SHA256`), never the hash itself. A key hash file is read as `serve` reads it, with the same checks on its owner, so run `check` as the gate's user or as root (see [systemd](../operations/systemd.md#commands-in-the-services-environment)); a hash that is invalid or that disagrees with another source fails the check.
 
 Every problem is listed with its field path; values are never printed:
 
@@ -32,6 +35,7 @@ mail: OAuth login required (not logged in): run mcp-gate auth login <config> mai
 ```console
 $ mcp-gate check -connect gate.yaml
 gate.yaml: valid, 3 servers (1 disabled)
+escrow: off (no key hash in escrow.keyHash, escrow.keyHashFile, MCP_GATE_ESCROW_KEY_SHA256 or MCP_HUB_ESCROW_KEY_SHA256)
 archive: disabled
 notes: ready, protocol 2025-11-25 (pinned automatically: the server did not answer the 2026-07-28 handshake), 4 tools
 shop: ready, protocol 2026-07-28, 12 tools

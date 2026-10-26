@@ -13,11 +13,9 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
-	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,9 +24,6 @@ import (
 
 // The contract and its limits.
 const (
-	// KeyHashEnv names the environment variable that holds the hex SHA-256 of the API key. The
-	// key itself never reaches the gate; without the variable the escrow is off.
-	KeyHashEnv = "MCP_HUB_ESCROW_KEY_SHA256"
 	// Route is the path prefix of the API.
 	Route = "/_escrow/"
 
@@ -63,24 +58,15 @@ func newHandle() (string, error) {
 	return "k" + handleEncoding.EncodeToString(raw[:])[:10], nil
 }
 
-// ParseKeyHash decodes the value of KeyHashEnv: 64 hex digits in either case, surrounding space
-// ignored. The error never quotes the value.
-func ParseKeyHash(s string) ([sha256.Size]byte, error) {
-	var out [sha256.Size]byte
-	decoded, err := hex.DecodeString(strings.ToLower(strings.TrimSpace(s)))
-	if err != nil || len(decoded) != sha256.Size {
-		return out, errors.New(KeyHashEnv + " is not a hex SHA-256")
-	}
-	copy(out[:], decoded)
-	return out, nil
-}
-
 // Options configure an Escrow.
 type Options struct {
 	// KeyHash is the SHA-256 of the API key.
 	KeyHash [sha256.Size]byte
 	// MaxEntries caps the store; 0 means DefaultMaxEntries.
 	MaxEntries int
+	// SourceArguments are the request arguments kept in an entry's source summary; nil means
+	// DefaultSourceArguments and an empty list keeps none.
+	SourceArguments []string
 	// Remote returns a request's client address, which the failed-auth limit is keyed by and
 	// the access log names. Nil uses the peer address.
 	Remote func(*http.Request) string
@@ -91,6 +77,7 @@ type Options struct {
 type Escrow struct {
 	store   *store
 	keyHash [sha256.Size]byte
+	sources map[string]bool // the arguments kept in a summary
 	remote  func(*http.Request) string
 	limit   *limiter
 	logger  *slog.Logger
@@ -104,8 +91,15 @@ func New(o Options) *Escrow {
 	if o.Remote == nil {
 		o.Remote = peer
 	}
+	if o.SourceArguments == nil {
+		o.SourceArguments = DefaultSourceArguments
+	}
+	sources := make(map[string]bool, len(o.SourceArguments))
+	for _, name := range o.SourceArguments {
+		sources[name] = true
+	}
 	s := newStore(o.MaxEntries, o.Logger)
-	return &Escrow{store: s, keyHash: o.KeyHash, remote: o.Remote, limit: newLimiter(s.clock), logger: o.Logger}
+	return &Escrow{store: s, keyHash: o.KeyHash, sources: sources, remote: o.Remote, limit: newLimiter(s.clock), logger: o.Logger}
 }
 
 // MaxEntries returns the store's cap.
@@ -132,8 +126,8 @@ type Source struct {
 	Tool string
 	// TTL is how long entries from it stay retrievable; 0 means DefaultTTL.
 	TTL time.Duration
-	// Arguments returns the request's arguments, or nil; only identifying members are kept
-	// (see Summarize). It is called at most once per Replacer.
+	// Arguments returns the request's arguments, or nil; only the members named by
+	// Options.SourceArguments are kept (see summarize). It is called at most once per Replacer.
 	Arguments func() map[string]any
 }
 
@@ -144,7 +138,7 @@ func (e *Escrow) Replacer(src Source) redact.Replacer {
 		if src.Arguments == nil {
 			return map[string]any{}
 		}
-		return Summarize(src.Arguments())
+		return e.summarize(src.Arguments())
 	})
 	return redact.ReplacerFunc(func(f redact.Finding) string {
 		if len(f.Value) > MaxValueBytes {
@@ -185,7 +179,7 @@ type File struct {
 func (e *Escrow) KeepFile(f File) (string, error) {
 	var summary map[string]any
 	if f.Arguments != nil {
-		summary = Summarize(f.Arguments())
+		summary = e.summarize(f.Arguments())
 	}
 	handle, err := e.store.insert(&entry{
 		kind: "file", server: f.Server, tool: f.Tool, source: summary,
