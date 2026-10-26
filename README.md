@@ -64,14 +64,13 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 | Secret vault for the owner | ✅ | ❌ | ❌ | ❌ | ❌ |
 | OAuth to remote servers | ✅ | ✅ | ✅ | ✅ | ➖ |
 | One binary, no database | ✅ | ✅ | ❌ | ❌ | ✅ |
-| All tools behind one URL | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Different tools for different agents | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Web UI | ❌ | ❌ | ➖ | ✅ | ✅ |
+| All tools behind one URL | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/28) | ❌ | ✅ | ✅ | ✅ |
+| Different tools for different agents | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/32) | ❌ | ❌ | ✅ | ✅ |
+| Web UI | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/39) | ❌ | ➖ | ✅ | ✅ |
 | SSO and roles | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Kubernetes deployment | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Legacy SSE transport | ❌ | ✅ | – | ✅ | ✅ |
+| Legacy SSE transport | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/37) | ✅ | ❔ | ✅ | ✅ |
 
-<sub>➖ partly: tools only; Docker blocks the whole call instead of hiding the secret; ContextForge and agentgateway hide secrets through plugins; agentgateway's OAuth is token exchange. – not documented. Checked against each project's docs in October 2026, corrections welcome.</sub>
+<sub>🔜 planned, links to the issue; the web UI is planned as a read-only status page. ➖ partly: tools only; Docker blocks the whole call instead of hiding the secret; ContextForge and agentgateway hide secrets through plugins; agentgateway's OAuth is token exchange. ❔ not documented. Checked against each project's docs in October 2026, corrections welcome.</sub>
 
 mcp-gate suits a handful of MCP servers on one machine. If you need what the lower rows list, look at ContextForge, agentgateway, [MetaMCP](https://github.com/metatool-ai/metamcp) or [MCPJungle](https://github.com/mcpjungle/MCPJungle).
 
