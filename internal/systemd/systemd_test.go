@@ -182,3 +182,11 @@ func TestNotify(t *testing.T) {
 		t.Errorf("abstract socket: %v, %v", abstract, err)
 	}
 }
+
+func TestReloading(t *testing.T) {
+	r := Reloading()
+	usec, ok := strings.CutPrefix(r, "RELOADING=1\nMONOTONIC_USEC=")
+	if n, err := strconv.ParseInt(usec, 10, 64); !ok || err != nil || n <= 0 {
+		t.Errorf("Reloading() = %q", r)
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -307,7 +308,7 @@ func (e *NotReadyError) Error() string {
 type Supervisor struct {
 	opts     Options
 	logger   *slog.Logger
-	redactor *redact.Engine
+	redactor atomic.Pointer[redact.Engine]
 	client   *mcp.Client
 	stderr   *procutil.LineLog
 	http     *http.Client
@@ -348,15 +349,16 @@ func New(opts Options) (*Supervisor, error) {
 	r := opts.Redactor
 	if r == nil {
 		var err error
-		if r, err = redact.New(redact.Options{}); err != nil {
+		if r, err = defaultRedactor(); err != nil {
 			return nil, err
 		}
 	}
 	logger := opts.Logger.With("server", opts.Name)
 	s := &Supervisor{
-		opts: opts, logger: logger, redactor: r, learned: opts.LearnedPin,
+		opts: opts, logger: logger, learned: opts.LearnedPin,
 		changed: make(chan struct{}), kick: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
 	}
+	s.redactor.Store(r)
 	s.stopCtx, s.cancel = context.WithCancel(context.Background())
 	impl := &mcp.Implementation{Name: opts.ClientName, Version: opts.ClientVersion}
 	s.client = mcp.NewClient(impl, opts.Notifications.clientOptions(logger))
@@ -372,7 +374,26 @@ func New(opts Options) (*Supervisor, error) {
 	return s, nil
 }
 
-func (s *Supervisor) scrub(text string) string { return s.redactor.RedactText(text, redact.Marker{}) }
+func (s *Supervisor) scrub(text string) string {
+	return s.redactor.Load().RedactText(text, redact.Marker{})
+}
+
+// defaultRedactor returns an engine with the default rules.
+func defaultRedactor() (*redact.Engine, error) { return redact.New(redact.Options{}) }
+
+// SetRedactor replaces the engine that scrubs stderr lines and error messages from now on, as
+// Options.Redactor does at the start; nil uses the default rules. A reload of the config calls it
+// for a server it keeps running.
+func (s *Supervisor) SetRedactor(r *redact.Engine) error {
+	if r == nil {
+		var err error
+		if r, err = defaultRedactor(); err != nil {
+			return err
+		}
+	}
+	s.redactor.Store(r)
+	return nil
+}
 
 // ErrorText returns err's message fit for logs and status: the server's URL, which may carry a
 // credential in its path or query, is replaced by its config path, the redaction rules run, and

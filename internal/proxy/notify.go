@@ -27,32 +27,31 @@ type event struct {
 	log      *mcp.LoggingMessageParams //nolint:staticcheck // servers of older protocol versions still send log messages
 }
 
-func (m *Mirror) enqueue(e event) {
+func (s *Source) enqueue(e event) {
 	select {
-	case m.events <- e:
+	case s.events <- e:
 	default:
-		m.stats.dropped.Add(1)
+		s.stats.dropped.Add(1)
 	}
 }
 
-// notifyLoop hands progress to the call it belongs to and logs log messages.
-func (m *Mirror) notifyLoop(ctx context.Context) {
-	defer m.wg.Done()
+// notifyLoop hands progress to the call it belongs to and logs log messages, scrubbed as the
+// mirror that runs the call, or the current one, scrubs.
+func (s *Source) notifyLoop(ctx context.Context) {
+	defer s.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case e := <-m.events:
-			safely(m.logger, "notification", func() {
+		case e := <-s.events:
+			safely(s.logger, "notification", func() {
 				switch {
 				case e.progress != nil:
-					p := *e.progress
-					if p.Message != "" {
-						p.Message = m.scrub(p.Message)
-					}
-					m.progress.deliver(&p)
+					s.progress.deliver(e.progress)
 				case e.log != nil:
-					m.logMessage(ctx, e.log)
+					if m := s.current(); m != nil {
+						m.logMessage(ctx, e.log)
+					}
 				}
 			})
 		}
@@ -72,10 +71,11 @@ func (m *Mirror) logMessage(ctx context.Context, p *mcp.LoggingMessageParams) { 
 	m.logger.DebugContext(ctx, "server log message", "level", m.logText(string(p.Level)), "logger", m.logText(p.Logger), "data", text)
 }
 
-// progressTable maps the progress tokens sent downstream to the upstream calls they belong to.
+// progressTable maps the progress tokens sent downstream to the upstream calls they belong to. A
+// source has one, shared by the mirrors of every config the server is served under.
 type progressTable struct {
+	next  atomic.Uint64
 	mu    sync.Mutex
-	next  uint64
 	sinks map[string]*progressSink
 }
 
@@ -89,6 +89,7 @@ type progressSink struct {
 	ctx   context.Context // the upstream request's: it routes the notification to its stream
 	ss    *mcp.ServerSession
 	token any
+	scrub func(string) string // the redaction of the call's mirror
 
 	mu      sync.Mutex
 	pending *mcp.ProgressNotificationParams
@@ -96,11 +97,10 @@ type progressSink struct {
 	done    chan struct{}
 }
 
-func (t *progressTable) open(ctx context.Context, ss *mcp.ServerSession, token any, logger *slog.Logger) *progressSink {
+func (t *progressTable) open(ctx context.Context, ss *mcp.ServerSession, token any, scrub func(string) string, logger *slog.Logger) *progressSink {
 	t.mu.Lock()
-	t.next++
 	s := &progressSink{
-		id: "mcp-gate-" + strconv.FormatUint(t.next, 10), ctx: ctx, ss: ss, token: token,
+		id: "mcp-gate-" + strconv.FormatUint(t.next.Add(1), 10), ctx: ctx, ss: ss, token: token, scrub: scrub,
 		wake: make(chan struct{}, 1), done: make(chan struct{}),
 	}
 	t.sinks[s.id] = s
@@ -129,8 +129,12 @@ func (t *progressTable) deliver(p *mcp.ProgressNotificationParams) {
 	if s == nil {
 		return
 	}
+	q := *p
+	if q.Message != "" {
+		q.Message = s.scrub(q.Message)
+	}
 	s.mu.Lock()
-	s.pending = p
+	s.pending = &q
 	s.mu.Unlock()
 	select {
 	case s.wake <- struct{}{}:

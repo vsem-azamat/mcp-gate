@@ -148,7 +148,7 @@ A YAML syntax or type error SHALL be reported with its line. Every expansion and
 
 ### Requirement: check
 
-`mcp-gate check <file>` SHALL load the file with the process environment and resolve the escrow key hash as `serve` does (see the escrow spec). It SHALL exit with status 0 when both succeed, printing the number of servers and a line that says whether the escrow would be on and, when it would, which source its key hash comes from (never the hash) and, with `escrow.socket`, whether the API is served on the listener and the socket or on the socket only, and 2 with every problem otherwise.
+`mcp-gate check <file>` SHALL load the file with the process environment, resolve the escrow key hash as `serve` does (see the escrow spec), and build the gate from it as `serve` and a reload do, starting nothing, failing as they would. It SHALL exit with status 0 when both succeed, printing the number of servers and a line that says whether the escrow would be on and, when it would, which source its key hash comes from (never the hash) and, with `escrow.socket`, whether the API is served on the listener and the socket or on the socket only, and 2 with every problem otherwise.
 
 #### Scenario: Valid config
 

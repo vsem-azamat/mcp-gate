@@ -19,8 +19,7 @@ import (
 // member returns a mirror named name serving the given tools and resources.
 func member(t *testing.T, name string, logger *slog.Logger, tools []string, resources []string, templates []string) *Mirror {
 	t.Helper()
-	m := New(Options{Name: name, Policy: policy.New(&config.Server{}), Logger: logger})
-	m.Attach(stubDown{})
+	m := newMirror(Options{Name: name, Policy: policy.New(&config.Server{}), Logger: logger}, stubDown{})
 	var list []*mcp.Tool
 	for _, n := range tools {
 		list = append(list, &mcp.Tool{Name: n, InputSchema: map[string]any{"type": "object"}})
@@ -85,13 +84,11 @@ func TestAggregateFollowsChanges(t *testing.T) {
 	}
 	v := a.View([]string{"s"}, nil)
 	m.tools = m.applyTools([]*mcp.Tool{{Name: "b", InputSchema: map[string]any{"type": "object"}}})
-	m.ready.Store(true)
+	m.src.ready.Store(true)
 	if a.Listed("s") {
 		t.Error("listed before the views hold the catalog")
 	}
-	for _, w := range m.watchers {
-		w()
-	}
+	m.notifyWatchers()
 	if !a.Listed("s") {
 		t.Error("not listed after the change reached the views")
 	}

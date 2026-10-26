@@ -10,9 +10,11 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/escrow"
@@ -28,8 +30,8 @@ Serves the servers of an mcp-gate config: each at /<name>/mcp on listen.addr, be
 with /_healthz, /_readyz and, with admin tokens, /_status. With the hex SHA-256 of an API key in
 escrow.keyHash, escrow.keyHashFile or MCP_GATE_ESCROW_KEY_SHA256, redacted secrets are kept in
 memory and served at /_escrow/ to that key. Logs are JSON lines on stderr. SIGINT and SIGTERM
-shut it down. Under systemd it serves the socket a socket unit passes (LISTEN_FDS) in place of
-listen.addr, and reports readiness on NOTIFY_SOCKET.
+shut it down; SIGHUP reloads the config file. Under systemd it serves the socket a socket unit
+passes (LISTEN_FDS) in place of listen.addr, and reports readiness on NOTIFY_SOCKET.
 
 Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate fails.
 
@@ -71,6 +73,11 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 		_, _ = fmt.Fprintln(stderr, "mcp-gate serve: name one config file")
 		return exitUsage
 	}
+	// Before anything else: SIGHUP would otherwise end the process. One that arrives before the
+	// servers are started is applied once they are.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	cfg, err := config.Load(fs.Arg(0), config.LookupFunc(env))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcp-gate serve: %s:\n  %s\n", fs.Arg(0), strings.ReplaceAll(err.Error(), "\n", "\n  "))
@@ -78,7 +85,9 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 	}
 	var level slog.Level
 	_ = level.UnmarshalText([]byte(cfg.LogLevel)) // validated
-	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: level}))
+	levelVar := new(slog.LevelVar)
+	levelVar.Set(level)
+	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: levelVar}))
 	if err := procutil.SetNonDumpable(); err != nil {
 		logger.Warn("cannot make the process non-dumpable", "error", err.Error())
 	}
@@ -102,13 +111,14 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 	if err != nil {
 		logger.Warn("not notifying systemd", "error", err.Error())
 	}
+	notify := func(state string) {
+		if err := notifier.Notify(state); err != nil {
+			logger.Warn("cannot notify systemd", "state", state, "error", err.Error())
+		}
+	}
 	g, err := gate.New(gate.Options{
 		Config: cfg, Environ: childEnviron(parentEnviron(), cfg.Escrow.KeyHashVars...), StateDir: *stateDir, Version: version.Get().Version, Logger: logger,
-		EscrowKey: key, Notify: func(state string) {
-			if err := notifier.Notify(state); err != nil {
-				logger.Warn("cannot notify systemd", "state", state, "error", err.Error())
-			}
-		},
+		EscrowKey: key, Notify: notify, Level: levelVar,
 	})
 	if err != nil {
 		logger.Error("cannot start", "error", err.Error())
@@ -119,12 +129,54 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 		logger.Error("cannot listen", "error", err.Error())
 		return exitTrouble
 	}
-	if err := g.Run(ctx, ln); err != nil {
+	reloads, stopReloads := context.WithCancel(ctx)
+	reloaded := make(chan struct{})
+	go func() {
+		defer close(reloaded)
+		for {
+			select {
+			case <-reloads.Done():
+				return
+			case <-hup:
+				reload(reloads, g, fs.Arg(0), env, logger)
+			}
+		}
+	}()
+	err = g.Run(ctx, ln)
+	stopReloads()
+	<-reloaded
+	if err != nil {
 		logger.Error("gate failed", "error", err.Error())
 		return exitTrouble
 	}
 	logger.Info("stopped")
 	return exitOK
+}
+
+// reload loads the config file again and applies it. A config that does not load, or that the
+// gate cannot apply, is logged and the running one stays.
+func reload(ctx context.Context, g *gate.Gate, path string, env lookupEnv, logger *slog.Logger) {
+	var called, loaded bool
+	err := g.Reload(ctx, func() (*config.Config, error) {
+		called = true
+		logger.Info("reloading the config", "path", path)
+		cfg, err := config.Load(path, config.LookupFunc(env))
+		if err == nil {
+			// As at the start and in check: a key hash that cannot be resolved fails the config.
+			_, err = escrowKey(cfg, env)
+		}
+		loaded = err == nil
+		return cfg, err
+	})
+	switch {
+	case err == nil:
+	case !called:
+		logger.Warn("not reloading the config", "reason", err.Error())
+	case !loaded:
+		logger.Error("the config does not load; keeping the running one", "error", err.Error())
+	default:
+		logger.Error("cannot apply the config; keeping the running one", "error", err.Error())
+	}
 }
 
 // listen returns the listening socket systemd passed, or else opens listen.addr. A passed socket

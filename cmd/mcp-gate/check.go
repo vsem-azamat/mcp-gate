@@ -26,7 +26,8 @@ import (
 
 const checkUsage = `Usage: mcp-gate check [flags] <config.yaml>
 
-Loads and validates an mcp-gate config: strict YAML, ${VAR} expanded from the environment.
+Loads and validates an mcp-gate config: strict YAML, ${VAR} expanded from the environment,
+and the gate built from it as serve and a reload build it, without starting anything.
 It also says whether the escrow would be on and where its key hash comes from.
 With -connect it also connects to every enabled server, starting stdio servers, and reports
 the protocol version and number of tools of each; then it stops them.
@@ -82,6 +83,13 @@ func runCheck(ctx context.Context, args []string, env lookupEnv, stdout, stderr 
 	sort.Strings(names)
 	key, err := escrowKey(cfg, env)
 	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "mcp-gate check: %s:\n  %s\n", fs.Arg(0), err)
+		return exitUsage
+	}
+	// Built as serve and a reload build it, starting nothing, so that check accepts what they do.
+	if _, err := gate.New(gate.Options{
+		Config: cfg, Environ: childEnviron(parentEnviron(), cfg.Escrow.KeyHashVars...), Version: version.Get().Version, EscrowKey: key,
+	}); err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcp-gate check: %s:\n  %s\n", fs.Arg(0), err)
 		return exitUsage
 	}

@@ -48,9 +48,10 @@ type ServerStatus struct {
 
 // Status returns the state of every enabled server.
 func (g *Gate) Status() Status {
-	out := Status{Name: g.cfg.Name, Version: g.opts.Version, Started: g.started.Load(), Servers: map[string]ServerStatus{}}
-	for _, name := range g.names {
-		s := g.servers[name]
+	sn := g.snap.Load()
+	out := Status{Name: sn.cfg.Name, Version: g.opts.Version, Started: g.started.Load(), Servers: map[string]ServerStatus{}}
+	for _, name := range sn.names {
+		s := sn.servers[name]
 		st := s.sup.Status()
 		ms := s.mirror.Stats()
 		ss := ServerStatus{

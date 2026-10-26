@@ -2,7 +2,7 @@
 
 [Docs](../README.md) / [Commands](README.md) / **check**
 
-`mcp-gate check <file>` loads a config the way the gate will: strict YAML, `${VAR}` expanded from the environment, every key validated. The specifications are [`openspec/specs/config/spec.md`](../../openspec/specs/config/spec.md) and, for `-connect`, [`openspec/specs/downstream-lifecycle/spec.md`](../../openspec/specs/downstream-lifecycle/spec.md); the keys are in [Configuration](../configuration/README.md).
+`mcp-gate check <file>` loads a config the way the gate will: strict YAML, `${VAR}` expanded from the environment, every key validated, and the gate built from it as `serve` and a reload build it, without starting anything, so a config that `check` accepts is one a reload applies. The specifications are [`openspec/specs/config/spec.md`](../../openspec/specs/config/spec.md) and, for `-connect`, [`openspec/specs/downstream-lifecycle/spec.md`](../../openspec/specs/downstream-lifecycle/spec.md); the keys are in [Configuration](../configuration/README.md).
 
 ```console
 $ mcp-gate check gate.yaml

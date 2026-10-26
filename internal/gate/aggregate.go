@@ -72,29 +72,42 @@ const (
 	viewKeyToken  = "\x01"
 )
 
-// aggregateRoute builds the aggregate route and a view for every access a token, or no token,
-// has. Tokens and policies do not change while the gate runs, so the accesses are known here.
-func (g *Gate) aggregateRoute(remote upstream.RemoteFunc) (http.Handler, error) {
-	members := g.cfg.AggregateMembers()
+// aggregateRoute returns the aggregate route of sn: prev, the route of the snapshot being
+// replaced, when its members' mirrors and its config values are unchanged, else a new one with a
+// view for every access a token, or no token, has. The tokens and policies of a snapshot do not
+// change, so the accesses are known here.
+func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*route, error) {
+	members := sn.cfg.AggregateMembers()
 	mirrors := make([]*proxy.Mirror, 0, len(members))
+	tokens := map[string]map[string]string{}
+	configs := make([]*config.Server, 0, len(members))
+	for _, name := range members {
+		mirrors = append(mirrors, sn.servers[name].mirror)
+		tokens[name] = sn.cfg.EffectiveTokens(name)
+		configs = append(configs, sn.servers[name].cfg)
+	}
+	key := routeKey(sn.cfg, configs...)
+	key["members"] = members
+	if prev.keeps(key, mirrors) {
+		return prev, nil
+	}
 	a := &aggregate{members: members, tokens: map[string]*upstream.Tokens{}, mirrors: map[string]*proxy.Mirror{}, views: map[string]*proxy.View{}}
 	for _, name := range members {
-		mirrors = append(mirrors, g.servers[name].mirror)
-		a.mirrors[name] = g.servers[name].mirror
-		if t := g.cfg.EffectiveTokens(name); t != nil {
+		a.mirrors[name] = sn.servers[name].mirror
+		if t := tokens[name]; t != nil {
 			a.tokens[name] = upstream.NewTokens(t)
 		}
 	}
 	if len(members) == 0 {
 		g.logger.Warn("the aggregate endpoint serves no server: every server it would serve is disabled")
 	}
-	agg, err := proxy.NewAggregate(proxy.AggregateOptions{Name: g.cfg.Name, Version: g.opts.Version, Members: mirrors, Logger: g.logger})
+	agg, err := proxy.NewAggregate(proxy.AggregateOptions{Name: sn.cfg.Name, Version: g.opts.Version, Members: mirrors, Logger: g.logger})
 	if err != nil {
 		return nil, err
 	}
 	secrets := []string{""} // no token
 	for _, name := range members {
-		for _, secret := range g.cfg.EffectiveTokens(name) {
+		for _, secret := range tokens[name] {
 			secrets = append(secrets, secret)
 		}
 	}
@@ -113,15 +126,21 @@ func (g *Gate) aggregateRoute(remote upstream.RemoteFunc) (http.Handler, error) 
 	// awaitReady), so that a client that connects early does not take an empty catalog for the
 	// whole one.
 	ready := func(r *http.Request) (ok, pending bool) {
+		gr, _ := r.Context().Value(grantKey{}).(*grant)
+		if gr == nil {
+			return g.started.Load(), false
+		}
+		// A member that a reload restarts holds the request, as on its own route.
+		for name := range gr.access {
+			if sn.servers[name].rt.restarting.Load() && sn.servers[name].sup.Status().State != downstream.NeedsLogin {
+				return false, true
+			}
+		}
 		if g.started.Load() {
 			return true, false
 		}
-		gr, _ := r.Context().Value(grantKey{}).(*grant)
-		if gr == nil {
-			return false, false
-		}
 		for name := range gr.access {
-			s := g.servers[name]
+			s := sn.servers[name]
 			if !agg.Listed(name) && s.sup.Status().State != downstream.NeedsLogin {
 				return false, true
 			}
@@ -135,8 +154,10 @@ func (g *Gate) aggregateRoute(remote upstream.RemoteFunc) (http.Handler, error) 
 		}
 		return gr.view.Server()
 	}
-	log := g.cfg.Aggregate.Log.Requests
-	return g.chain(config.AggregatePath, log, remote, a.authorize, ready, getServer), nil
+	rt := newRoute(key, again)
+	rt.mirrors, rt.agg = mirrors, agg
+	rt.handler = g.chain(sn, rt, config.AggregatePath, sn.cfg.Aggregate.Log.Requests, a.authorize, ready, getServer)
+	return rt, nil
 }
 
 // access returns the members a request may reach, given the credential of its Authorization
