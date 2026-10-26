@@ -18,6 +18,7 @@ In both, the config is `gate.yaml` and the secrets are in `gate.env` next to it,
 ```sh
 sudo install -m 0755 mcp-gate /usr/local/bin/mcp-gate
 sudo useradd --system --user-group --home-dir /var/lib/mcp-gate --shell /usr/sbin/nologin mcp-gate
+sudo install -d -o mcp-gate -g mcp-gate -m 0700 /var/lib/mcp-gate   # before anything runs with StateDirectory=
 sudo install -d -m 0755 /etc/mcp-gate
 sudo install -m 0640 -g mcp-gate gate.yaml /etc/mcp-gate/gate.yaml
 sudo install -m 0600 gate.env /etc/mcp-gate/gate.env      # root only: systemd reads it before dropping to mcp-gate
@@ -39,6 +40,7 @@ journalctl -u mcp-gate -f
 
 ```sh
 install -D -m 0755 mcp-gate ~/.local/bin/mcp-gate
+install -d -m 0700 ~/.local/state/mcp-gate   # before anything runs with StateDirectory=
 install -d -m 0700 ~/.config/mcp-gate
 install -m 0600 gate.yaml gate.env ~/.config/mcp-gate/
 install -D -m 0644 packaging/systemd/user/mcp-gate.service ~/.config/systemd/user/mcp-gate.service
@@ -61,7 +63,7 @@ systemd-run --user --pty --quiet -p EnvironmentFile="$HOME/.config/mcp-gate/gate
   ~/.local/bin/mcp-gate auth login ~/.config/mcp-gate/gate.yaml mail
 ```
 
-`StateDirectory=mcp-gate` sets `$STATE_DIRECTORY` to the service's directory, so no `-state-dir` is needed. `StateDirectoryMode=0700` and `UMask=0077` repeat the unit's settings: without them the transient unit would make the directory 0755, and files the command's children write there readable by others. A running gate picks up a new grant without a restart (see [auth](../commands/auth.md)).
+`StateDirectory=mcp-gate` sets `$STATE_DIRECTORY` to the service's directory, so no `-state-dir` is needed. Create the state directory before the first such command: when it is missing and a directory of the same name already exists in another of systemd's locations, such as the configuration directory, systemd makes the state directory a symbolic link to that one, and grants and pins end up next to the config. `StateDirectoryMode=0700` and `UMask=0077` repeat the unit's settings: without them the transient unit would make the directory 0755, and files the command's children write there readable by others. A running gate picks up a new grant without a restart (see [auth](../commands/auth.md)).
 
 ## Health and logs
 

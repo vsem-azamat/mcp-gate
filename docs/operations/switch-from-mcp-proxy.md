@@ -40,7 +40,7 @@ mcp-gate version
 ## 2. Import the config
 
 ```sh
-install -d -m 0700 ~/.config/mcp-gate
+install -d -m 0700 ~/.local/state/mcp-gate ~/.config/mcp-gate
 (umask 077; mcp-gate import /path/to/mcp-proxy/config.json > ~/.config/mcp-gate/gate.yaml)
 ```
 
