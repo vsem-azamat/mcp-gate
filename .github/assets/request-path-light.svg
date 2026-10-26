@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+<title id="t">How mcp-gate handles a call</title>
+<desc id="d">AI agents call mcp-gate, each with its own token. The gate authenticates the caller, checks that the tool is allowed and forwards the call to one MCP server. The result comes back through hiding of secrets in answers and in downloaded files, and a log. Calls that are not allowed are blocked. Optionally, redacted secrets are kept in memory for the owner, who reads them with a separate key.</desc>
+<defs>
+<marker id="a-req" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#0969da"/></marker>
+<marker id="a-res" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1a7f37"/></marker>
+<marker id="a-esc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8250df"/></marker>
+<marker id="a-deny" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#cf222e"/></marker>
+</defs>
+<text x="125" y="36" font-size="18" font-weight="600" fill="#1f2328" text-anchor="middle">AI agents</text>
+<text x="125" y="58" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">MCP clients</text>
+<text x="600.0" y="36" font-size="18" font-weight="600" fill="#1f2328" text-anchor="middle">mcp-gate</text>
+<text x="600.0" y="58" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">sits in between</text>
+<text x="1075" y="36" font-size="18" font-weight="600" fill="#1f2328" text-anchor="middle">MCP servers</text>
+<text x="1075" y="58" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">the tools your agents use</text>
+<rect x="20" y="136" width="210" height="68" rx="12" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<rect x="34" y="150" width="40" height="40" rx="9" fill="#eef1f4"/>
+<rect x="44" y="162" width="20" height="16" rx="5" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M54 162 v-4" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="50" cy="170" r="1.3" fill="#1f2328"/><circle cx="58" cy="170" r="1.3" fill="#1f2328"/>
+<text x="86" y="176" font-size="18" font-weight="600" fill="#1f2328" text-anchor="start">Claude Code</text>
+<rect x="20" y="226" width="210" height="68" rx="12" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<rect x="34" y="240" width="40" height="40" rx="9" fill="#eef1f4"/>
+<rect x="44" y="252" width="20" height="16" rx="5" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M54 252 v-4" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="50" cy="260" r="1.3" fill="#1f2328"/><circle cx="58" cy="260" r="1.3" fill="#1f2328"/>
+<text x="86" y="266" font-size="18" font-weight="600" fill="#1f2328" text-anchor="start">Codex</text>
+<rect x="20" y="316" width="210" height="68" rx="12" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<rect x="34" y="330" width="40" height="40" rx="9" fill="#eef1f4"/>
+<rect x="44" y="341" width="20" height="18" rx="3" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M44 346 h20 M49 351 h7 M49 355 h10" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="86" y="356" font-size="18" font-weight="600" fill="#1f2328" text-anchor="start">Cursor</text>
+<text x="125" y="412" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">each with its own access key</text>
+<path d="M230 170 H262" fill="none" stroke="#59636e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M230 260 H262" fill="none" stroke="#59636e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M230 350 H262" fill="none" stroke="#59636e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M262 170 V350" fill="none" stroke="#59636e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="300" y="80" width="600" height="450" rx="18" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="325" y="120" font-size="15" font-weight="600" fill="#0969da" text-anchor="start">request →</text>
+<rect x="326.0" y="133.0" width="168" height="74" rx="10" fill="#ffffff" stroke="#0969da" stroke-width="2"/>
+<text x="410.0" y="167.0" font-size="19" font-weight="600" fill="#1f2328" text-anchor="middle">Who is it?</text>
+<text x="410.0" y="189.0" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">checks the agent's key</text>
+<rect x="516.0" y="133.0" width="168" height="74" rx="10" fill="#ffffff" stroke="#0969da" stroke-width="2"/>
+<text x="600.0" y="167.0" font-size="19" font-weight="600" fill="#1f2328" text-anchor="middle">Allowed?</text>
+<text x="600.0" y="189.0" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">only tools you permit</text>
+<rect x="706.0" y="133.0" width="168" height="74" rx="10" fill="#ffffff" stroke="#0969da" stroke-width="2"/>
+<text x="790.0" y="167.0" font-size="19" font-weight="600" fill="#1f2328" text-anchor="middle">Pass it on</text>
+<text x="790.0" y="189.0" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">to the right tool</text>
+<path d="M262 170 H322.0" fill="none" stroke="#0969da" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M494.0 170 H512.0" fill="none" stroke="#0969da" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M684.0 170 H702.0" fill="none" stroke="#0969da" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M570 207.0 V219.0 H268" fill="none" stroke="#cf222e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#a-deny)"/>
+<text x="410" y="240.0" font-size="14.5" font-weight="600" fill="#cf222e" text-anchor="middle">blocked</text>
+<text x="325" y="300" font-size="15" font-weight="600" fill="#1a7f37" text-anchor="start">← answer</text>
+<rect x="516.0" y="313.0" width="358" height="74" rx="10" fill="#ffffff" stroke="#1a7f37" stroke-width="2"/>
+<text x="695.0" y="347.0" font-size="19" font-weight="600" fill="#1f2328" text-anchor="middle">Hide secrets</text>
+<text x="695.0" y="369.0" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">in answers and in downloaded files</text>
+<rect x="326.0" y="313.0" width="168" height="74" rx="10" fill="#ffffff" stroke="#1a7f37" stroke-width="2"/>
+<text x="410.0" y="347.0" font-size="19" font-weight="600" fill="#1f2328" text-anchor="middle">Keep a log</text>
+<text x="410.0" y="369.0" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">who did what, when</text>
+<path d="M516.0 350 H498.0" fill="none" stroke="#1a7f37" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<path d="M326.0 350 H268" fill="none" stroke="#1a7f37" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<path d="M790 387.0 V428" fill="none" stroke="#8250df" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 5" marker-end="url(#a-esc)"/>
+<rect x="690" y="432" width="200" height="70" rx="10" fill="#ffffff" stroke="#8250df" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="790.0" y="464.0" font-size="19" font-weight="600" fill="#1f2328" text-anchor="middle">Secret vault</text>
+<text x="790.0" y="486.0" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="middle">optional</text>
+<text x="670" y="462" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="end">hidden secrets wait here for a day,</text>
+<text x="670" y="483" font-size="14.5" font-weight="400" fill="#59636e" text-anchor="end">so you can still see them if needed</text>
+<path d="M790 618 V506" fill="none" stroke="#8250df" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-esc)"/>
+<text x="776" y="608" font-size="14.5" font-weight="600" fill="#8250df" text-anchor="end">only your key opens it</text>
+<rect x="970" y="136" width="210" height="68" rx="12" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<rect x="984" y="150" width="40" height="40" rx="9" fill="#eef1f4"/>
+<path d="M995 164 l6 6 l-6 6 M1005 177 h9" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1036" y="167" font-size="18" font-weight="600" fill="#1f2328" text-anchor="start">Files</text>
+<rect x="1036" y="175" width="39.9" height="22" rx="11" fill="#eef1f4"/>
+<text x="1055.95" y="191" font-size="13.5" font-weight="600" fill="#0969da" text-anchor="middle">MCP</text>
+<rect x="1081.9" y="175" width="54.5" height="22" rx="11" fill="#eef1f4"/>
+<text x="1109.15" y="191" font-size="13.5" font-weight="600" fill="#59636e" text-anchor="middle">local</text>
+<path d="M938 170 H970" fill="none" stroke="#59636e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="970" y="226" width="210" height="68" rx="12" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<rect x="984" y="240" width="40" height="40" rx="9" fill="#eef1f4"/>
+<path d="M995 254 l6 6 l-6 6 M1005 267 h9" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1036" y="257" font-size="18" font-weight="600" fill="#1f2328" text-anchor="start">Database</text>
+<rect x="1036" y="265" width="39.9" height="22" rx="11" fill="#eef1f4"/>
+<text x="1055.95" y="281" font-size="13.5" font-weight="600" fill="#0969da" text-anchor="middle">MCP</text>
+<rect x="1081.9" y="265" width="54.5" height="22" rx="11" fill="#eef1f4"/>
+<text x="1109.15" y="281" font-size="13.5" font-weight="600" fill="#59636e" text-anchor="middle">local</text>
+<path d="M938 260 H970" fill="none" stroke="#59636e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="970" y="316" width="210" height="68" rx="12" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.5"/>
+<rect x="984" y="330" width="40" height="40" rx="9" fill="#eef1f4"/>
+<circle cx="1004" cy="350" r="10" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><ellipse cx="1004" cy="350" rx="4.5" ry="10" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M994 350 h20" fill="none" stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1036" y="347" font-size="18" font-weight="600" fill="#1f2328" text-anchor="start">GitHub</text>
+<rect x="1036" y="355" width="39.9" height="22" rx="11" fill="#eef1f4"/>
+<text x="1055.95" y="371" font-size="13.5" font-weight="600" fill="#0969da" text-anchor="middle">MCP</text>
+<rect x="1081.9" y="355" width="61.8" height="22" rx="11" fill="#eef1f4"/>
+<text x="1112.8000000000002" y="371" font-size="13.5" font-weight="600" fill="#59636e" text-anchor="middle">online</text>
+<path d="M938 350 H970" fill="none" stroke="#59636e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M938 170 V350" fill="none" stroke="#59636e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M874.0 170 H934" fill="none" stroke="#0969da" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-req)"/>
+<path d="M938 350 H878.0" fill="none" stroke="#1a7f37" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#a-res)"/>
+<style>@media (prefers-reduced-motion: reduce){.trip{display:none}}</style>
+<g class="trip" opacity="0"><animateMotion path="M230 170 H970" dur="14s" repeatCount="indefinite" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.000;0.160;1.000"/><animate attributeName="opacity" values="0;0;1;1;0;0" dur="14s" repeatCount="indefinite" keyTimes="0.000;0.000;0.010;0.210;0.220;1.000"/><circle r="7" fill="#0969da" stroke="#ffffff" stroke-width="2.5"/><rect x="-90" y="-35" width="202.8" height="27" rx="7" fill="#ffffff" stroke="#0969da" stroke-width="1.5"/><text x="-81" y="-16" font-size="14.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1f2328">read_file("vpn.conf")</text></g>
+<g class="trip" opacity="0"><animateMotion path="M970 170 H938 V350 H878.0" dur="14s" repeatCount="indefinite" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.180;0.320;1.000"/><animate attributeName="opacity" values="0;0;1;1;0;0" dur="14s" repeatCount="indefinite" keyTimes="0.000;0.180;0.190;0.370;0.380;1.000"/><circle r="7" fill="#cf222e" stroke="#ffffff" stroke-width="2.5"/><rect x="-70" y="-33" width="167.60000000000002" height="27" rx="7" fill="#ffffff" stroke="#cf222e" stroke-width="1.5"/><text x="-61" y="-14" font-size="14.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1f2328">password: hunter2</text></g>
+<g class="trip" opacity="0"><animateMotion path="M512.0 350 H262 V170 H230" dur="14s" repeatCount="indefinite" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.340;0.540;1.000"/><animate attributeName="opacity" values="0;0;1;1;0;0" dur="14s" repeatCount="indefinite" keyTimes="0.000;0.340;0.350;0.590;0.600;1.000"/><circle r="7" fill="#1a7f37" stroke="#ffffff" stroke-width="2.5"/><rect x="-20" y="-33" width="246.8" height="27" rx="7" fill="#ffffff" stroke="#1a7f37" stroke-width="1.5"/><text x="-11" y="-14" font-size="14.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1f2328">password: [REDACTED #k3j5]</text></g>
+<g class="trip" opacity="0"><animateMotion path="M790 389.0 V436" dur="14s" repeatCount="indefinite" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.340;0.460;1.000"/><animate attributeName="opacity" values="0;0;1;1;0;0" dur="14s" repeatCount="indefinite" keyTimes="0.000;0.340;0.350;0.510;0.520;1.000"/><circle r="7" fill="#8250df" stroke="#ffffff" stroke-width="2.5"/><rect x="14" y="-11" width="79.60000000000001" height="27" rx="7" fill="#ffffff" stroke="#8250df" stroke-width="1.5"/><text x="23" y="8" font-size="14.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1f2328">hunter2</text></g>
+<g class="trip" opacity="0"><animateMotion path="M790 622 V506" dur="14s" repeatCount="indefinite" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.600;0.700;1.000"/><animate attributeName="opacity" values="0;0;1;1;0;0" dur="14s" repeatCount="indefinite" keyTimes="0.000;0.600;0.610;0.750;0.760;1.000"/><circle r="7" fill="#8250df" stroke="#ffffff" stroke-width="2.5"/><rect x="14" y="-11" width="88.4" height="27" rx="7" fill="#ffffff" stroke="#8250df" stroke-width="1.5"/><text x="23" y="8" font-size="14.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1f2328">your key</text></g>
+<g class="trip" opacity="0"><animateMotion path="M790 506 V622" dur="14s" repeatCount="indefinite" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0.000;0.740;0.920;1.000"/><animate attributeName="opacity" values="0;0;1;1;0;0" dur="14s" repeatCount="indefinite" keyTimes="0.000;0.740;0.750;0.970;0.980;1.000"/><circle r="7" fill="#8250df" stroke="#ffffff" stroke-width="2.5"/><rect x="14" y="-11" width="158.8" height="27" rx="7" fill="#ffffff" stroke="#8250df" stroke-width="1.5"/><text x="23" y="8" font-size="14.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1f2328">you get: hunter2</text></g>
+</svg>

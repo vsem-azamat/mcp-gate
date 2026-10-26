@@ -4,6 +4,8 @@
 
 A runbook for replacing a running mcp-proxy with mcp-gate on the same host without a gap: the gate runs beside the proxy on a second port, is compared with it, and takes over the clients only once it serves the same catalogs. The proxy stays installed and stopped, so a rollback is a restart away.
 
+mcp-proxy here is [TBXark/mcp-proxy](https://github.com/TBXark/mcp-proxy). Steps that mention redaction or escrow apply only to builds of it that add them; with upstream mcp-proxy, skip them.
+
 The examples use these placeholders:
 
 | Placeholder | Meaning |
