@@ -19,16 +19,17 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
 
-// Separator joins a server's name and a tool or prompt name in the aggregate catalog.
-const Separator = config.AggregateSeparator
-
-// MaxAggregateName is the longest tool or prompt name the aggregate catalog serves: the limit
-// many clients put on tool names.
-const MaxAggregateName = 64
+// separator joins a server's name and a tool or prompt name in the aggregate catalog.
+const separator = config.AggregateSeparator
 
 // aggregateNameRE is what an aggregate name may hold: the characters the MCP specification
-// allows in tool names, up to MaxAggregateName.
-var aggregateNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+// allows in tool names.
+var aggregateNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// validAggregateName reports whether a prefixed name fits the aggregate catalog.
+func validAggregateName(name string) bool {
+	return len(name) <= config.AggregateMaxName && aggregateNameRE.MatchString(name)
+}
 
 // accessKey is the TokenInfo.Extra key under which the aggregate route passes what a request may
 // reach: a map from each server it may reach to the token name that server knows it by.
@@ -121,10 +122,10 @@ func (a *Aggregate) Listed(server string) bool {
 	return a.listed[server]
 }
 
-// SplitName splits an aggregate tool or prompt name into the server and the server's own name.
-// Server names in the aggregate hold no Separator, so the first one ends the server's name.
-func SplitName(name string) (server, rest string, ok bool) {
-	return strings.Cut(name, Separator)
+// splitName splits an aggregate tool or prompt name into the server and the server's own name.
+// Server names in the aggregate hold no separator, so the first one ends the server's name.
+func splitName(name string) (server, rest string, ok bool) {
+	return strings.Cut(name, separator)
 }
 
 // refresh rebuilds the catalog after a member's changed and updates every view.
@@ -157,8 +158,8 @@ func (a *Aggregate) rebuild() {
 		c := m.Catalog()
 		a.cats[server] = c
 		for name, t := range c.Tools {
-			full := server + Separator + name
-			if !aggregateNameRE.MatchString(full) {
+			full := server + separator + name
+			if !validAggregateName(full) {
 				skipped["tool\x00"+full] = true
 				a.logSkipped(m, "tool", full)
 				continue
@@ -166,8 +167,8 @@ func (a *Aggregate) rebuild() {
 			a.tools[full] = routed[mcp.Tool]{server: server, name: name, entry: t}
 		}
 		for name, p := range c.Prompts {
-			full := server + Separator + name
-			if !aggregateNameRE.MatchString(full) {
+			full := server + separator + name
+			if !validAggregateName(full) {
 				skipped["prompt\x00"+full] = true
 				a.logSkipped(m, "prompt", full)
 				continue
@@ -178,12 +179,12 @@ func (a *Aggregate) rebuild() {
 	// Config validation keeps member names free of a trailing '_' and of the separator, so a
 	// name splits one way only; a clash would still be dropped rather than routed by chance.
 	for full, r := range a.tools {
-		if server, _, _ := SplitName(full); server != r.server {
+		if server, _, _ := splitName(full); server != r.server {
 			delete(a.tools, full)
 		}
 	}
 	for full, r := range a.prompts {
-		if server, _, _ := SplitName(full); server != r.server {
+		if server, _, _ := splitName(full); server != r.server {
 			delete(a.prompts, full)
 		}
 	}
@@ -194,7 +195,7 @@ func (a *Aggregate) logSkipped(m *Mirror, kind, full string) {
 	if a.skipped[kind+"\x00"+full] {
 		return
 	}
-	a.logger.Warn("left out of the aggregate catalog: the prefixed name is longer than 64 characters or holds characters outside A-Z a-z 0-9 _ . -",
+	a.logger.Warn(fmt.Sprintf("left out of the aggregate catalog: the prefixed name is longer than %d characters or holds characters outside A-Z a-z 0-9 _ . -", config.AggregateMaxName),
 		"server", m.Name(), "kind", kind, "name", m.logText(full))
 }
 
@@ -245,6 +246,7 @@ type View struct {
 	resources map[string]*mcp.Resource
 	templates map[string]*mcp.ResourceTemplate
 	claims    map[string]claim
+	dropped   map[string]bool // resources and templates left out as listed twice, by kind and key
 }
 
 // claim is what a server's catalog says it serves, for routing a resource read.
@@ -309,22 +311,37 @@ func (v *View) sync() {
 		}
 		v.claims[server] = cl
 	}
+	dropped := map[string]bool{}
 	for uri, n := range seenURI {
 		if n > 1 {
 			delete(resources, uri)
+			v.logDropped(dropped, "resource", uri)
 		}
 	}
 	for ut, n := range seenTemplate {
 		if n > 1 {
 			delete(templates, ut)
+			v.logDropped(dropped, "resource template", ut)
 		}
 	}
+	v.dropped = dropped
 	v.resources = syncSet(a.logger, a.logText, "resource", v.resources, resources, func(r *mcp.Resource) error {
 		return guard(func() { v.server.AddResource(r, v.readResource) })
 	}, v.server.RemoveResources)
 	v.templates = syncSet(a.logger, a.logText, "resource template", v.templates, templates, func(t *mcp.ResourceTemplate) error {
 		return guard(func() { v.server.AddResourceTemplate(t, v.readResource) })
 	}, v.server.RemoveResourceTemplates)
+}
+
+// logDropped records a resource or template left out because two of the view's servers list it,
+// and logs it the first time.
+func (v *View) logDropped(dropped map[string]bool, kind, key string) {
+	dropped[kind+"\x00"+key] = true
+	if v.dropped[kind+"\x00"+key] {
+		return
+	}
+	v.a.logger.Warn("left out of the aggregate catalog: more than one server lists it, so a read could not tell which is meant",
+		"kind", kind, "key", v.a.logText(key), "servers", len(v.servers))
 }
 
 // logText makes a name for the log as a mirror does, with every rule.
@@ -469,7 +486,7 @@ func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 		reached := new(bool)
 		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
 		if err != nil && !*reached {
-			if server, rest, ok := SplitName(name); ok {
+			if server, rest, ok := splitName(name); ok {
 				if extra, m, ok := v.admit(req.GetExtra(), server); ok {
 					v.a.mu.Lock()
 					skipped := v.a.skipped[key+"\x00"+name]

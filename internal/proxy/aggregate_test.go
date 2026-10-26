@@ -66,12 +66,12 @@ func TestAggregateNames(t *testing.T) {
 	for _, c := range []struct{ in, server, rest string }{
 		{"s__a", "s", "a"}, {"s__b__c", "s", "b__c"}, {"s_a", "", ""},
 	} {
-		server, rest, _ := SplitName(c.in)
+		server, rest, _ := splitName(c.in)
 		if c.server != "" && (server != c.server || rest != c.rest) {
-			t.Errorf("SplitName(%q) = %q %q", c.in, server, rest)
+			t.Errorf("splitName(%q) = %q %q", c.in, server, rest)
 		}
-		if _, _, ok := SplitName(c.in); ok != (c.server != "") {
-			t.Errorf("SplitName(%q) ok = %v", c.in, ok)
+		if _, _, ok := splitName(c.in); ok != (c.server != "") {
+			t.Errorf("splitName(%q) ok = %v", c.in, ok)
 		}
 	}
 }

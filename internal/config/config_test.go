@@ -604,6 +604,8 @@ servers:
   c.d: {stdio: {command: /bin/c}}
   e__f: {stdio: {command: /bin/e}}
   g_: {stdio: {command: /bin/g}}
+  hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh: {stdio: {command: /bin/h}}
+  iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii: {stdio: {command: /bin/i}}
 `
 	off, err := Parse([]byte("version: 1\n"+strings.Replace(strings.Replace(servers, "  e__f: {stdio: {command: /bin/e}}\n", "", 1), "  g_: {stdio: {command: /bin/g}}\n", "", 1)), noEnv)
 	if err != nil {
@@ -612,20 +614,22 @@ servers:
 	if off.AggregateMembers() != nil {
 		t.Errorf("members without aggregate: %v", off.AggregateMembers())
 	}
-	c, err := Parse([]byte("version: 1\naggregate: {servers: [c.d, b, a], log: {requests: true}}\n"+servers), noEnv)
+	c, err := Parse([]byte("version: 1\naggregate: {servers: [c.d, b, a, "+strings.Repeat("i", 61)+"], log: {requests: true}}\n"+servers), noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c.AggregateMembers(); !slices.Equal(got, []string{"a", "c.d"}) || !c.Aggregate.Log.Requests {
+	if got := c.AggregateMembers(); !slices.Equal(got, []string{"a", "c.d", strings.Repeat("i", 61)}) || !c.Aggregate.Log.Requests {
 		t.Errorf("members %v, the disabled b left out", got)
 	}
 	for doc, want := range map[string]string{
-		"aggregate: {}\n":                     `servers.e__f: a server on the aggregate endpoint cannot have "__" in its name`,
-		"aggregate: {servers: [g_]}\n":        `servers.g_: a server on the aggregate endpoint cannot have "__" in its name or end in '_'`,
-		"aggregate: {servers: []}\n":          "aggregate.servers: must name at least one server",
-		"aggregate: {servers: [a, nope]}\n":   "aggregate.servers[1]: is not a server in servers",
-		"aggregate: {servers: [a, a]}\n":      "aggregate.servers[1]: is listed twice",
-		"aggregate: {servers: [a], other: 1}": "field other not found",
+		"aggregate: {}\n": `servers.e__f: a server on the aggregate endpoint cannot have "__" in its name`,
+		"aggregate:\n":    "aggregate: has no value; write `aggregate: {}`",
+		"aggregate: {servers: [" + strings.Repeat("h", 62) + "]}\n": "servers." + strings.Repeat("h", 62) + ": a server on the aggregate endpoint has a name of at most 61 characters",
+		"aggregate: {servers: [g_]}\n":                              `servers.g_: a server on the aggregate endpoint cannot have "__" in its name or end in '_'`,
+		"aggregate: {servers: []}\n":                                "aggregate.servers: must name at least one server",
+		"aggregate: {servers: [a, nope]}\n":                         "aggregate.servers[1]: is not a server in servers",
+		"aggregate: {servers: [a, a]}\n":                            "aggregate.servers[1]: is listed twice",
+		"aggregate: {servers: [a], other: 1}":                       "field other not found",
 	} {
 		_, err := Parse([]byte("version: 1\n"+doc+"\n"+servers), noEnv)
 		if err == nil || !strings.Contains(err.Error(), want) {

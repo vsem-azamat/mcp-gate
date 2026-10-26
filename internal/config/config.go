@@ -92,6 +92,11 @@ const AggregatePath = "/mcp"
 // the name of a member server cannot hold it.
 const AggregateSeparator = "__"
 
+// AggregateMaxName is the longest tool or prompt name the aggregate catalog serves, the limit many
+// clients put on tool names. A member's name leaves room in it for the separator and one more
+// character.
+const AggregateMaxName = 64
+
 // Aggregate configures the aggregate endpoint.
 type Aggregate struct {
 	// Servers are the servers it serves; nil means every enabled server. A disabled server is
@@ -341,6 +346,9 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	if err := rejectPartial(data); err != nil {
 		return nil, err
 	}
+	if err := rejectNullAggregate(data); err != nil {
+		return nil, err
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var c Config
@@ -390,6 +398,22 @@ func rejectPartial(data []byte) error {
 	if found {
 		return fmt.Errorf("config: it was written by mcp-gate import --partial and has keys marked %q; "+
 			"remove those keys and their comments once you accept dropping them", PartialMarker)
+	}
+	return nil
+}
+
+// rejectNullAggregate fails when the top-level aggregate key has no value, which would decode to
+// the endpoint being off although the key is written.
+func rejectNullAggregate(data []byte) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil //nolint:nilerr // the decoder reports a malformed file with its own error
+	}
+	top := doc.Content[0].Content
+	for i := 0; i+1 < len(top); i += 2 {
+		if top[i].Value == "aggregate" && top[i+1].Tag == "!!null" {
+			return errors.New("aggregate: has no value; write `aggregate: {}` to serve every server at " + AggregatePath + ", or remove the key")
+		}
 	}
 	return nil
 }

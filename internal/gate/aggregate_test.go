@@ -48,15 +48,23 @@ func serversOf(t *testing.T, cs *mcp.ClientSession) []string {
 	return out
 }
 
-// lastCall returns the last audit line whose attribute key is value.
-func (r *running) lastCall(key, value string) map[string]any {
-	var out map[string]any
+// calls returns the audit lines whose attribute key is value.
+func (r *running) calls(key, value string) []map[string]any {
+	var out []map[string]any
 	for _, l := range r.logs.lines("call") {
 		if l[key] == value {
-			out = l
+			out = append(out, l)
 		}
 	}
 	return out
+}
+
+// lastCall returns the last audit line whose attribute key is value.
+func (r *running) lastCall(key, value string) map[string]any {
+	if lines := r.calls(key, value); len(lines) > 0 {
+		return lines[len(lines)-1]
+	}
+	return nil
 }
 
 func TestAggregateAccess(t *testing.T) {
@@ -103,21 +111,27 @@ func TestAggregateAccess(t *testing.T) {
 
 	// No way into a server the token cannot reach directly.
 	for _, c := range []struct {
-		cs   *mcp.ClientSession
-		tool string
+		cs              *mcp.ClientSession
+		tool, principal string
 	}{
-		{laptop, "beta__echo"},
-		{phone, "alpha__echo"},
-		{anon, "alpha__echo"},
-		{anon, "beta__echo"},
-		{laptop, "echo"},
-		{laptop, "nobody__echo"},
+		{laptop, "beta__echo", "laptop"},
+		{phone, "alpha__echo", "phone"},
+		{anon, "alpha__echo", ""},
+		{anon, "beta__echo", ""},
+		{laptop, "echo", "laptop"},
+		{laptop, "nobody__echo", "laptop"},
 	} {
+		before := len(r.calls("tool", c.tool))
 		if res, err := call(c.cs, c.tool); err == nil {
 			t.Errorf("%s was called: %v", c.tool, res)
 		}
-		if l := r.lastCall("tool", c.tool); l["server"] != "" || l["outcome"] != "denied" {
-			t.Errorf("audit line of the refused %s: %v", c.tool, l)
+		lines := r.calls("tool", c.tool)
+		if len(lines) != before+1 {
+			t.Errorf("refused %s as %q: %d new audit lines", c.tool, c.principal, len(lines)-before)
+			continue
+		}
+		if l := lines[len(lines)-1]; l["server"] != "" || l["outcome"] != "denied" || l["principal"] != c.principal {
+			t.Errorf("audit line of the refused %s as %q: %v", c.tool, c.principal, l)
 		}
 	}
 	// A tool the server's filter hides is refused by that server, as on its own route.
@@ -318,6 +332,14 @@ func TestAggregateResourceCollision(t *testing.T) {
 	rs, err := cs.ListResources(t.Context(), nil)
 	if err != nil || len(rs.Resources) != 0 {
 		t.Errorf("resources listed by both are served: %v %v", rs, err)
+	}
+	warned := map[string]int{}
+	for _, l := range r.logs.lines("left out of the aggregate catalog: more than one server lists it, so a read could not tell which is meant") {
+		key, _ := l["key"].(string)
+		warned[key]++
+	}
+	if warned["fake://info"] != 1 || warned["fake://items/{id}"] != 1 {
+		t.Errorf("warnings for the dropped entries: %v", warned)
 	}
 	for _, uri := range []string{"fake://info", "fake://items/7"} {
 		if _, err := cs.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: uri}); err == nil {

@@ -147,8 +147,11 @@ func (c *Config) validateAggregate(add func(path, format string, args ...any)) {
 		seen[name] = true
 	}
 	for _, name := range c.AggregateMembers() {
-		if strings.Contains(name, AggregateSeparator) || strings.HasSuffix(name, "_") {
+		switch {
+		case strings.Contains(name, AggregateSeparator) || strings.HasSuffix(name, "_"):
 			add("servers."+name, "a server on the aggregate endpoint cannot have %q in its name or end in '_', since %q separates it from tool names there; rename it or leave it out of aggregate.servers", AggregateSeparator, AggregateSeparator)
+		case len(name)+len(AggregateSeparator)+1 > AggregateMaxName:
+			add("servers."+name, "a server on the aggregate endpoint has a name of at most %d characters, so that its prefixed tool names fit in %d; rename it or leave it out of aggregate.servers", AggregateMaxName-len(AggregateSeparator)-1, AggregateMaxName)
 		}
 	}
 }

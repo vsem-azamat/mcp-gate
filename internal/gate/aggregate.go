@@ -2,7 +2,9 @@ package gate
 
 import (
 	"context"
+	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -67,9 +69,9 @@ func (g *Gate) aggregateRoute(remote upstream.RemoteFunc) (http.Handler, error) 
 		if !ok {
 			continue
 		}
-		key := viewKey(sortedKeys(access))
+		key := viewKey(slices.Sorted(maps.Keys(access)))
 		if a.views[key] == nil {
-			a.views[key] = agg.View(sortedKeys(access))
+			a.views[key] = agg.View(slices.Sorted(maps.Keys(access)))
 		}
 	}
 	// A request is served once startup is over, or once every server it may reach was listed or
@@ -148,7 +150,7 @@ func (a *aggregate) authorize(next http.Handler) http.Handler {
 		access, ok := a.access(upstream.Credential(header), strings.TrimSpace(header) != "")
 		var view *proxy.View
 		if ok {
-			view = a.views[viewKey(sortedKeys(access))]
+			view = a.views[viewKey(slices.Sorted(maps.Keys(access)))]
 		}
 		if view == nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -174,13 +176,4 @@ func principals(access map[string]string) string {
 	}
 	sort.Strings(names)
 	return strings.Join(names, ",")
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
