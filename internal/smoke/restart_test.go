@@ -327,8 +327,13 @@ servers:
 	}
 	// The stdio server inherits neither the passed socket nor systemd's variables.
 	var pids struct{ Sockets int }
-	if err := json.Unmarshal([]byte(callText(t, slowSession, "pids", nil)), &pids); err != nil || pids.Sockets != 0 {
-		t.Errorf("the stdio server has %d sockets open (%v)", pids.Sockets, err)
+	switch err := json.Unmarshal([]byte(callText(t, slowSession, "pids", nil)), &pids); {
+	case err != nil:
+		t.Errorf("pids: %v", err)
+	case pids.Sockets < 0:
+		t.Error("the stdio server cannot list its descriptors")
+	case pids.Sockets > 0:
+		t.Errorf("the stdio server has %d sockets open", pids.Sockets)
 	}
 	env := callText(t, slowSession, "env", nil)
 	for _, leak := range []string{"LISTEN_", "NOTIFY_SOCKET"} {
