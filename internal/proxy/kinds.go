@@ -67,6 +67,8 @@ func errUnknown(kind audit.Kind, shown string) error {
 	case audit.Resource:
 		return errUnknownResource(shown)
 	case audit.Tool:
+		return errUnknownTool(shown)
+	default:
+		return errUnknownTool(shown)
 	}
-	return errUnknownTool(shown) // a tool's, or what a request of no known kind gets
 }

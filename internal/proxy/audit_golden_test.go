@@ -190,7 +190,7 @@ func TestAuditMoreOutcomesGolden(t *testing.T) {
 	}
 	// A mirror of fullDown, listed, whose filter hides the template "items".
 	src := NewSource("s", logger)
-	src.Attach(fullDown(t))
+	src.Attach(onSession{fullDown(t)})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	src.Start(ctx)

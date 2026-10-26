@@ -177,16 +177,61 @@ func TestPromptAndResourcePipelines(t *testing.T) {
 	}
 }
 
+// TestPromptAndResourceRedaction checks that prompt and resource results are redacted, and that
+// the findings are counted in the audit record.
+func TestPromptAndResourceRedaction(t *testing.T) {
+	engine, err := redact.New(redact.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := &fakeDown{
+		prompt: &mcp.GetPromptResult{Messages: []*mcp.PromptMessage{{Role: "user", Content: &mcp.TextContent{Text: "token " + ghToken}}}},
+		read:   &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "x://y", Text: "token " + ghToken}}},
+	}
+	m, rec := fakeMirror(Options{Redaction: NewRedaction(engine, nil, 1<<20)}, down)
+	pres, err := m.getPrompt(t.Context(), &mcp.GetPromptRequest{Params: &mcp.GetPromptParams{Name: "greet"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rres, err := m.readResource(t.Context(), &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: "x://y"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "token [REDACTED:github_token]"
+	if tc, ok := pres.Messages[0].Content.(*mcp.TextContent); !ok || tc.Text != want {
+		t.Errorf("prompt %+v", pres.Messages[0].Content)
+	}
+	if got := rres.Contents[0].Text; got != want {
+		t.Errorf("resource %q", got)
+	}
+	records := []audit.Record{
+		{Server: "s", Kind: audit.Prompt, Name: "greet", Outcome: audit.OK, TokenPolicy: policy.NoPolicy, Redactions: 1},
+		{Server: "s", Kind: audit.Resource, Name: "x://y", Outcome: audit.OK, TokenPolicy: policy.NoPolicy, Redactions: 1},
+	}
+	if got := rec.all(); !slices.Equal(got, records) {
+		t.Errorf("records %+v", got)
+	}
+}
+
 // TestPipelineRefusesBeforeForward checks that the server's filter and the token's policy
 // refuse a hidden entry with the error of an unknown one, under the name the caller gave, and
 // that nothing reaches the server.
 func TestPipelineRefusesBeforeForward(t *testing.T) {
 	cfg := &config.Config{Policies: map[string]*config.TokenPolicy{"phone": {Servers: map[string]*config.ServerPolicy{
-		"s": {Tools: &config.PolicyFilter{Deny: []string{"mail"}}},
+		"s": {
+			Tools:     &config.PolicyFilter{Deny: []string{"mail"}},
+			Prompts:   &config.PolicyFilter{Deny: []string{"draft"}},
+			Resources: &config.PolicyFilter{Deny: []string{"x://private"}},
+		},
 	}}}}
-	down := &fakeDown{tool: textResult("x")}
+	down := &fakeDown{tool: textResult("x"), prompt: &mcp.GetPromptResult{}, read: &mcp.ReadResourceResult{}}
 	m, rec := fakeMirror(Options{
-		Policy: policy.New(&config.Server{Tools: &config.Filter{Deny: []string{"env"}}}), Tokens: policy.NewTokens(cfg, "s"),
+		Policy: policy.New(&config.Server{
+			Tools:     &config.Filter{Deny: []string{"env"}},
+			Prompts:   &config.Filter{Deny: []string{"secret"}},
+			Resources: &config.Filter{Deny: []string{"x://hidden"}},
+		}),
+		Tokens: policy.NewTokens(cfg, "s"),
 	}, down)
 	phone := &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "phone"}}
 	for _, c := range []struct {
@@ -201,12 +246,49 @@ func TestPipelineRefusesBeforeForward(t *testing.T) {
 			t.Errorf("%s: %v", c.name, err)
 		}
 	}
-	if len(down.tools) != 0 {
-		t.Errorf("forwarded %+v", down.tools)
+	for _, c := range []struct {
+		name, shown string
+		extra       *mcp.RequestExtra
+	}{
+		{"secret", "s__secret", nil}, // the server's filter
+		{"draft", "s__draft", phone}, // the token's policy
+	} {
+		_, err := m.getPromptAs(t.Context(), &mcp.GetPromptRequest{Params: &mcp.GetPromptParams{Name: c.name}, Extra: c.extra}, c.shown)
+		if err == nil || err.Error() != errUnknownPrompt(c.shown).Error() {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+	for _, c := range []struct {
+		uri   string
+		extra *mcp.RequestExtra
+	}{
+		{"x://hidden", nil},    // the server's filter
+		{"x://private", phone}, // the token's policy
+	} {
+		_, err := m.readResource(t.Context(), &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: c.uri}, Extra: c.extra})
+		if err == nil || err.Error() != errUnknownResource(c.uri).Error() {
+			t.Errorf("%s: %v", c.uri, err)
+		}
+	}
+	if len(down.tools)+len(down.prompts)+len(down.reads) != 0 {
+		t.Errorf("forwarded %+v %+v %+v", down.tools, down.prompts, down.reads)
+	}
+	// What each filter passes still goes through.
+	if _, err := m.getPromptAs(t.Context(), &mcp.GetPromptRequest{Params: &mcp.GetPromptParams{Name: "greet"}, Extra: phone}, "greet"); err != nil {
+		t.Errorf("greet: %v", err)
+	}
+	if _, err := m.readResource(t.Context(), &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: "x://open"}, Extra: phone}); err != nil {
+		t.Errorf("x://open: %v", err)
+	}
+	denied := func(principal string, kind audit.Kind, name string) audit.Record {
+		return audit.Record{Server: "s", Principal: principal, Kind: kind, Name: name, Outcome: audit.Denied, TokenPolicy: policy.NoPolicy}
 	}
 	want := []audit.Record{
-		{Server: "s", Kind: audit.Tool, Name: "env", Outcome: audit.Denied, TokenPolicy: policy.NoPolicy},
-		{Server: "s", Principal: "phone", Kind: audit.Tool, Name: "mail", Outcome: audit.Denied, TokenPolicy: policy.NoPolicy},
+		denied("", audit.Tool, "env"), denied("phone", audit.Tool, "mail"),
+		denied("", audit.Prompt, "secret"), denied("phone", audit.Prompt, "draft"),
+		denied("", audit.Resource, "x://hidden"), denied("phone", audit.Resource, "x://private"),
+		{Server: "s", Principal: "phone", Kind: audit.Prompt, Name: "greet", Outcome: audit.OK, TokenPolicy: policy.NoPolicy},
+		{Server: "s", Principal: "phone", Kind: audit.Resource, Name: "x://open", Outcome: audit.OK, TokenPolicy: policy.NoPolicy},
 	}
 	if got := rec.all(); !slices.Equal(got, want) {
 		t.Errorf("records %+v", got)

@@ -98,9 +98,9 @@ func (pl *pipeline[P, R]) run(ctx context.Context, x *exchange, p P) (R, error) 
 	return res, nil
 }
 
-// forward is the forward stage: it sends p downstream with the downstream _meta, and with the progress of the call routed
-// to the upstream request while it runs. ctx is the upstream request's: its cancellation cancels
-// the downstream call, and progress is sent on its stream.
+// forward is the forward stage: it sends p downstream with the downstream _meta, and with the
+// progress of the call routed to the upstream request while it runs. ctx is the upstream
+// request's: its cancellation cancels the downstream call, and progress is sent on its stream.
 func (pl *pipeline[P, R]) forward(ctx context.Context, x *exchange, p P) (R, error) {
 	m := x.m
 	down := downstreamMeta(x.meta, m.opts.ForwardMeta)
