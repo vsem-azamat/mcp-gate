@@ -205,7 +205,8 @@ func shape(t *testing.T, data []byte) string {
 
 // FuzzKeyLineRegions checks that the next-line key-value rule, matching only the regions
 // keyLineRegions returns, finds spans in order and apart, and every span it finds when it
-// matches the whole text (which misses a key line right after another).
+// matches the whole text (which misses a key line right after another). Inputs longer than the
+// key line window are skipped, since the regions bound how much of a line they hold.
 func FuzzKeyLineRegions(f *testing.F) {
 	for _, seed := range fuzzSeeds() {
 		f.Add(seed)
@@ -220,6 +221,9 @@ func FuzzKeyLineRegions(f *testing.F) {
 	whole := *regional
 	whole.regions = nil
 	f.Fuzz(func(t *testing.T, text string) {
+		if len(text) > maxKeyLineWindow {
+			return // the regions bound the key line and the value line
+		}
 		masked := maskEscapedBreaks(text)
 		got := e.ruleSpans(regional, masked)
 		for i := 1; i < len(got); i++ {

@@ -239,15 +239,16 @@ func (e *Engine) ruleSpans(r *rule, text string) []span {
 	}
 	var spans []span
 	for _, region := range r.regions(text) {
-		matches := r.re.FindAllStringSubmatchIndex(text[region[0]:region[1]], -1)
-		for _, match := range matches {
-			for k := range match {
-				if match[k] >= 0 {
-					match[k] += region[0]
-				}
+		match := r.re.FindStringSubmatchIndex(text[region.start:region.end])
+		if match == nil {
+			continue
+		}
+		for k := range match {
+			if match[k] >= 0 {
+				match[k] += region.start
 			}
 		}
-		spans = e.matchSpans(r, text, matches, spans)
+		spans = e.matchSpans(r, text, [][]int{match}, spans)
 	}
 	return spans
 }

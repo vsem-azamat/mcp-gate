@@ -231,13 +231,20 @@ func TestValueOnTheNextLine(t *testing.T) {
 	t.Parallel()
 
 	for text, want := range map[string]string{
-		pw + ":\nhunter22":                                                 pw + ":\n[REDACTED:password]",
-		pw + ":\nabc12":                                                    pw + ":\n[REDACTED:password]",
-		pw + ":\r\nhunter22\r\nnext":                                       pw + ":\r\n[REDACTED:password]\r\nnext",
-		pw + ": \t\n\thunter22 \nnext line":                                pw + ": \t\n\t[REDACTED:password] \nnext line",
-		"db:\n  " + pw + ":\n    hunter22\n  user: bob":                    "db:\n  " + pw + ":\n    [REDACTED:password]\n  user: bob",
-		"api_key =\n  \"sk12345678\"":                                      "api_key =\n  \"[REDACTED:secret]\"",
-		"$token =>\n  'abc12345',":                                         "$token =>\n  '[REDACTED:secret]',",
+		pw + ":\nhunter22":                              pw + ":\n[REDACTED:password]",
+		pw + ":\nabc12":                                 pw + ":\n[REDACTED:password]",
+		pw + ":\r\nhunter22\r\nnext":                    pw + ":\r\n[REDACTED:password]\r\nnext",
+		pw + ": \t\n\thunter22 \nnext line":             pw + ": \t\n\t[REDACTED:password] \nnext line",
+		"db:\n  " + pw + ":\n    hunter22\n  user: bob": "db:\n  " + pw + ":\n    [REDACTED:password]\n  user: bob",
+		"api_key =\n  \"sk12345678\"":                   "api_key =\n  \"[REDACTED:secret]\"",
+		"$token =>\n  'abc12345',":                      "$token =>\n  '[REDACTED:secret]',",
+		// Generated passwords that hold "=".
+		pw + ":\nKj8=xP2qLm":          pw + ":\n[REDACTED:password]",
+		pw + ":\nHunter=22x":          pw + ":\n[REDACTED:password]",
+		"TOKEN：\nabc12345":            "TOKEN：\n[REDACTED:secret]",
+		"PASSWORD=\nTOKEN：\nabc12345": "PASSWORD=\nTOKEN：\n[REDACTED:secret]",
+		// A long key line is matched near its separator.
+		strings.Repeat("x", 100000) + " token:\nabc12345":                  strings.Repeat("x", 100000) + " token:\n[REDACTED:secret]",
 		"PASSWORD=\nAPI_KEY=\nrealsecret99":                                "PASSWORD=\nAPI_KEY=\n[REDACTED:secret]",
 		"nextPageToken:\napi_key=\nrealsecret99":                           "nextPageToken:\napi_key=\n[REDACTED:secret]",
 		pw + ": \\t\nhunter22":                                             pw + ": \\t\n[REDACTED:password]",
@@ -261,6 +268,19 @@ func TestValueOnTheNextLine(t *testing.T) {
 	}
 	for _, text := range []string{
 		pw + ":\nusername: alice",
+		// .env templates.
+		"DB_PASSWORD=\nDB_HOST=\nDB_PORT=5432",
+		"SECRET_KEY=\nDEBUG=\n",
+		"API_TOKEN=\nlog_level=info",
+		// Code: a block header and its body.
+		"if token:\n    return",
+		"while " + pw + ":\n    pass",
+		"if not api_key:\n    continue",
+		"if secret:\n    yield",
+		"if token:\n    return None",
+		// A next line longer than the bound, and a key line whose key is beyond the window.
+		"token:\n" + strings.Repeat("y", maxNextLineValue+1),
+		"token" + strings.Repeat(" ", maxKeyLineWindow) + ":\nabc12345",
 		pw + ":\r\nusername: alice\r\n",
 		pw + ":\nusername:",
 		pw + ":\n  child: x\n  other: y",
