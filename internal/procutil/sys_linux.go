@@ -2,6 +2,8 @@ package procutil
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"os/signal"
 	"strconv"
@@ -17,8 +19,36 @@ func SetNonDumpable() error {
 	return unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0)
 }
 
+// oomRetryFor bounds how long setOOMScoreAdj retries a write the kernel refuses for lack of
+// permission. Start returns once the child's close-on-exec files are closed, which the kernel
+// does before it makes the new program dumpable again; until then the files under /proc/<pid>
+// belong to root and the gate may not open them for writing.
+const oomRetryFor = 500 * time.Millisecond
+
 func setOOMScoreAdj(pid, adj int) error {
-	return os.WriteFile("/proc/"+strconv.Itoa(pid)+"/oom_score_adj", []byte(strconv.Itoa(adj)), 0)
+	return retryDenied(func() error {
+		return os.WriteFile("/proc/"+strconv.Itoa(pid)+"/oom_score_adj", []byte(strconv.Itoa(adj)), 0)
+	}, oomRetryFor)
+}
+
+// retryDenied calls write until it succeeds, fails other than by an open refused for lack of
+// permission (EACCES or EPERM), or d has passed, waiting 1 ms after the first failure and twice
+// as long after each next one, up to 20 ms. It returns the last error. A write that the kernel
+// refuses once the file is open, such as a score below the child's oom_score_adj_min, is not
+// retried: it does not change.
+func retryDenied(write func() error, d time.Duration) error {
+	deadline := time.Now().Add(d)
+	wait := time.Millisecond
+	for {
+		err := write()
+		var pe *fs.PathError
+		openDenied := errors.As(err, &pe) && pe.Op == "open" && errors.Is(err, fs.ErrPermission)
+		if !openDenied || time.Now().Add(wait).After(deadline) {
+			return err
+		}
+		time.Sleep(wait)
+		wait = min(2*wait, 20*time.Millisecond)
+	}
 }
 
 // Reaper reaps orphaned descendants that the kernel reparents to the gate once it is a child
