@@ -282,12 +282,16 @@ func TestBlobs(t *testing.T) {
 		{"text", "text/markdown", []byte(secret), true, false},
 		{"json suffix", "application/vnd.api+json", []byte(`{"token":"abc-123-def"}`), true, false},
 		{"pem", "application/x-pem-file", []byte(secret), true, false},
-		{"binary type", "application/octet-stream", []byte(secret), false, false},
-		{"no type", "", []byte(secret), false, false},
+		{"untyped text", "application/octet-stream", []byte(secret), true, false},
+		{"no type, text", "", []byte(secret), true, false},
+		{"untyped binary", "application/octet-stream", append([]byte{0}, secret...), false, false},
+		{"no type, not UTF-8", "", append([]byte{0xff, 0xfe}, secret...), false, false},
 		{"text not UTF-8", "text/plain", append([]byte{0xff, 0xfe}, secret...), false, true},
 		{"binary not UTF-8", "image/png", append([]byte{0xff, 0xfe}, secret...), false, false},
 		{"text over the cap", "text/plain", big, false, true},
-		{"binary over the cap", "application/octet-stream", big, false, false},
+		{"binary over the cap", "image/png", big, false, false},
+		{"untyped text over the cap", "application/octet-stream", big, false, true},
+		{"untyped binary over the cap", "", append([]byte{0}, big...), false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
