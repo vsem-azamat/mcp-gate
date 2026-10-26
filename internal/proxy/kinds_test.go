@@ -2,9 +2,15 @@ package proxy
 
 import (
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/vsem-azamat/mcp-gate/internal/config"
+	"github.com/vsem-azamat/mcp-gate/internal/policy"
 )
 
 // TestUnknownErrors checks that the errors the gate gives for an entry the caller may not see
@@ -67,4 +73,45 @@ func connectTo(t *testing.T, s *mcp.Server) *mcp.ClientSession {
 	}
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
+}
+
+// countingDown counts the calls that reach the downstream.
+type countingDown struct {
+	stubDown
+	calls *int
+}
+
+func (d countingDown) Call(ctx context.Context, fn func(context.Context, *mcp.ClientSession) error) error {
+	*d.calls++
+	return d.stubDown.Call(ctx, fn)
+}
+
+// The handlers check access with the token's policy itself: a name the mirror does not hold is
+// refused when the policy hides it, and labelled none in the audit line.
+func TestHandlersCheckThePolicy(t *testing.T) {
+	var logs strings.Builder
+	cfg := &config.Config{Policies: map[string]*config.TokenPolicy{"phone": {Servers: map[string]*config.ServerPolicy{
+		"s": {Tools: &config.PolicyFilter{Allow: []string{"echo"}}, Resources: &config.PolicyFilter{None: true}},
+	}}}}
+	m := New(Options{
+		Name: "s", Policy: policy.New(&config.Server{}), Tokens: policy.NewTokens(cfg, "s"),
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	calls := 0
+	m.Attach(countingDown{calls: &calls})
+	extra := &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "phone"}}
+	_, err := m.callTool(t.Context(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "ghost"}, Extra: extra})
+	if err == nil || err.Error() != errUnknownTool("ghost").Error() {
+		t.Errorf("ghost: %v", err)
+	}
+	_, err = m.readResource(t.Context(), &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: "x://y"}, Extra: extra})
+	if err == nil || err.Error() != errUnknownResource("x://y").Error() {
+		t.Errorf("x://y: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("%d calls reached the downstream", calls)
+	}
+	if n := strings.Count(logs.String(), `"outcome":"denied","tokenPolicy":"none"`); n != 2 {
+		t.Errorf("audit lines: %s", logs.String())
+	}
 }

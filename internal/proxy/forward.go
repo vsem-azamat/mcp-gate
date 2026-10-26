@@ -157,7 +157,7 @@ func (m *Mirror) callToolAs(ctx context.Context, req *mcp.CallToolRequest, shown
 	defer c.end()
 	c.req = Request{Method: "tools/call", Name: name, Arguments: toolArguments(req.Params.Arguments)}
 	c.decision = m.decision(c.principal, keyTool, name)
-	if !m.opts.Policy.Tools.Allows(name) || c.decision == policy.Denied {
+	if !m.opts.Policy.Tools.Allows(name) || !m.tokenAllows(c.principal, keyTool, name) {
 		c.outcome = outcomeDenied
 		return nil, errUnknownTool(shown)
 	}
@@ -215,7 +215,7 @@ func (m *Mirror) getPromptAs(ctx context.Context, req *mcp.GetPromptRequest, sho
 	defer c.end()
 	c.req = Request{Method: "prompts/get", Name: name, Arguments: promptArguments(req.Params.Arguments)}
 	c.decision = m.decision(c.principal, keyPrompt, name)
-	if !m.opts.Policy.Prompts.Allows(name) || c.decision == policy.Denied {
+	if !m.opts.Policy.Prompts.Allows(name) || !m.tokenAllows(c.principal, keyPrompt, name) {
 		c.outcome = outcomeDenied
 		return nil, errUnknownPrompt(shown)
 	}
@@ -243,7 +243,7 @@ func (m *Mirror) readResource(ctx context.Context, req *mcp.ReadResourceRequest)
 	defer c.end()
 	c.req = Request{Method: "resources/read", Name: uri}
 	c.decision = m.decision(c.principal, keyURI, uri)
-	if !m.opts.Policy.ReadAllowed(uri) || c.decision == policy.Denied {
+	if !m.opts.Policy.ReadAllowed(uri) || !m.tokenAllows(c.principal, keyURI, uri) {
 		c.outcome = outcomeDenied
 		return nil, errUnknownResource(uri)
 	}
@@ -388,33 +388,48 @@ func (m *Mirror) servesSpelling(uri string) bool {
 	return m.served.keys[key]
 }
 
-// decision returns what the policy of the token named principal decides about a tool, a prompt
-// or a resource read. A policy decides only about what the mirrored catalog holds: a name it
-// does not have, or a URI it does not serve in any spelling, is NoPolicy, so that the audit
-// line does not credit a policy with what the server's own filter or the server itself refused.
-func (m *Mirror) decision(principal string, key auditKey, name string) policy.Decision {
+// tokenAllows reports whether the policy of the token named principal on the server passes a
+// tool, a prompt or a resource read; true for a token without one. It is the access check, and
+// does not depend on what the mirror holds.
+func (m *Mirror) tokenAllows(principal string, key auditKey, name string) bool {
 	v := m.views[principal]
 	if v == nil || principal == "" {
-		return policy.NoPolicy
+		return true
 	}
 	switch key {
 	case keyTool:
-		if m.mirrored(keyTool, name) {
-			return policy.DecisionOf(v.policy.Tools.Allows(name))
-		}
+		return v.policy.Tools.Allows(name)
 	case keyPrompt:
-		if m.mirrored(keyPrompt, name) {
-			return policy.DecisionOf(v.policy.Prompts.Allows(name))
-		}
+		return v.policy.Prompts.Allows(name)
 	case keyURI:
-		if m.servesSpelling(name) {
-			m.mu.Lock()
-			reads := v.reads
-			m.mu.Unlock()
-			return policy.DecisionOf(reads.Allowed(name))
-		}
+		m.mu.Lock()
+		reads := v.reads
+		m.mu.Unlock()
+		return reads.Allowed(name)
 	}
-	return policy.NoPolicy
+	return false
+}
+
+// decision labels, for the audit line, what the policy of the token named principal decided
+// about a tool, a prompt or a resource read. Only what the mirrored catalog holds is labelled: a
+// name it does not have, or a URI it does not serve in any spelling, is NoPolicy, so that the
+// line does not credit a policy with what the server's own filter or the server itself refused.
+// Access is checked by tokenAllows, never by this label.
+func (m *Mirror) decision(principal string, key auditKey, name string) policy.Decision {
+	if v := m.views[principal]; v == nil || principal == "" {
+		return policy.NoPolicy
+	}
+	held := false
+	switch key {
+	case keyTool, keyPrompt:
+		held = m.mirrored(key, name)
+	case keyURI:
+		held = m.servesSpelling(name)
+	}
+	if !held {
+		return policy.NoPolicy
+	}
+	return policy.DecisionOf(m.tokenAllows(principal, key, name))
 }
 
 // principalOf returns the token name of a request, or "".

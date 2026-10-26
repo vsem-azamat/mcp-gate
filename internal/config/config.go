@@ -118,7 +118,8 @@ type PolicyFilter struct {
 	Deny  []string `yaml:"deny"`
 }
 
-// UnmarshalYAML decodes PolicyNone or a mapping with the keys allow and deny, strictly.
+// UnmarshalYAML decodes PolicyNone or a mapping with the keys allow and deny, strictly. Parse
+// checks the form first, naming the field; these errors are a fallback with the line only.
 func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
 	switch n.Kind {
 	case yaml.ScalarNode:
@@ -154,18 +155,6 @@ func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
 	case yaml.DocumentNode, yaml.SequenceNode, yaml.AliasNode:
 	}
 	return fmt.Errorf("line %d: a policy filter is %q or a mapping with allow or deny", n.Line, PolicyNone)
-}
-
-// Filter returns f as a server filter of prompts or resources would read it: PolicyNone as an
-// empty allow list. f may be nil.
-func (f *PolicyFilter) Filter() *Filter {
-	switch {
-	case f == nil:
-		return nil
-	case f.None:
-		return &Filter{Allow: []string{}}
-	}
-	return &Filter{Allow: f.Allow, Deny: f.Deny}
 }
 
 // ServerPolicy returns the policy of the token named token on server; nil when it has none.
@@ -441,6 +430,9 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	if err := rejectNullAggregate(data); err != nil {
 		return nil, err
 	}
+	if err := checkPolicyFilters(data); err != nil {
+		return nil, err
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var c Config
@@ -492,6 +484,85 @@ func rejectPartial(data []byte) error {
 			"remove those keys and their comments once you accept dropping them", PartialMarker)
 	}
 	return nil
+}
+
+// policyKinds are the filters of a token policy on a server, and the entries each hides.
+var policyKinds = map[string]string{"tools": "tool", "prompts": "prompt", "resources": "resource"}
+
+// checkPolicyFilters checks the form of every token policy filter before the file is decoded,
+// so that each problem names its field: a filter written without a value, which would decode
+// to no filter and narrow nothing, a value other than PolicyNone or a mapping, and a mapping
+// with keys other than allow and deny, or one of them twice. Anything else malformed is left to
+// the decoder.
+func checkPolicyFilters(data []byte) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil || len(doc.Content) == 0 {
+		return nil //nolint:nilerr // the decoder reports a malformed file with its own error
+	}
+	var errs []error
+	add := func(path, format string, args ...any) {
+		errs = append(errs, fmt.Errorf("%s: %s", path, fmt.Sprintf(format, args...)))
+	}
+	policies := mappingValue(doc.Content[0], "policies")
+	for token, p := range mappingEntries(policies) {
+		for server, sp := range mappingEntries(mappingValue(p, "servers")) {
+			for kind, f := range mappingEntries(sp) {
+				noun, ok := policyKinds[kind]
+				if !ok {
+					continue
+				}
+				path := "policies." + token + ".servers." + server + "." + kind
+				switch {
+				case f.Tag == "!!null":
+					add(path, "has no value; write `%s: %s` to hide every %s, or remove the key", kind, PolicyNone, noun)
+				case f.Kind == yaml.ScalarNode && (f.Tag != "!!str" || f.Value != PolicyNone):
+					add(path, "must be %s or a mapping with allow or deny", PolicyNone)
+				case f.Kind == yaml.MappingNode:
+					seen := map[string]bool{}
+					for i := 0; i+1 < len(f.Content); i += 2 {
+						k := f.Content[i].Value
+						switch {
+						case k != "allow" && k != "deny":
+							add(path, "has the key %s; only allow and deny are known", k)
+						case seen[k]:
+							add(path+"."+k, "is set twice")
+						}
+						seen[k] = true
+					}
+				case f.Kind != yaml.ScalarNode:
+					add(path, "must be %s or a mapping with allow or deny", PolicyNone)
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// mappingValue returns the value of key in a mapping node, or nil.
+func mappingValue(n *yaml.Node, key string) *yaml.Node {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == key {
+			return n.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// mappingEntries yields the keys and values of a mapping node; nothing for any other node.
+func mappingEntries(n *yaml.Node) func(func(string, *yaml.Node) bool) {
+	return func(yield func(string, *yaml.Node) bool) {
+		if n == nil || n.Kind != yaml.MappingNode {
+			return
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if !yield(n.Content[i].Value, n.Content[i+1]) {
+				return
+			}
+		}
+	}
 }
 
 // rejectNullAggregate fails when the top-level aggregate key has no value, which would decode to

@@ -663,9 +663,6 @@ policies:
 	if p := c.ServerPolicy("agent", "a"); p == nil || !slices.Equal(p.Tools.Allow, []string{"search"}) || !p.Prompts.None || p.Resources != nil {
 		t.Errorf("agent on a: %+v", p)
 	}
-	if f := c.ServerPolicy("agent", "a").Prompts.Filter(); f == nil || f.Allow == nil || len(f.Allow) != 0 {
-		t.Errorf("none reads as an empty allow list: %+v", f)
-	}
 	if c.ServerPolicy("agent", "b") != nil || c.ServerPolicy("laptop", "a") != nil || c.ServerPolicy("bot", "b") == nil {
 		t.Error("a policy applies where none is written, or is missing")
 	}
@@ -690,8 +687,11 @@ policies:
 		"policies: {agent: {servers: {a: {tools: {allow: [\"x \"]}}}}}":       "policies.agent.servers.a.tools.allow[0]: cannot have surrounding space",
 		"policies: {agent: {servers: {a: {tools: {allow: [x, x]}}}}}":         "policies.agent.servers.a.tools.allow[1]: is listed twice",
 		"policies: {agent: {servers: {a: {tools: {deny: [a__echo]}}}}}":       `policies.agent.servers.a.tools.deny[0]: names the tool as the aggregate endpoint does; write the server's own name for it, without "a__"`,
-		"policies: {agent: {servers: {a: {tools: all}}}}":                     `a policy filter is "none" or a mapping with allow or deny`,
-		"policies: {agent: {servers: {a: {tools: {allow: [x], other: 1}}}}}":  "field other not found in a policy filter",
+		"policies: {agent: {servers: {a: {tools: all}}}}":                     "policies.agent.servers.a.tools: must be none or a mapping with allow or deny",
+		"policies: {agent: {servers: {a: {tools: [x]}}}}":                     "policies.agent.servers.a.tools: must be none or a mapping with allow or deny",
+		"policies: {agent: {servers: {a: {tools: {allow: [x], other: 1}}}}}":  "policies.agent.servers.a.tools: has the key other; only allow and deny are known",
+		"policies: {agent: {servers: {a: {tools: ~, prompts: none}}}}":        "policies.agent.servers.a.tools: has no value; write `tools: none` to hide every tool, or remove the key",
+		"policies:\n  agent:\n    servers:\n      a:\n        resources:\n":   "policies.agent.servers.a.resources: has no value; write `resources: none` to hide every resource",
 		"policies: {agent: {servers: {a: {tools: {allow: [x]}, other: 1}}}}":  "field other not found",
 	} {
 		_, err := Parse([]byte("version: 1\n"+doc+"\n"+servers), noEnv)

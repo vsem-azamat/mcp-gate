@@ -217,9 +217,12 @@ type Entry struct{ Key, Name string }
 // under an allow list a matching template the filter passes and under a deny list no matching
 // template the filter hides. It is also refused when the comparison key of the URI is that of a
 // listed resource the filter hides or, under a deny list, of an entry the list names, so that a
-// template does not reach a hidden resource by another spelling. It errs towards refusing.
+// template does not reach a hidden resource by another spelling. Under a deny list the key drops
+// the query, so every query of a hidden URI is refused; under an allow list it keeps it, so
+// that hiding db://t?id=1 does not refuse db://t?id=2. It errs towards refusing.
 type Reads struct {
-	all       bool // no filter
+	key       func(string) string // the comparison key: NormalizeURI, keeping the query unless under a deny list
+	all       bool                // no filter
 	none      bool
 	deny      bool
 	listed    map[string]bool     // listed URI → whether the filter passes it
@@ -234,15 +237,22 @@ type readTemplate struct {
 
 // NewReads compiles the reads l allows from a catalog.
 func NewReads(l list, resources, templates []Entry) *Reads {
-	r := &Reads{all: l.any, none: l.none, deny: l.Deny(), listed: make(map[string]bool, len(resources)), blocked: map[string]struct{}{}}
+	r := &Reads{
+		key: normalizeKeepingQuery, all: l.any, none: l.none, deny: l.Deny(),
+		listed: make(map[string]bool, len(resources)), blocked: map[string]struct{}{},
+	}
+	if r.deny {
+		// A deny list refuses every query of a URI it names or hides.
+		r.key = NormalizeURI
+	}
 	for _, v := range l.Listed() {
-		r.blocked[NormalizeURI(v)] = struct{}{}
+		r.blocked[r.key(v)] = struct{}{}
 	}
 	for _, e := range resources {
 		passes := l.Allows(e.Key, e.Name)
 		r.listed[e.Key] = passes
 		if !passes {
-			r.blocked[NormalizeURI(e.Key)] = struct{}{}
+			r.blocked[r.key(e.Key)] = struct{}{}
 		}
 	}
 	for _, e := range templates {
@@ -261,7 +271,7 @@ func (r *Reads) Allowed(uri string) bool {
 	case r.none:
 		return false
 	}
-	if _, blocked := r.blocked[NormalizeURI(uri)]; blocked {
+	if _, blocked := r.blocked[r.key(uri)]; blocked {
 		return false
 	}
 	if passes, ok := r.listed[uri]; ok {
@@ -290,6 +300,23 @@ func (r *Reads) Allowed(uri string) bool {
 // "fake:///hidden" and "fake:hidden" share it. It keeps the case of the path and errs towards
 // treating different URIs as one, which under a deny list refuses more, never less.
 func NormalizeURI(raw string) string {
+	raw, _, _ = strings.Cut(decodeAll(raw), "?")
+	return normalizeDecoded(raw)
+}
+
+// normalizeKeepingQuery returns the key of NormalizeURI followed by the URI's decoded query,
+// if it has one, so that URIs that differ only in their query keep different keys.
+func normalizeKeepingQuery(raw string) string {
+	raw, query, _ := strings.Cut(decodeAll(raw), "?")
+	key := normalizeDecoded(raw)
+	if query == "" {
+		return key
+	}
+	return key + "?" + query
+}
+
+// decodeAll decodes every percent-encoding until none is left and drops the fragment.
+func decodeAll(raw string) string {
 	// Decoding can form a new escape ("%7%30" becomes "%70"), so repeat until nothing changes.
 	// Each pass shortens the string or leaves it unchanged.
 	for {
@@ -300,7 +327,11 @@ func NormalizeURI(raw string) string {
 		raw = n
 	}
 	raw, _, _ = strings.Cut(raw, "#")
-	raw, _, _ = strings.Cut(raw, "?")
+	return raw
+}
+
+// normalizeDecoded is NormalizeURI for a decoded URI without query or fragment.
+func normalizeDecoded(raw string) string {
 	scheme, rest, ok := strings.Cut(raw, ":")
 	if !ok || scheme == "" || strings.ContainsAny(scheme, "/") {
 		return cleanPath(raw)

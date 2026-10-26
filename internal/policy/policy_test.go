@@ -137,6 +137,33 @@ func TestReadAllowed(t *testing.T) {
 	}
 }
 
+// Under an allow list the comparison keeps the query, so that hiding one query of a URI does
+// not refuse the others; under a deny list it drops it, so that none of them is read.
+func TestReadQueries(t *testing.T) {
+	resources := []Entry{{"db://t?id=1", "one"}}
+	templates := []Entry{{"db://t{?id}", "rows"}}
+	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"rows"}}})
+	allow.SetCatalog(resources, templates)
+	deny := New(&config.Server{Resources: &config.Filter{Deny: []string{"one"}}})
+	deny.SetCatalog(resources, templates)
+	for _, c := range []struct {
+		p    *Policy
+		uri  string
+		want bool
+	}{
+		{allow, "db://t?id=2", true},
+		{allow, "db://t?id=1", false},
+		{allow, "DB://t?id=%31", false},
+		{allow, "db://t", true},
+		{deny, "db://t?id=2", false},
+		{deny, "db://t", false},
+	} {
+		if got := c.p.ReadAllowed(c.uri); got != c.want {
+			t.Errorf("ReadAllowed(%q) = %v, want %v", c.uri, got, c.want)
+		}
+	}
+}
+
 func TestTokenPolicies(t *testing.T) {
 	cfg := &config.Config{Policies: map[string]*config.TokenPolicy{
 		"agent": {Servers: map[string]*config.ServerPolicy{
