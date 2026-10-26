@@ -30,6 +30,7 @@ body:
       options:
         - systemd system unit
         - systemd user unit
+        - launchd or by hand (macOS)
         - other (describe below)
     validations:
       required: true

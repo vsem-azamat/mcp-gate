@@ -14,7 +14,7 @@ A release is a `v*` tag on `main`. Only the maintainer creates tags. Pushing the
    After each build, a hook runs the [binary smoke test](testing.md#binary-smoke-test) against the binary when it is for the build machine's OS and architecture, so a broken linux/amd64 binary stops the release.
    GoReleaser is given the pushed tag (`GORELEASER_CURRENT_TAG`), so a final tag on the commit of an rc tag builds the final version.
 4. It packs `mcp-gate_<version>_<os>_<arch>.tar.gz` with `LICENSE`, `README.md` and the [systemd units](../operations/systemd.md) `packaging/systemd/mcp-gate.service` and `packaging/systemd/user/mcp-gate.service` (every file with the commit's date as file time and `root:root` as owner, so the same commit gives the same archives), writes `checksums.txt` (SHA-256), and publishes a GitHub release with a changelog from the commits since the previous tag: `feat` commits under Features, `fix` under Fixes, the rest under Other changes, leaving out `chore`, `docs`, `test` and `ci`. A pre-release tag such as `v0.2.0-rc.1` gives a pre-release.
-5. [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance) signs SLSA build provenance for every archive and `checksums.txt` and stores it with the repository's attestations. The attestation sits beside the files; it changes neither them nor their checksums.
+5. A separate job, the only one that can sign, downloads the published archives and `checksums.txt`, checks the archives against the checksums, and [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance) signs SLSA build provenance for each of them and stores it with the repository's attestations. The tests and the build run third-party code, so they never hold the signing token. The attestation sits beside the files; it changes neither them nor their checksums.
 
 A build that was given no version, such as `go build` from a checkout or a snapshot, prints `dev` from `mcp-gate version`, followed by the commit when the toolchain recorded one.
 
@@ -26,7 +26,7 @@ make release-check
 
 GoReleaser is pinned by version in `ci.yml`, `release.yml` and the Makefile, and Dependabot does not update it: upgrade all three together by hand. `make repo` fails while they differ.
 
-When a release fails midway, GoReleaser may leave a draft release; delete it on the Releases page. When the cause was outside the repository, re-run the workflow for the tag. When it is in the tagged commit, fix it on `main` and push a new version tag. When only the attestation step failed, the release is already published, without an attestation; fix the cause and push a new version tag.
+When a release fails midway, GoReleaser may leave a draft release; delete it on the Releases page. When the cause was outside the repository, re-run the workflow for the tag. When it is in the tagged commit, fix it on `main` and push a new version tag. When only the Build provenance job failed, the release is already published, without an attestation; re-run that job alone.
 
 ## Verifying A Release
 

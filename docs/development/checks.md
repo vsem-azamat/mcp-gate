@@ -58,13 +58,13 @@ GoReleaser is the exception: CI runs it through `goreleaser/goreleaser-action` a
 
 ## CI
 
-[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs on every pull request and on pushes to `main`, with read-only permissions. A new push to a pull request cancels its running checks; runs on `main` are never cancelled. The jobs are Repository checks (`make repo tidy-check`), Lint, Test, Test (macOS), Vulnerabilities and Release config (see [Releasing](releasing.md)). Test (macOS) runs `make test` on an arm64 macOS runner, so the code and tests behind `darwin` and `!linux` build tags build and run; the other jobs do not depend on the platform and run on Linux only. The `CI` job succeeds only when all of them succeed and is the one status check to require. Pull requests are also scanned for secrets by the GitGuardian app, outside CI; [`.gitguardian.yaml`](../../.gitguardian.yaml) excludes test files and `testdata/`, which hold made-up credentials. Actions are pinned to full commit SHAs with the version in a comment.
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs on every pull request and on pushes to `main`, with read-only permissions. A new push to a pull request cancels its running checks; runs on `main` are never cancelled. The jobs are Repository checks (`make repo tidy-check`), Lint, Test, Test (macOS), Vulnerabilities and Release config (see [Releasing](releasing.md)). Test (macOS) runs `make test` on an arm64 macOS runner, so the code and tests for darwin (`darwin` and `!linux` build tags) build and run; the other jobs do not depend on the platform and run on Linux only. The `CI` job succeeds only when all of them succeed and is the one status check to require. Pull requests are also scanned for secrets by the GitGuardian app, outside CI; [`.gitguardian.yaml`](../../.gitguardian.yaml) excludes test files and `testdata/`, which hold made-up credentials. Actions are pinned to full commit SHAs with the version in a comment.
 
 ## Dependency Updates
 
 Dependabot ([`.github/dependabot.yml`](../../.github/dependabot.yml)) opens grouped pull requests every week:
 
-- the product's Go module;
+- the product's Go module, titled `fix(deps)` so that the release changelog lists them;
 - the tool modules, limited to the tools themselves: their other requirements are indirect and stay at what each tool was released with, since bumping them on their own breaks the build;
 - GitHub Actions, which covers the action SHAs.
 

@@ -57,6 +57,8 @@ checksum:
 changelog:
   use: github
   sort: asc
+  # Dependabot titles updates of the product's module fix(deps), so they stay in; updates of the
+  # tools and actions are chore and are left out.
   filters:
     exclude:
       - "^(chore|docs|test|ci)(\\(.+\\))?!?:"
