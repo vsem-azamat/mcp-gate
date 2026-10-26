@@ -1,0 +1,64 @@
+# mcp-gate as a user service: `systemctl --user`, run by the user who owns the stdio servers'
+# files. Install and adjust as described in docs/operations/systemd.md; change it with
+# `systemctl --user edit mcp-gate`, not by editing this file in place. For the service to run
+# without a login session, enable lingering: `loginctl enable-linger <user>`.
+[Unit]
+Description=mcp-gate: MCP gateway
+Documentation=https://github.com/vsem-azamat/mcp-gate/blob/main/docs/operations/README.md
+# A config that does not load exits with status 2 at once; stop retrying after a few tries.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+# ~/.local/state/mcp-gate: learned pins (pins.json) and OAuth grants (oauth/). The gate reads it
+# from $STATE_DIRECTORY, so serve and the auth commands run through systemd need no -state-dir.
+StateDirectory=mcp-gate
+StateDirectoryMode=0700
+# ~/.config/mcp-gate: gate.yaml, and gate.env (0600) with the secrets the config names as
+# ${VAR} and MCP_HUB_ESCROW_KEY_SHA256.
+ConfigurationDirectory=mcp-gate
+ConfigurationDirectoryMode=0700
+EnvironmentFile=%E/mcp-gate/gate.env
+WorkingDirectory=%S/mcp-gate
+ExecStart=%h/.local/bin/mcp-gate serve %E/mcp-gate/gate.yaml
+UMask=0077
+
+Restart=on-failure
+RestartSec=5s
+# SIGTERM to the gate only: it gives calls in flight 10 s, then stops each child's process group
+# itself (SIGTERM, then SIGKILL), within 15 s. Sending SIGTERM to the children at the same time,
+# as KillMode=control-group does, would cut off the calls the gate is still finishing. Whatever
+# is left when the gate exits, or at the timeout, gets SIGKILL.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=40s
+
+# Hardening. Every setting here is inherited by the stdio children, which in a user service
+# usually keep state under $HOME (browser profiles, token caches), so the home stays writable.
+# Left out on purpose:
+#   ProtectHome, ProtectSystem=strict  children write under $HOME
+#   MemoryDenyWriteExecute  breaks JIT runtimes: Node (V8), Chromium, some Python wheels
+#   RestrictNamespaces      breaks Chromium's user-namespace sandbox
+#   PrivateDevices, ProtectClock, ProtectKernelLogs, CapabilityBoundingSet  need privileges a
+#                           user manager may not have; a system service sets them
+# A child that talks to another program through /tmp (an X11 or other socket there) needs
+# PrivateTmp=no in a drop-in. In a user manager, PrivateTmp, ProtectSystem, ProtectKernel* and
+# ProtectControlGroups run the service in a user namespace (an implicit PrivateUsers=yes): the
+# host needs unprivileged user namespaces, and files of other users show as owned by nobody.
+# See docs/operations/systemd.md for the drop-in without them.
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# AF_NETLINK: Node and Chromium read the network interfaces through it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

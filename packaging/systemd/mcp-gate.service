@@ -1,0 +1,71 @@
+# mcp-gate as a system service, run by the system user mcp-gate.
+# Install and adjust as described in docs/operations/systemd.md; change it with
+# `systemctl edit mcp-gate`, not by editing this file in place.
+[Unit]
+Description=mcp-gate: MCP gateway
+Documentation=https://github.com/vsem-azamat/mcp-gate/blob/main/docs/operations/README.md
+After=network-online.target
+Wants=network-online.target
+# A config that does not load exits with status 2 at once; stop retrying after a few tries.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=mcp-gate
+Group=mcp-gate
+# /var/lib/mcp-gate: learned pins (pins.json) and OAuth grants (oauth/). The gate reads it from
+# $STATE_DIRECTORY, so serve and the auth commands run through systemd need no -state-dir. It is
+# also the user's home, so stdio children that write under $HOME write there.
+StateDirectory=mcp-gate
+StateDirectoryMode=0700
+# /etc/mcp-gate, owned by root: gate.yaml, and gate.env with the secrets the config names as
+# ${VAR} and MCP_HUB_ESCROW_KEY_SHA256. systemd reads gate.env as root, so it can be root:root 0600.
+ConfigurationDirectory=mcp-gate
+EnvironmentFile=/etc/mcp-gate/gate.env
+WorkingDirectory=/var/lib/mcp-gate
+ExecStart=/usr/local/bin/mcp-gate serve /etc/mcp-gate/gate.yaml
+UMask=0077
+
+Restart=on-failure
+RestartSec=5s
+# SIGTERM to the gate only: it gives calls in flight 10 s, then stops each child's process group
+# itself (SIGTERM, then SIGKILL), within 15 s. Sending SIGTERM to the children at the same time,
+# as KillMode=control-group does, would cut off the calls the gate is still finishing. Whatever
+# is left when the gate exits, or at the timeout, gets SIGKILL.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=40s
+
+# Hardening. Every setting here is inherited by the stdio children, so it is limited to what
+# common servers (Node, Python, headless Chromium) tolerate. Left out on purpose:
+#   MemoryDenyWriteExecute  breaks JIT runtimes: Node (V8), Chromium, some Python wheels
+#   RestrictNamespaces      breaks Chromium's user-namespace sandbox
+#   PrivateUsers, PrivateNetwork, IPAddressDeny  children reach their own services
+#   SystemCallFilter        children run arbitrary programs
+# Children that need more (a writable path elsewhere, a display) get a drop-in, such as
+# ReadWritePaths=/srv/downloads; see docs/operations/systemd.md.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# AF_NETLINK: Node and Chromium read the network interfaces through it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

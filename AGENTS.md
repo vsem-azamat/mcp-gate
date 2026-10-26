@@ -72,13 +72,15 @@ This repository is public. Before every commit and PR, check that nothing privat
 | `internal/procutil/` | Child processes: clean environment, process groups, stderr line log, OOM score, non-dumpable gate, subreaper |
 | `internal/redact/` | Redaction engine: rules with priorities, findings, replacers (no MCP or HTTP imports) |
 | `internal/redact/mcpredact/` | Redaction of MCP SDK results and errors, failing closed |
+| `internal/smoke/` | The binary smoke test: a built `mcp-gate` run as a process against fake servers |
 | `internal/testkit/` | Fake MCP servers for tests: catalog hub, scriptable stdio and HTTP fakes, a fake behind OAuth; the escrow contract check |
 | `internal/upstream/` | HTTP listener side: limits, named tokens, Host check, request log, health and status handlers |
 | `internal/version/` | Build version and commit |
+| `packaging/systemd/` | The system and user systemd units shipped in the release archives |
 | `openspec/specs/` | Behavior specifications, one directory per capability |
 | [`docs/`](docs/README.md) | Engineering documentation |
 | `scripts/` | Repository checks run by `make repo` |
 | `.githooks/` | Versioned git hooks, enabled by `make hooks` |
 | `tools/`, `tools/lint/` | Pinned development tools, run with `go tool` |
 | `.github/workflows/` | CI (`make check` plus the release config) and the tag-driven release |
-| `.goreleaser.yaml` | Release builds |
+| `.goreleaser.yaml` | Release builds, the smoke test of each built binary, the archives |

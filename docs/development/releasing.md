@@ -11,8 +11,9 @@ A release is a `v*` tag on `main`. Only the maintainer creates tags. Pushing the
    - with `CGO_ENABLED=0` and `-trimpath`;
    - with `-X github.com/vsem-azamat/mcp-gate/internal/version.Version=<tag>`, so `mcp-gate version` prints the tag;
    - with the file times of the tagged commit.
+   After each build, a hook runs the [binary smoke test](testing.md#binary-smoke-test) against the binary when it is for the build machine's OS and architecture, so a broken linux/amd64 binary stops the release.
    GoReleaser is given the pushed tag (`GORELEASER_CURRENT_TAG`), so a final tag on the commit of an rc tag builds the final version.
-4. It packs `mcp-gate_<version>_<os>_<arch>.tar.gz` with `LICENSE` and `README.md` (every file with the commit's date as file time and `root:root` as owner, so the same commit gives the same archives), writes `checksums.txt` (SHA-256), and publishes a GitHub release with a changelog from the commits since the previous tag. A pre-release tag such as `v0.2.0-rc.1` gives a pre-release.
+4. It packs `mcp-gate_<version>_<os>_<arch>.tar.gz` with `LICENSE`, `README.md` and the [systemd units](../operations/systemd.md) `packaging/systemd/mcp-gate.service` and `packaging/systemd/user/mcp-gate.service` (every file with the commit's date as file time and `root:root` as owner, so the same commit gives the same archives), writes `checksums.txt` (SHA-256), and publishes a GitHub release with a changelog from the commits since the previous tag. A pre-release tag such as `v0.2.0-rc.1` gives a pre-release.
 
 A build that was given no version, such as `go build` from a checkout or a snapshot, prints `dev` from `mcp-gate version`, followed by the commit when the toolchain recorded one.
 
