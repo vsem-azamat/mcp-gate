@@ -72,6 +72,19 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 
 <sub>🔜 planned, links to the issue. ➖ partly: tools only; Docker blocks the whole call instead of hiding the secret; ContextForge and agentgateway hide secrets through plugins; agentgateway's OAuth is token exchange. ❔ not documented. Checked against each project's docs in October 2026, corrections welcome.</sub>
 
+### Footprint
+
+10 small stdio servers and 1 HTTP server behind each gateway, 4 agents making 1000 `tools/call` in total. Median of 3 runs, Linux x86-64, October 2026.
+
+| | **mcp-gate** | mcp-proxy | Docker | ContextForge | agentgateway |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gateway, idle | 22 MB | 20 MB | 43 MB | 371 MB | 37 MB |
+| Gateway, peak under load | 24 MB | 21 MB | 48 MB | 387 MB | 47 MB |
+| Gateway and its servers, after load | 79 MB | 81 MB | 875 MB | 1862 MB | 112 MB |
+| Server processes kept | 10 | 10 | 40 containers | 10 + 10 bridges | 40 |
+
+<sub>RSS for mcp-gate, PSS for the others (mcp-gate is not dumpable, so its PSS needs root; by RSS mcp-proxy idles at 20 MB too). The test servers are tiny Go programs of about 4 MB each; real servers take 40–150 MB, so the totals grow with what you run. ContextForge ran on SQLite with one worker and needs a bridge per stdio server. Docker and agentgateway start servers for each agent session. Versions: mcp-gate 0.1.3, mcp-proxy 1.1.0, Docker mcp-gateway 0.44.2, ContextForge 1.1.0, agentgateway 1.6.0.</sub>
+
 mcp-gate suits a handful of MCP servers on one machine. If you need what the lower rows list, look at ContextForge, agentgateway, [MetaMCP](https://github.com/metatool-ai/metamcp) or [MCPJungle](https://github.com/mcpjungle/MCPJungle).
 
 ## Getting started
