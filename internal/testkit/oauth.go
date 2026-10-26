@@ -55,6 +55,10 @@ type OAuthOptions struct {
 	ExpiresIn string
 	// MetadataIssuer, if set, is the issuer the metadata claims, in place of the real one.
 	MetadataIssuer string
+	// TrailingSlash serves the MCP endpoint at /mcp/, with a challenge naming resource metadata
+	// at a URL that redirects to the one without the slash, and that metadata naming /mcp
+	// without the slash as the resource.
+	TrailingSlash bool
 }
 
 // OAuthServer is a fake MCP server behind OAuth on one loopback listener: protected resource
@@ -99,7 +103,12 @@ func NewOAuthServer(t testing.TB, opts OAuthOptions) *OAuthServer {
 	ms := newFakeServer(opts.Fake, nil, 0, stop)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return ms }, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", s.protect(handler))
+	if opts.TrailingSlash {
+		mux.Handle("/mcp/", s.protect(handler))
+		mux.Handle("GET /.well-known/oauth-protected-resource/mcp/", http.RedirectHandler("/.well-known/oauth-protected-resource/mcp", http.StatusTemporaryRedirect))
+	} else {
+		mux.Handle("/mcp", s.protect(handler))
+	}
 	if !opts.NoResourceMetadata {
 		mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.resourceMetadata)
 	}
@@ -117,7 +126,12 @@ func NewOAuthServer(t testing.TB, opts OAuthOptions) *OAuthServer {
 }
 
 // URL is the MCP endpoint.
-func (s *OAuthServer) URL() string { return s.srv.URL + "/mcp" }
+func (s *OAuthServer) URL() string {
+	if s.opts.TrailingSlash {
+		return s.srv.URL + "/mcp/"
+	}
+	return s.srv.URL + "/mcp"
+}
 
 // Issuer is the authorization server's issuer.
 func (s *OAuthServer) Issuer() string { return s.srv.URL + s.opts.IssuerPath }
@@ -253,7 +267,7 @@ func (s *OAuthServer) protect(next http.Handler) http.Handler {
 		}
 		if !ok {
 			if !s.opts.NoChallenge {
-				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource/mcp"`, s.srv.URL))
+				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource%s"`, s.srv.URL, strings.TrimPrefix(s.URL(), s.srv.URL)))
 			}
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -275,7 +289,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func (s *OAuthServer) resourceMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"resource": s.URL(), "authorization_servers": []string{s.Issuer()}, "scopes_supported": s.opts.Scopes,
+		"resource": s.srv.URL + "/mcp", "authorization_servers": []string{s.Issuer()}, "scopes_supported": s.opts.Scopes,
 	})
 }
 

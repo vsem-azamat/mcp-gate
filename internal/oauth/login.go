@@ -194,10 +194,21 @@ type prmCandidate struct{ url, resource string }
 
 // prmCandidates lists where protected resource metadata may be: the challenge's URL, then the
 // well-known location at the endpoint's path, then at the root, for the origin as resource.
+// For an endpoint whose path ends in a slash, the first two are also tried for the resource
+// without that slash, which servers that redirect /mcp to /mcp/ name as their resource.
 func prmCandidates(fromChallenge, serverURL string) []prmCandidate {
 	var out []prmCandidate
+	resources := []string{serverURL}
+	if u, err := url.Parse(serverURL); err == nil && len(u.Path) > 1 && strings.HasSuffix(u.Path, "/") && u.RawQuery == "" {
+		resources = append(resources, strings.TrimSuffix(serverURL, "/"))
+	}
+	add := func(metadataURL string) {
+		for _, r := range resources {
+			out = append(out, prmCandidate{metadataURL, r})
+		}
+	}
 	if fromChallenge != "" {
-		out = append(out, prmCandidate{fromChallenge, serverURL})
+		add(fromChallenge)
 	}
 	u, err := url.Parse(serverURL)
 	if err != nil {
@@ -207,7 +218,7 @@ func prmCandidates(fromChallenge, serverURL string) []prmCandidate {
 	w.RawQuery = ""
 	if p := strings.Trim(u.Path, "/"); p != "" {
 		w.Path, w.RawPath = "/.well-known/oauth-protected-resource/"+p, ""
-		out = append(out, prmCandidate{w.String(), serverURL})
+		add(w.String())
 	}
 	w.Path, w.RawPath = "/.well-known/oauth-protected-resource", ""
 	out = append(out, prmCandidate{w.String(), u.Scheme + "://" + u.Host})

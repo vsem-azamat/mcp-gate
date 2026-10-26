@@ -164,6 +164,7 @@ func TestLoginDiscoveryFallbacks(t *testing.T) {
 		{"no challenge", testkit.OAuthOptions{NoChallenge: true}},
 		{"no resource metadata", testkit.OAuthOptions{NoResourceMetadata: true, NoChallenge: true}},
 		{"issuer with a path", testkit.OAuthOptions{IssuerPath: "/tenant"}},
+		{"endpoint with a trailing slash", testkit.OAuthOptions{IssuerPath: "/mcp", TrailingSlash: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.opts.Fake = testkit.Fake{Name: "notes"}
@@ -171,6 +172,9 @@ func TestLoginDiscoveryFallbacks(t *testing.T) {
 			g := login(t, srv, config.OAuth{}, nil)
 			if g.Issuer != srv.Issuer() {
 				t.Errorf("issuer %q, want %q", g.Issuer, srv.Issuer())
+			}
+			if tc.opts.TrailingSlash && g.Resource != strings.TrimSuffix(srv.URL(), "/") {
+				t.Errorf("resource %q, want the endpoint without the slash", g.Resource)
 			}
 		})
 	}

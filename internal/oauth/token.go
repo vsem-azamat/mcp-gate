@@ -44,9 +44,11 @@ func NewHTTPClient() *http.Client {
 // discoveryClient returns the client for metadata documents. Its transport sets no DialContext,
 // so the SDK uses a clone of it that refuses private and reserved addresses (unless a proxy is
 // configured) and follows redirects only to https; keep-alives are off, since that clone cannot
-// be closed.
+// be closed. Clone sets up HTTP/2 on this transport and copies its TLS config, which then
+// offers h2, while the clone's own DialContext turns HTTP/2 off unless ForceAttemptHTTP2 is
+// set: a server that picks h2 would answer in frames the HTTP/1 reader cannot parse.
 func discoveryClient(c *http.Client) *http.Client {
-	return &http.Client{Timeout: c.Timeout, Transport: &http.Transport{DisableKeepAlives: true, Proxy: http.ProxyFromEnvironment}}
+	return &http.Client{Timeout: c.Timeout, Transport: &http.Transport{DisableKeepAlives: true, Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true}}
 }
 
 // TokenError is an error answer of the token endpoint (RFC 6749, section 5.2).
