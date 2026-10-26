@@ -3,8 +3,6 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
-	"log/slog"
 	"slices"
 	"sort"
 	"strings"
@@ -12,14 +10,19 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 )
 
 // member returns a mirror named name serving the given tools and resources.
-func member(t *testing.T, name string, logger *slog.Logger, tools []string, resources []string, templates []string) *Mirror {
+func member(t *testing.T, name string, rec *recorder, tools []string, resources []string, templates []string) *Mirror {
 	t.Helper()
-	m := newMirror(Options{Name: name, Policy: policy.New(&config.Server{}), Logger: logger}, stubDown{})
+	opts := Options{Name: name, Policy: policy.New(&config.Server{})}
+	if rec != nil {
+		opts.Audit = rec
+	}
+	m := newMirror(opts, stubDown{})
 	var list []*mcp.Tool
 	for _, n := range tools {
 		list = append(list, &mcp.Tool{Name: n, InputSchema: map[string]any{"type": "object"}})
@@ -100,11 +103,10 @@ func TestAggregateFollowsChanges(t *testing.T) {
 // TestViewRechecksAccess calls a view's handler with an access that does not name the server:
 // the view serves both servers, but the request may reach only one.
 func TestViewRechecksAccess(t *testing.T) {
-	var logs strings.Builder
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	ma := member(t, "a", logger, []string{"echo"}, nil, nil)
-	mb := member(t, "b", logger, []string{"echo"}, nil, nil)
-	agg, err := NewAggregate(AggregateOptions{Members: []*Mirror{ma, mb}, Logger: logger})
+	rec := &recorder{}
+	ma := member(t, "a", rec, []string{"echo"}, nil, nil)
+	mb := member(t, "b", rec, []string{"echo"}, nil, nil)
+	agg, err := NewAggregate(AggregateOptions{Members: []*Mirror{ma, mb}, Audit: rec})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,39 +125,24 @@ func TestViewRechecksAccess(t *testing.T) {
 			t.Errorf("called with %+v: %v", extra, res)
 		}
 	}
-	lines := callLines(t, logs.String())
-	if len(lines) != 3 || lines[2]["server"] != "" || lines[2]["outcome"] != "denied" || lines[2]["tool"] != "b__echo" {
-		t.Fatalf("audit lines %v", lines)
+	denied := audit.Record{Principal: "laptop", Kind: audit.Tool, Name: "b__echo", Outcome: audit.Denied, TokenPolicy: policy.NoPolicy}
+	if got := rec.all(); len(got) != 3 || got[2] != denied {
+		t.Fatalf("records %+v", got)
 	}
 	// With access to b the call reaches b's mirror, under the token name b knows.
 	_, _ = call(t.Context(), req(map[string]string{"b": "phone"}))
-	lines = callLines(t, logs.String())
-	last := lines[len(lines)-1]
-	if last["server"] != "b" || last["principal"] != "phone" || last["tool"] != "echo" {
-		t.Errorf("audit line %v", last)
+	if last := rec.last(t); last.Server != "b" || last.Principal != "phone" || last.Kind != audit.Tool || last.Name != "echo" {
+		t.Errorf("record %+v", last)
 	}
 	// A tool gone from the mirror before the view has caught up is refused as on b's route.
 	mb.tools = mb.applyTools(nil)
 	if res, err := call(t.Context(), req(map[string]string{"b": "phone"})); err == nil {
 		t.Errorf("a removed tool was called: %v", res)
 	}
-	lines = callLines(t, logs.String())
-	last = lines[len(lines)-1]
-	if last["server"] != "b" || last["outcome"] != "denied" || last["tool"] != "echo" {
-		t.Errorf("audit line of the removed tool %v", last)
+	removed := audit.Record{Server: "b", Principal: "phone", Kind: audit.Tool, Name: "echo", Outcome: audit.Denied, TokenPolicy: policy.NoPolicy}
+	if last := rec.last(t); last != removed {
+		t.Errorf("record of the removed tool %+v", last)
 	}
-}
-
-func callLines(t *testing.T, out string) []map[string]any {
-	t.Helper()
-	var lines []map[string]any
-	for line := range strings.SplitSeq(out, "\n") {
-		var l map[string]any
-		if json.Unmarshal([]byte(line), &l) == nil && l["msg"] == "call" {
-			lines = append(lines, l)
-		}
-	}
-	return lines
 }
 
 func TestViewRoutesResources(t *testing.T) {
@@ -197,10 +184,9 @@ func TestViewRoutesResources(t *testing.T) {
 
 // TestViewReadRechecksMirror reads a resource the mirror stopped listing before the view caught up.
 func TestViewReadRechecksMirror(t *testing.T) {
-	var logs strings.Builder
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	ma := member(t, "a", logger, nil, []string{"x://a"}, nil)
-	agg, err := NewAggregate(AggregateOptions{Members: []*Mirror{ma}, Logger: logger})
+	rec := &recorder{}
+	ma := member(t, "a", rec, nil, []string{"x://a"}, nil)
+	agg, err := NewAggregate(AggregateOptions{Members: []*Mirror{ma}, Audit: rec})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,9 +200,9 @@ func TestViewReadRechecksMirror(t *testing.T) {
 	if res, err := v.readResource(t.Context(), req); err == nil {
 		t.Errorf("read a resource the mirror no longer lists: %v", res)
 	}
-	lines := callLines(t, logs.String())
-	if len(lines) != 1 || lines[0]["outcome"] != "denied" || lines[0]["server"] != "a" {
-		t.Errorf("audit lines %v", lines)
+	want := []audit.Record{{Server: "a", Principal: "laptop", Kind: audit.Resource, Name: "x://a", Outcome: audit.Denied, TokenPolicy: policy.NoPolicy}}
+	if got := rec.all(); !slices.Equal(got, want) {
+		t.Errorf("records %+v", got)
 	}
 }
 

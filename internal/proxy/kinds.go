@@ -5,18 +5,18 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 )
 
-// auditKey is the attribute of an audit line that names what a request is for, which also
-// tells the request's kind.
-type auditKey string
+// kindSet is a set of catalog kinds, such as the kinds a listing holds or a mirror shows.
+type kindSet uint8
 
-// The audit keys.
-const (
-	keyTool   auditKey = "tool"
-	keyPrompt auditKey = "prompt"
-	keyURI    auditKey = "uri"
-)
+// allKinds holds every kind.
+const allKinds = kindSet(audit.Tool | audit.Prompt | audit.Resource)
+
+// has reports whether the set holds k.
+func (s kindSet) has(k audit.Kind) bool { return s&kindSet(k) != 0 }
 
 // entryKind names a kind of catalog entry in log lines.
 type entryKind string
@@ -29,8 +29,17 @@ const (
 	entryTemplate entryKind = "resource template"
 )
 
-// keySep joins a kind and a name in the keys of left-out entries; neither can hold it.
-const keySep = "\x00"
+// named is a tool or prompt of the aggregate catalog, by kind and name, as a map key.
+type named struct {
+	kind audit.Kind
+	name string
+}
+
+// listedKey is a resource or resource template, by kind and key, as a map key.
+type listedKey struct {
+	kind entryKind
+	key  string
+}
 
 // The errors of a request for an entry the caller cannot see, the same as the SDK's for an entry
 // the server does not have, so that a hidden entry cannot be told from a missing one. Every
