@@ -13,7 +13,8 @@ import (
 
 // policyGate serves cat (a full catalog) and plain (tools only) to the global tokens laptop and
 // phone, also on the aggregate endpoint. laptop has no policy; phone sees only echo, no prompts
-// and only fake://info and the items template on cat, and every tool but env on plain.
+// and only fake://info and the items template on cat, and every tool but env on plain. open has
+// no policies.
 func policyGate(t *testing.T) *running {
 	t.Helper()
 	doc := `version: 1
@@ -32,10 +33,12 @@ policies:
 servers:
   cat:
 ` + stdioServer(t, testkit.Fake{Catalog: true}, "") + `  plain:
+` + stdioServer(t, testkit.Fake{}, "") + `  open:
 ` + stdioServer(t, testkit.Fake{}, "")
 	r := startGate(t, doc, gateOpts{})
-	r.waitReady(t, "cat")
-	r.waitReady(t, "plain")
+	for _, s := range []string{"cat", "plain", "open"} {
+		r.waitReady(t, s)
+	}
 	return r
 }
 
@@ -110,12 +113,14 @@ func TestTokenPolicyLists(t *testing.T) {
 	if res, tpl := resourceKeys(t, laptop); len(res) != 2 || len(tpl) != 2 {
 		t.Errorf("laptop lists the resources %v and templates %v", res, tpl)
 	}
-	// A list shaped by a policy is not for shared caches.
-	if lt, err := phone.ListTools(t.Context(), nil); err != nil || lt.CacheScope != "private" {
-		t.Errorf("phone's list: %v %v", lt, err)
+	// Where lists depend on the token, they are not for shared caches.
+	for name, cs := range map[string]*mcp.ClientSession{"phone": phone, "laptop": laptop} {
+		if lt, err := cs.ListTools(t.Context(), nil); err != nil || lt.CacheScope != "private" {
+			t.Errorf("%s's list: %v %v", name, lt, err)
+		}
 	}
-	if lt, err := laptop.ListTools(t.Context(), nil); err != nil || lt.CacheScope != "public" {
-		t.Errorf("laptop's list: %v %v", lt, err)
+	if lt, err := r.connect(t, "open", clientOpts{}).ListTools(t.Context(), nil); err != nil || lt.CacheScope != "public" {
+		t.Errorf("the list of a server without policies: %v %v", lt, err)
 	}
 
 	plain := r.connect(t, "plain", clientOpts{header: "Bearer " + phoneToken})
@@ -194,6 +199,9 @@ func TestTokenPolicyRefusals(t *testing.T) {
 func TestTokenPolicyAggregate(t *testing.T) {
 	r := policyGate(t)
 	laptop := r.connect(t, "", clientOpts{aggregate: true})
+	if lt, err := laptop.ListTools(t.Context(), nil); err != nil || lt.CacheScope != "private" {
+		t.Errorf("laptop's list: %v %v", lt, err)
+	}
 	phone := r.connect(t, "", clientOpts{aggregate: true, header: "Bearer " + phoneToken})
 
 	got := toolNames(t, phone)
@@ -250,4 +258,39 @@ func TestTokenPolicyAggregate(t *testing.T) {
 	if l := r.lastCall("tool", "echo"); l["server"] != "cat" || l["principal"] != "phone" || l["tokenPolicy"] != "allow" {
 		t.Errorf("audit line of phone's cat__echo: %v", l)
 	}
+	if l := r.lastCall("uri", "fake://hidden"); l["server"] != "cat" || l["principal"] != "phone" || l["outcome"] != "denied" || l["tokenPolicy"] != "deny" {
+		t.Errorf("audit line of phone's read of fake://hidden: %v", l)
+	}
+	if lines := r.calls("uri", "none://nothing"); len(lines) != 0 {
+		t.Errorf("a read of a URI no server serves is audited: %v", lines)
+	}
+}
+
+// A tool with a parameter bound to a header is checked by the SDK before any handler runs; a
+// hidden one must still fail as an unknown tool.
+func TestTokenPolicyHeaderParameters(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{
+		"p": map[string]any{"type": "string", "x-mcp-header": "P"},
+	}}
+	hub := testkit.NewHub(t, testkit.HubOptions{Servers: map[string]testkit.Catalog{"hdr": {Tools: []*mcp.Tool{
+		{Name: "bound", InputSchema: schema}, {Name: "plain", InputSchema: map[string]any{"type": "object"}},
+	}}}})
+	doc := `version: 1
+auth:
+  tokens: {laptop: "${LAPTOP}", phone: "${PHONE}"}
+policies:
+  phone: {servers: {hdr: {tools: {allow: [plain]}}}}
+servers:
+  hdr:
+` + httpServer(strings.ReplaceAll(hub.URLTemplate(), "{server}", "hdr"), "")
+	r := startGate(t, doc, gateOpts{})
+	r.waitReady(t, "hdr")
+	phone := r.connect(t, "hdr", clientOpts{version: "2026-07-28", header: "Bearer " + phoneToken})
+	if got := toolNames(t, phone); !slices.Equal(got, []string{"plain"}) {
+		t.Fatalf("phone lists %v", got)
+	}
+	sameRefusal(t, "tool with a header parameter", "bound", "nosuch", func(name string) error {
+		_, err := phone.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: map[string]any{"p": "x"}})
+		return err
+	})
 }

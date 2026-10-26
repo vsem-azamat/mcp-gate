@@ -220,10 +220,11 @@ type Entry struct{ Key, Name string }
 
 // Read decides a read of uri, given the resources the server lists and the templates of its
 // catalog that match uri. A read reaches the resource listed under uri, or else a template
-// that matches it, so it passes when that entry passes. Under a deny list it is refused, as
-// under a server's deny list, when the comparison key of uri is the key of a listed entry or of
-// the URI of a resource the list hides, and when any template that matches it is hidden; it
-// errs towards refusing.
+// that matches it, so it passes when that entry passes: under an allow list, some matching
+// template must pass, and under a deny list none may be hidden. It is also refused when the
+// comparison key of uri is that of the URI of a listed resource the policy hides, or, under a
+// deny list, of an entry the list names, so that a template does not reach a hidden resource by
+// another spelling. It errs towards refusing.
 func (t *Token) Read(uri string, resources, matching []Entry) Decision {
 	if t == nil {
 		return NoPolicy
@@ -240,10 +241,10 @@ func (t *Token) Read(uri string, resources, matching []Entry) Decision {
 			return t.readListed(uri, r, resources)
 		}
 	}
+	if t.blocked(uri, resources) {
+		return Denied
+	}
 	if f.Deny() {
-		if t.blocked(uri, resources) {
-			return Denied
-		}
 		for _, e := range matching {
 			if !f.Allows(e.Key, e.Name) {
 				return Denied
@@ -261,14 +262,14 @@ func (t *Token) Read(uri string, resources, matching []Entry) Decision {
 
 // readListed decides a read of a URI the server lists as r.
 func (t *Token) readListed(uri string, r Entry, resources []Entry) Decision {
-	if !t.resources.Allows(r.Key, r.Name) || t.resources.Deny() && t.blocked(uri, resources) {
+	if !t.resources.Allows(r.Key, r.Name) || t.blocked(uri, resources) {
 		return Denied
 	}
 	return Allowed
 }
 
-// blocked reports, under a deny list, whether the comparison key of uri is that of a listed
-// entry or of the URI of a resource the list hides.
+// blocked reports whether the comparison key of uri is that of the URI of a listed resource the
+// policy hides or, under a deny list, of an entry the list names.
 func (t *Token) blocked(uri string, resources []Entry) bool {
 	key := NormalizeURI(uri)
 	for _, l := range t.resources.Listed() {

@@ -59,12 +59,19 @@ func (a *aggregate) viewKey(access map[string]string) string {
 	for _, server := range slices.Sorted(maps.Keys(access)) {
 		part := server
 		if policies[server] != nil {
-			part += "\x01" + access[server]
+			part += viewKeyToken + access[server]
 		}
 		parts = append(parts, part)
 	}
-	return strings.Join(parts, "\x00")
+	return strings.Join(parts, viewKeyServer)
 }
+
+// The separators of a view key: between servers, and between a server and its token name.
+// Neither can occur in a server or token name.
+const (
+	viewKeyServer = "\x00"
+	viewKeyToken  = "\x01"
+)
 
 // aggregateRoute builds the aggregate route and a view for every access a token, or no token,
 // has. Tokens and policies do not change while the gate runs, so the accesses are known here.

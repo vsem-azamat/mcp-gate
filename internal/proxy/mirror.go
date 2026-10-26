@@ -6,8 +6,9 @@
 // and on list-changed notifications, and changes only the entries that differ. Calls go through
 // the server's supervisor with a downstream _meta holding only the keys in the server's
 // forwardMeta, progress remapped to the upstream request, and results redacted, failing closed.
-// A token with a policy on the server sees the lists filtered by it, and a call of an entry it
-// hides fails as one of an unknown entry. Every call is logged as one audit line.
+// A token with a policy on the server is served an *mcp.Server of its own that holds only what
+// the policy passes, so an entry it hides is unknown there. Every call is logged as one audit
+// line.
 package proxy
 
 import (
@@ -101,6 +102,19 @@ type Mirror struct {
 	wg     sync.WaitGroup
 
 	watchers []func() // told after the catalog changed; set before Start
+
+	views map[string]*tokenView // by token name; fixed by New
+}
+
+// tokenView is the upstream server of a token with a policy on the server: the mirrored catalog
+// without what the policy hides. Its maps are guarded by the mirror's mu.
+type tokenView struct {
+	policy    *policy.Token
+	server    *mcp.Server
+	tools     map[string]*mcp.Tool
+	prompts   map[string]*mcp.Prompt
+	resources map[string]*mcp.Resource
+	templates map[string]*mcp.ResourceTemplate
 }
 
 type stats struct {
@@ -121,18 +135,32 @@ func New(opts Options) *Mirror {
 		progress: newProgressTable(),
 		events:   make(chan event, eventQueue),
 	}
-	m.server = mcp.NewServer(&mcp.Implementation{Name: opts.Name, Version: opts.Version}, &mcp.ServerOptions{
-		Logger:       upstream.SDKLogger(logger),
-		Capabilities: Capabilities(opts.Policy),
-		SetCacheable: func(_ context.Context, req mcp.Request, c *mcp.Cacheable) {
-			if m.tokenPolicy(req.GetExtra()) != nil {
-				c.CacheScope = cachePrivate
-			}
-		},
-	})
-	m.server.AddReceivingMiddleware(m.receive)
+	m.server = m.newServer()
+	m.views = make(map[string]*tokenView, len(opts.Tokens))
+	for name, p := range opts.Tokens {
+		m.views[name] = &tokenView{
+			policy: p, server: m.newServer(),
+			tools: map[string]*mcp.Tool{}, prompts: map[string]*mcp.Prompt{},
+			resources: map[string]*mcp.Resource{}, templates: map[string]*mcp.ResourceTemplate{},
+		}
+	}
 	return m
 }
+
+// newServer returns an upstream server for the mirror. When tokens have policies on the server,
+// its results are marked private, since the lists then depend on the caller's token.
+func (m *Mirror) newServer() *mcp.Server {
+	opts := &mcp.ServerOptions{Logger: upstream.SDKLogger(m.logger), Capabilities: Capabilities(m.opts.Policy)}
+	if len(m.opts.Tokens) > 0 {
+		opts.SetCacheable = privateCache
+	}
+	s := mcp.NewServer(&mcp.Implementation{Name: m.opts.Name, Version: m.opts.Version}, opts)
+	s.AddReceivingMiddleware(m.receive)
+	return s
+}
+
+// privateCache marks a result for the caller's own client only.
+func privateCache(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.CacheScope = cachePrivate }
 
 // Capabilities are what a mirror advertises: tools always, prompts and resources unless the
 // policy exposes none of them, all with list-changed notifications, and nothing else. They do
@@ -148,12 +176,24 @@ func Capabilities(p *policy.Policy) *mcp.ServerCapabilities {
 	return caps
 }
 
-// cachePrivate is the cache scope of a result shaped by the caller's token policy, which only
+// cachePrivate is the cache scope of a result that depends on the caller's token, which only
 // the caller's own client may cache.
 const cachePrivate = "private"
 
 // TokenPolicy returns the policy of the token named token on the server; nil when it has none.
 func (m *Mirror) TokenPolicy(token string) *policy.Token { return m.opts.Tokens.For(token) }
+
+// HasTokenPolicies reports whether any token has a policy on the server.
+func (m *Mirror) HasTokenPolicies() bool { return len(m.opts.Tokens) > 0 }
+
+// ServerFor returns the upstream server for the token named token: its own when it has a
+// policy on the server, else the mirror's.
+func (m *Mirror) ServerFor(token string) *mcp.Server {
+	if v := m.views[token]; v != nil && token != "" {
+		return v.server
+	}
+	return m.server
+}
 
 // tokenPolicy returns the policy of the token a request carries; nil when it has none.
 func (m *Mirror) tokenPolicy(extra *mcp.RequestExtra) *policy.Token {
@@ -387,6 +427,49 @@ func (m *Mirror) apply(kinds int, l *listing) {
 	if kinds != 0 {
 		m.lastSync = time.Now()
 	}
+	for _, v := range m.views {
+		m.syncView(v, kinds)
+	}
+}
+
+// syncView registers on a token's server the mirrored entries of the given kinds that its policy
+// passes. The caller holds m.mu.
+func (m *Mirror) syncView(v *tokenView, kinds int) {
+	if kinds&kindTools != 0 {
+		want := passed(m.tools, func(t *mcp.Tool) bool { return v.policy.Tool(t.Name) != policy.Denied })
+		v.tools = syncSet(m.logger, m.logText, "tool", v.tools, want, func(t *mcp.Tool) error {
+			return guard(func() { v.server.AddTool(t, m.callTool) })
+		}, v.server.RemoveTools)
+	}
+	if kinds&kindPrompts != 0 {
+		want := passed(m.prompts, func(p *mcp.Prompt) bool { return v.policy.Prompt(p.Name) != policy.Denied })
+		v.prompts = syncSet(m.logger, m.logText, "prompt", v.prompts, want, func(p *mcp.Prompt) error {
+			return guard(func() { v.server.AddPrompt(p, m.getPrompt) })
+		}, v.server.RemovePrompts)
+	}
+	if kinds&kindResources != 0 {
+		want := passed(m.resources, func(r *mcp.Resource) bool { return v.policy.Resource(r.URI, r.Name) != policy.Denied })
+		v.resources = syncSet(m.logger, m.logText, "resource", v.resources, want, func(r *mcp.Resource) error {
+			return guard(func() { v.server.AddResource(r, m.readResource) })
+		}, v.server.RemoveResources)
+		wantT := passed(m.templates, func(t *mcp.ResourceTemplate) bool {
+			return v.policy.Resource(t.URITemplate, t.Name) != policy.Denied
+		})
+		v.templates = syncSet(m.logger, m.logText, "resource template", v.templates, wantT, func(t *mcp.ResourceTemplate) error {
+			return guard(func() { v.server.AddResourceTemplate(t, m.readResource) })
+		}, v.server.RemoveResourceTemplates)
+	}
+}
+
+// passed returns the entries of in that ok passes.
+func passed[T any](in map[string]*T, ok func(*T) bool) map[string]*T {
+	out := make(map[string]*T, len(in))
+	for k, e := range in {
+		if ok(e) {
+			out[k] = e
+		}
+	}
+	return out
 }
 
 // guard runs an SDK registration, which panics on data it rejects, and reports the panic as

@@ -161,6 +161,7 @@ func (c *Config) validatePolicies(add func(path, format string, args ...any)) {
 				continue
 			case s.Auth.Public:
 				add(sp, "the server is public and takes no token, so a token policy cannot apply to it")
+				continue
 			case c.knownToken(token):
 				if _, ok := c.EffectiveTokens(server)[token]; !ok {
 					add(sp, "the server does not accept the token %s", token)

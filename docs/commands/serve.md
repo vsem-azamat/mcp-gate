@@ -60,7 +60,9 @@ A route answers 503 with `Retry-After: 5` until its server has connected once. A
 
 ## Token policies
 
-`policies` gives a token its own allow or deny lists on some servers, on top of the servers' own (see [Configuration](../configuration/README.md#token-policies)). The token's lists show only what its lists pass, and a call, prompt get or resource read of something they hide fails exactly as one of a name the server does not have, so a token cannot tell a hidden tool from a missing one. The `call` line records the decision in `tokenPolicy`. A list shaped by a policy carries the cache scope `private`. The capabilities a server advertises do not depend on the token: a policy that hides every prompt leaves the prompt list empty.
+`policies` gives a token its own allow or deny lists on some servers, on top of the servers' own (see [Configuration](../configuration/README.md#token-policies)). The token's lists show only what its lists pass, and a call, prompt get or resource read of something they hide fails exactly as one of a name the server does not have, so a token cannot tell a hidden tool from a missing one. The `call` line records the decision in `tokenPolicy`. On a server where any token has a policy, results carry the cache scope `private`, since the lists depend on the token. The capabilities a server advertises do not depend on the token: a policy that hides every prompt leaves the prompt list empty.
+
+A resource read passes when the resource listed under its URI passes, or, when none is, a template that matches it does; a read in another spelling of a listed resource the policy hides is refused too. Under an allow list, a read through an allowed template reaches whatever the server serves for that URI, as with a server's allow list, so allow templates only when every URI they match may be read.
 
 ## Health and status
 

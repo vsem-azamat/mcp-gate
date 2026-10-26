@@ -225,8 +225,11 @@ func (a *Aggregate) View(servers []string, policies map[string]*policy.Token) *V
 		}
 	}
 	sopts := &mcp.ServerOptions{Logger: upstream.SDKLogger(a.logger), Capabilities: caps}
-	if len(policies) > 0 {
-		sopts.SetCacheable = func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.CacheScope = cachePrivate }
+	for s := range v.servers {
+		if a.members[s].HasTokenPolicies() {
+			// The view's lists depend on the token whenever any token has a policy on a member.
+			sopts.SetCacheable = privateCache
+		}
 	}
 	v.server = mcp.NewServer(&mcp.Implementation{Name: a.opts.Name, Version: a.opts.Version}, sopts)
 	v.server.AddReceivingMiddleware(v.receive)
@@ -471,7 +474,8 @@ func (a *Aggregate) deny(ctx context.Context, method string, extra *mcp.RequestE
 
 // receive is the view's receiving middleware, as a mirror's: it answers a panic with an internal
 // error, and writes the audit line of a tool call or prompt get the SDK refuses before a handler
-// runs. A name whose server the caller may reach is audited by that server's mirror.
+// runs, and of a resource read it refuses because the token's policy hides what it names. A name
+// whose server the caller may reach is audited by that server's mirror.
 func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
 		defer func() {
@@ -490,12 +494,26 @@ func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 			if r.Params != nil {
 				key, name = keyPrompt, r.Params.Name
 			}
+		case *mcp.ReadResourceRequest:
+			if r.Params != nil {
+				key, name = keyURI, r.Params.URI
+			}
 		}
 		if key == "" {
 			return next(ctx, method, req)
 		}
 		reached := new(bool)
 		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
+		if err != nil && !*reached && key == keyURI {
+			// A read of a URI no member serves is not audited; one the token's policy hides is, by
+			// its member.
+			if server, ok := v.route(name); ok {
+				if extra, m, ok := v.admit(req.GetExtra(), server); ok && m.decision(m.tokenPolicy(extra), keyURI, name) == policy.Denied {
+					m.refused(ctx, method, extra, keyURI, name, false)
+				}
+			}
+			return res, err
+		}
 		if err != nil && !*reached {
 			if server, rest, ok := splitName(name); ok {
 				if extra, m, ok := v.admit(req.GetExtra(), server); ok {

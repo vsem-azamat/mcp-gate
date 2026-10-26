@@ -178,6 +178,8 @@ func TestTokenReads(t *testing.T) {
 		{"resource not allowed", allow, "fake://hidden", []Entry{anyPath}, Denied},
 		{"through an allowed template", allow, "fake://items/7", []Entry{items, anyPath}, Allowed},
 		{"through a template not allowed", allow, "fake://other", []Entry{anyPath}, Denied},
+		{"hidden resource in another spelling through an allowed template", policy(config.Filter{Allow: []string{"any"}}), "FAKE://%68idden", []Entry{anyPath}, Denied},
+		{"resource through an allowed template", policy(config.Filter{Allow: []string{"any"}}), "fake://other", []Entry{anyPath}, Allowed},
 		{"nothing matches", allow, "other://x", nil, Denied},
 		{"resource denied by name", deny, "fake://hidden", []Entry{anyPath}, Denied},
 		{"hidden resource in another spelling", deny, "FAKE:///%68idden/", []Entry{anyPath}, Denied},

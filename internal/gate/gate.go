@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
@@ -307,7 +308,8 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 
 // route builds the handler chain of a server's /<name>/mcp: recover, the request log, the Host
 // check, the token check, cross-origin protection, 503 until the server has connected once, the
-// body limit, and the SDK's stateless streamable handler.
+// body limit, and the SDK's stateless streamable handler over the mirror's server for the
+// request's token.
 func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 	mirror := s.mirror
 	var authorize func(http.Handler) http.Handler
@@ -317,7 +319,9 @@ func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 	}
 	return g.chain(s.name, s.cfg.Log.Requests, remote, authorize,
 		func(*http.Request) bool { return mirror.Ready() },
-		func(*http.Request) *mcp.Server { return mirror.Server() })
+		func(r *http.Request) *mcp.Server {
+			return mirror.ServerFor(upstream.Principal(auth.TokenInfoFromContext(r.Context())))
+		})
 }
 
 // chain builds an MCP route around the SDK's stateless streamable handlers for the servers

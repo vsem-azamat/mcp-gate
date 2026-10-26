@@ -394,7 +394,7 @@ func (m *Mirror) readDecision(p *policy.Token, uri string) policy.Decision {
 }
 
 // decision returns what a token policy decides about a tool, a prompt or a resource read (key
-// "tool", "prompt" or "uri").
+// keyTool, keyPrompt or keyURI).
 func (m *Mirror) decision(p *policy.Token, key, name string) policy.Decision {
 	switch key {
 	case keyTool:
@@ -406,43 +406,6 @@ func (m *Mirror) decision(p *policy.Token, key, name string) policy.Decision {
 	}
 }
 
-// filterList narrows a list result to what the caller's token policy passes. The result is
-// copied, never changed, since the SDK may share its entries.
-func filterList(p *policy.Token, res mcp.Result) mcp.Result {
-	switch r := res.(type) {
-	case *mcp.ListToolsResult:
-		out := *r
-		out.Tools = keep(r.Tools, func(t *mcp.Tool) bool { return p.Tool(t.Name) != policy.Denied })
-		return &out
-	case *mcp.ListPromptsResult:
-		out := *r
-		out.Prompts = keep(r.Prompts, func(e *mcp.Prompt) bool { return p.Prompt(e.Name) != policy.Denied })
-		return &out
-	case *mcp.ListResourcesResult:
-		out := *r
-		out.Resources = keep(r.Resources, func(e *mcp.Resource) bool { return p.Resource(e.URI, e.Name) != policy.Denied })
-		return &out
-	case *mcp.ListResourceTemplatesResult:
-		out := *r
-		out.ResourceTemplates = keep(r.ResourceTemplates, func(e *mcp.ResourceTemplate) bool {
-			return p.Resource(e.URITemplate, e.Name) != policy.Denied
-		})
-		return &out
-	}
-	return res
-}
-
-// keep returns the entries of in that ok passes, never nil.
-func keep[T any](in []*T, ok func(*T) bool) []*T {
-	out := make([]*T, 0, len(in))
-	for _, e := range in {
-		if e != nil && ok(e) {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
 // reachedKey marks, in a request's context, whether the request reached a mirror handler.
 type reachedKey struct{}
 
@@ -450,7 +413,8 @@ type reachedKey struct{}
 // panics with an internal error, logging only the panic's type, since the SDK handles requests
 // on goroutines of its own that nothing else recovers. It also writes the audit line of a tool
 // call or prompt get that the SDK refuses before a handler runs, such as one of a tool the
-// policy hides, and narrows the lists to what the caller's token policy passes.
+// policy hides, and of a resource read the SDK refuses because the caller's token policy hides
+// what it names.
 func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
 		defer func() {
@@ -469,25 +433,27 @@ func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
 			if r.Params != nil {
 				key, name = keyPrompt, r.Params.Name
 			}
+		case *mcp.ReadResourceRequest:
+			if r.Params != nil {
+				key, name = keyURI, r.Params.URI
+			}
 		}
 		if key == "" {
-			res, err = next(ctx, method, req)
-			if p := m.tokenPolicy(req.GetExtra()); p != nil && err == nil {
-				res = filterList(p, res)
-			}
-			return res, err
+			return next(ctx, method, req)
 		}
 		reached := new(bool)
 		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
-		if err != nil && !*reached {
+		// A read of a URI the server does not serve is not audited; one the token's policy hides
+		// is.
+		if err != nil && !*reached && (key != keyURI || m.decision(m.tokenPolicy(req.GetExtra()), key, name) == policy.Denied) {
 			m.refused(ctx, method, req.GetExtra(), key, name, false)
 		}
 		return res, err
 	}
 }
 
-// refused writes the audit line of a tool call, prompt get or resource read (key "tool",
-// "prompt" or "uri") that did not reach a handler: denied when the name is not in the mirrored
+// refused writes the audit line of a tool call, prompt get or resource read (key keyTool,
+// keyPrompt or keyURI) that did not reach a handler: denied when the name is not in the mirrored
 // catalog, hidden is set or the caller's token policy hides it, an error otherwise.
 func (m *Mirror) refused(ctx context.Context, method string, extra *mcp.RequestExtra, key, name string, hidden bool) {
 	c := m.begin(ctx, method, extra, key, m.logText(name))
