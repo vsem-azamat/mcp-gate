@@ -11,7 +11,7 @@ mcp-gate is a single static binary built on the official [MCP Go SDK](https://gi
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/request-path-dark.svg">
-  <img alt="AI agents call mcp-gate, each with its own token. The gate authenticates the caller, checks that the tool is allowed and forwards the call to one MCP server; denied calls go straight back. The result comes back through redaction of secrets, a scan of downloaded files and an audit log. Optionally, redacted secrets are kept in memory for the owner, who reads them with a separate key." src=".github/assets/request-path-light.svg" width="100%">
+  <img alt="Your AI agents (Claude Code, Codex, Cursor) each have their own access key. mcp-gate checks who is calling and whether the tool is allowed, blocks the call if not, and passes it on to the right tool server. On the way back it hides secrets in answers and in downloaded files and keeps a log of who did what. Optionally, hidden secrets wait in a vault for a day, and only your own key opens it." src=".github/assets/request-path-light.svg" width="100%">
 </picture>
 
 ## Why another gateway
