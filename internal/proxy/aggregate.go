@@ -78,9 +78,11 @@ type Aggregate struct {
 	tools   map[string]routed[mcp.Tool]
 	prompts map[string]routed[mcp.Prompt]
 	cats    map[string]Catalog
-	listed  map[string]bool // the members whose listed catalog the views hold
-	skipped map[string]bool
-	views   []*View
+	// tokenCats holds, by member, what each token with a policy on it sees.
+	tokenCats map[string]map[string]Catalog
+	listed    map[string]bool // the members whose listed catalog the views hold
+	skipped   map[string]bool
+	views     []*View
 }
 
 // routed is an entry of the aggregate catalog and where it came from.
@@ -143,6 +145,7 @@ func (a *Aggregate) refresh() {
 // or holds characters the MCP specification does not allow is left out, and logged once.
 func (a *Aggregate) rebuild() {
 	a.cats = make(map[string]Catalog, len(a.members))
+	a.tokenCats = make(map[string]map[string]Catalog, len(a.members))
 	a.listed = make(map[string]bool, len(a.members))
 	a.tools = map[string]routed[mcp.Tool]{}
 	a.prompts = map[string]routed[mcp.Prompt]{}
@@ -156,12 +159,13 @@ func (a *Aggregate) rebuild() {
 		m := a.members[server]
 		// Read before the catalog: a mirror is ready only once its tools were applied.
 		a.listed[server] = m.Ready()
-		c := m.Catalog()
+		c, byToken := m.Catalogs()
 		a.cats[server] = c
+		a.tokenCats[server] = byToken
 		for name, t := range c.Tools {
 			full := server + separator + name
 			if !validAggregateName(full) {
-				skipped[keyTool+"\x00"+full] = true
+				skipped[string(keyTool)+keySep+full] = true
 				a.logSkipped(m, keyTool, full)
 				continue
 			}
@@ -170,7 +174,7 @@ func (a *Aggregate) rebuild() {
 		for name, p := range c.Prompts {
 			full := server + separator + name
 			if !validAggregateName(full) {
-				skipped[keyPrompt+"\x00"+full] = true
+				skipped[string(keyPrompt)+keySep+full] = true
 				a.logSkipped(m, keyPrompt, full)
 				continue
 			}
@@ -192,20 +196,20 @@ func (a *Aggregate) rebuild() {
 	a.skipped = skipped
 }
 
-func (a *Aggregate) logSkipped(m *Mirror, kind, full string) {
-	if a.skipped[kind+"\x00"+full] {
+func (a *Aggregate) logSkipped(m *Mirror, kind auditKey, full string) {
+	if a.skipped[string(kind)+keySep+full] {
 		return
 	}
 	a.logger.Warn(fmt.Sprintf("left out of the aggregate catalog: the prefixed name is longer than %d characters or holds characters outside A-Z a-z 0-9 _ . -", config.AggregateMaxName),
-		"server", m.Name(), "kind", kind, "name", m.logText(full))
+		"server", m.Name(), "kind", string(kind), "name", m.logText(full))
 }
 
 // View returns the view of the given members, which a caller who may reach exactly those
-// servers, under the token policies in policies (by server; a server left out is not narrowed),
-// is served.
-func (a *Aggregate) View(servers []string, policies map[string]*policy.Token) *View {
+// servers is served. principals maps a server to the name of the caller's token there when the
+// token has a policy on it; the view then holds what that token sees on the server.
+func (a *Aggregate) View(servers []string, principals map[string]string) *View {
 	v := &View{
-		a: a, servers: map[string]bool{}, policies: policies,
+		a: a, servers: map[string]bool{}, principals: principals,
 		tools: map[string]*mcp.Tool{}, prompts: map[string]*mcp.Prompt{},
 		resources: map[string]*mcp.Resource{}, templates: map[string]*mcp.ResourceTemplate{},
 	}
@@ -243,10 +247,11 @@ func (a *Aggregate) View(servers []string, policies map[string]*policy.Token) *V
 
 // View is the aggregate catalog of one set of servers.
 type View struct {
-	a        *Aggregate
-	servers  map[string]bool
-	policies map[string]*policy.Token // by server
-	server   *mcp.Server
+	a       *Aggregate
+	servers map[string]bool
+	// principals maps a server to the name of the caller's token there, when it has a policy.
+	principals map[string]string
+	server     *mcp.Server
 
 	// Guarded by a.mu.
 	tools     map[string]*mcp.Tool
@@ -266,8 +271,17 @@ type claim struct {
 // Server is the upstream-facing MCP server of the view.
 func (v *View) Server() *mcp.Server { return v.server }
 
-// sync registers the view's share of the aggregate catalog, without the entries the view's
-// token policies hide. A resource URI or a template that more than one of the view's servers
+// catalog returns what the view's caller sees of a member: the member's catalog for its token
+// when it has a policy there, else the whole. The caller holds a.mu.
+func (v *View) catalog(server string) Catalog {
+	if p := v.principals[server]; p != "" {
+		return v.a.tokenCats[server][p]
+	}
+	return v.a.cats[server]
+}
+
+// sync registers the view's share of the aggregate catalog: of each member, what the member
+// serves the caller's token. A resource URI or a template that more than one of the view's servers
 // lists is left out, since a read could not tell which server it is for; hidden entries count
 // there too, and still route a read to their server, which refuses it, so that a policy does
 // not change where a read goes. The caller holds a.mu.
@@ -275,26 +289,26 @@ func (v *View) sync() {
 	a := v.a
 	tools := map[string]*mcp.Tool{}
 	for full, r := range a.tools {
-		if v.servers[r.server] && v.policies[r.server].Tool(r.name) != policy.Denied {
+		if _, ok := v.catalog(r.server).Tools[r.name]; ok && v.servers[r.server] {
 			t := *r.entry
 			t.Name = full
 			tools[full] = &t
 		}
 	}
-	v.tools = syncSet(a.logger, a.logText, "tool", v.tools, tools, func(t *mcp.Tool) error {
+	v.tools = syncSet(a.logger, a.logText, entryTool, v.tools, tools, func(t *mcp.Tool) error {
 		r := a.tools[t.Name]
 		return guard(func() { v.server.AddTool(t, v.callTool(r.server, r.name)) })
 	}, v.server.RemoveTools)
 
 	prompts := map[string]*mcp.Prompt{}
 	for full, r := range a.prompts {
-		if v.servers[r.server] && v.policies[r.server].Prompt(r.name) != policy.Denied {
+		if _, ok := v.catalog(r.server).Prompts[r.name]; ok && v.servers[r.server] {
 			p := *r.entry
 			p.Name = full
 			prompts[full] = &p
 		}
 	}
-	v.prompts = syncSet(a.logger, a.logText, "prompt", v.prompts, prompts, func(p *mcp.Prompt) error {
+	v.prompts = syncSet(a.logger, a.logText, entryPrompt, v.prompts, prompts, func(p *mcp.Prompt) error {
 		r := a.prompts[p.Name]
 		return guard(func() { v.server.AddPrompt(p, v.getPrompt(r.server, r.name)) })
 	}, v.server.RemovePrompts)
@@ -305,13 +319,12 @@ func (v *View) sync() {
 	seenTemplate := map[string]int{}
 	v.claims = map[string]claim{}
 	for server := range v.servers {
-		c := a.cats[server]
-		p := v.policies[server]
+		c, seen := a.cats[server], v.catalog(server)
 		cl := claim{uris: map[string]bool{}}
 		for uri, r := range c.Resources {
 			cl.uris[uri] = true
 			seenURI[uri]++
-			if p.Resource(uri, r.Name) != policy.Denied {
+			if _, ok := seen.Resources[uri]; ok {
 				resources[uri] = r
 			}
 		}
@@ -320,7 +333,7 @@ func (v *View) sync() {
 				cl.templates = append(cl.templates, tmpl)
 			}
 			seenTemplate[ut]++
-			if p.Resource(ut, t.Name) != policy.Denied {
+			if _, ok := seen.Templates[ut]; ok {
 				templates[ut] = t
 			}
 		}
@@ -330,33 +343,33 @@ func (v *View) sync() {
 	for uri, n := range seenURI {
 		if n > 1 {
 			delete(resources, uri)
-			v.logDropped(dropped, "resource", uri)
+			v.logDropped(dropped, entryResource, uri)
 		}
 	}
 	for ut, n := range seenTemplate {
 		if n > 1 {
 			delete(templates, ut)
-			v.logDropped(dropped, "resource template", ut)
+			v.logDropped(dropped, entryTemplate, ut)
 		}
 	}
 	v.dropped = dropped
-	v.resources = syncSet(a.logger, a.logText, "resource", v.resources, resources, func(r *mcp.Resource) error {
+	v.resources = syncSet(a.logger, a.logText, entryResource, v.resources, resources, func(r *mcp.Resource) error {
 		return guard(func() { v.server.AddResource(r, v.readResource) })
 	}, v.server.RemoveResources)
-	v.templates = syncSet(a.logger, a.logText, "resource template", v.templates, templates, func(t *mcp.ResourceTemplate) error {
+	v.templates = syncSet(a.logger, a.logText, entryTemplate, v.templates, templates, func(t *mcp.ResourceTemplate) error {
 		return guard(func() { v.server.AddResourceTemplate(t, v.readResource) })
 	}, v.server.RemoveResourceTemplates)
 }
 
 // logDropped records a resource or template left out because two of the view's servers list it,
 // and logs it the first time.
-func (v *View) logDropped(dropped map[string]bool, kind, key string) {
-	dropped[kind+"\x00"+key] = true
-	if v.dropped[kind+"\x00"+key] {
+func (v *View) logDropped(dropped map[string]bool, kind entryKind, key string) {
+	dropped[string(kind)+keySep+key] = true
+	if v.dropped[string(kind)+keySep+key] {
 		return
 	}
 	v.a.logger.Warn("left out of the aggregate catalog: more than one server lists it, so a read could not tell which is meant",
-		"kind", kind, "key", v.a.logText(key), "servers", len(v.servers))
+		"kind", string(kind), "key", v.a.logText(key), "servers", len(v.servers))
 }
 
 // logText makes a name for the log as a mirror does, with every rule.
@@ -383,16 +396,16 @@ func (v *View) callTool(server, name string) mcp.ToolHandler {
 		extra, m, ok := v.admit(req.Extra, server)
 		if !ok {
 			v.a.deny(ctx, "tools/call", req.Extra, keyTool, req.Params.Name)
-			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", req.Params.Name)}
+			return nil, errUnknownTool(req.Params.Name)
 		}
 		if !m.mirrored(keyTool, name) {
 			// Gone from the mirror but not yet from the view: refused as on the server's route.
 			m.refused(ctx, "tools/call", extra, keyTool, name, true)
-			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", req.Params.Name)}
+			return nil, errUnknownTool(req.Params.Name)
 		}
 		params := *req.Params
 		params.Name = name
-		return m.callTool(ctx, &mcp.CallToolRequest{Session: req.Session, Params: &params, Extra: extra})
+		return m.callToolAs(ctx, &mcp.CallToolRequest{Session: req.Session, Params: &params, Extra: extra}, req.Params.Name)
 	}
 }
 
@@ -401,15 +414,15 @@ func (v *View) getPrompt(server, name string) mcp.PromptHandler {
 		extra, m, ok := v.admit(req.Extra, server)
 		if !ok {
 			v.a.deny(ctx, "prompts/get", req.Extra, keyPrompt, req.Params.Name)
-			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown prompt %q", req.Params.Name)}
+			return nil, errUnknownPrompt(req.Params.Name)
 		}
 		if !m.mirrored(keyPrompt, name) {
 			m.refused(ctx, "prompts/get", extra, keyPrompt, name, true)
-			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown prompt %q", req.Params.Name)}
+			return nil, errUnknownPrompt(req.Params.Name)
 		}
 		params := *req.Params
 		params.Name = name
-		return m.getPrompt(ctx, &mcp.GetPromptRequest{Session: req.Session, Params: &params, Extra: extra})
+		return m.getPromptAs(ctx, &mcp.GetPromptRequest{Session: req.Session, Params: &params, Extra: extra}, req.Params.Name)
 	}
 }
 
@@ -425,13 +438,13 @@ func (v *View) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (
 			if !m.serves(uri) {
 				// Gone from the mirror but not yet from the view: refused as on the server's route.
 				m.refused(ctx, "resources/read", extra, keyURI, uri, true)
-				return nil, mcp.ResourceNotFoundError(uri)
+				return nil, errUnknownResource(uri)
 			}
 			return m.readResource(ctx, &mcp.ReadResourceRequest{Session: req.Session, Params: req.Params, Extra: extra})
 		}
 	}
 	v.a.deny(ctx, "resources/read", req.Extra, keyURI, uri)
-	return nil, mcp.ResourceNotFoundError(uri)
+	return nil, errUnknownResource(uri)
 }
 
 // route returns the server a resource URI belongs to.
@@ -461,7 +474,7 @@ func (v *View) route(uri string) (string, bool) {
 
 // deny writes the audit line of a request the aggregate refuses before any server sees it, with
 // no server named.
-func (a *Aggregate) deny(ctx context.Context, method string, extra *mcp.RequestExtra, key, name string) {
+func (a *Aggregate) deny(ctx context.Context, method string, extra *mcp.RequestExtra, key auditKey, name string) {
 	if reached, ok := ctx.Value(reachedKey{}).(*bool); ok {
 		*reached = true
 	}
@@ -469,7 +482,7 @@ func (a *Aggregate) deny(ctx context.Context, method string, extra *mcp.RequestE
 	if extra != nil {
 		principal = upstream.Principal(extra.TokenInfo)
 	}
-	a.logger.Info("call", "server", "", "principal", principal, "method", method, key, a.logText(name),
+	a.logger.Info("call", "server", "", "principal", principal, "method", method, string(key), a.logText(name),
 		"durMs", int64(0), "outcome", outcomeDenied, "tokenPolicy", string(policy.NoPolicy), "redactions", 0)
 }
 
@@ -485,7 +498,8 @@ func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 				res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "mcp-gate: internal error"}
 			}
 		}()
-		var key, name string
+		var key auditKey
+		var name string
 		switch r := req.(type) {
 		case *mcp.CallToolRequest:
 			if r.Params != nil {
@@ -509,7 +523,7 @@ func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 			// A read of a URI no member serves is not audited; one the token's policy hides is, by
 			// its member.
 			if server, ok := v.route(name); ok {
-				if extra, m, ok := v.admit(req.GetExtra(), server); ok && m.decision(m.tokenPolicy(extra), keyURI, name) == policy.Denied {
+				if extra, m, ok := v.admit(req.GetExtra(), server); ok && m.decision(principalOf(extra), keyURI, name) == policy.Denied {
 					m.refused(ctx, method, extra, keyURI, name, false)
 				}
 			}
@@ -519,7 +533,7 @@ func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 			if server, rest, ok := splitName(name); ok {
 				if extra, m, ok := v.admit(req.GetExtra(), server); ok {
 					v.a.mu.Lock()
-					skipped := v.a.skipped[key+"\x00"+name]
+					skipped := v.a.skipped[string(key)+keySep+name]
 					v.a.mu.Unlock()
 					m.refused(ctx, method, extra, key, rest, skipped)
 					return res, err

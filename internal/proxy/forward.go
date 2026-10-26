@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/yosida95/uritemplate/v3"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
@@ -30,13 +31,6 @@ const (
 	outcomeInput       = "input_required"
 )
 
-// The attribute of the audit line that names what a request is for, which also tells its kind.
-const (
-	keyTool   = "tool"
-	keyPrompt = "prompt"
-	keyURI    = "uri"
-)
-
 // errNeedsInput is returned for a result that asks the client for input, which mcp-gate does
 // not forward.
 var errNeedsInput = errors.New("this request needs interactive input from the client, which mcp-gate does not support")
@@ -54,7 +48,7 @@ type call struct {
 	req       Request
 }
 
-func (m *Mirror) begin(ctx context.Context, method string, extra *mcp.RequestExtra, attrs ...any) *call {
+func (m *Mirror) begin(ctx context.Context, method string, extra *mcp.RequestExtra, key auditKey, name string) *call {
 	if reached, ok := ctx.Value(reachedKey{}).(*bool); ok {
 		*reached = true
 	}
@@ -64,7 +58,7 @@ func (m *Mirror) begin(ctx context.Context, method string, extra *mcp.RequestExt
 		principal = upstream.Principal(extra.TokenInfo)
 	}
 	return &call{
-		m: m, method: method, principal: principal, decision: policy.NoPolicy, start: time.Now(), attrs: attrs,
+		m: m, method: method, principal: principal, decision: policy.NoPolicy, start: time.Now(), attrs: []any{string(key), name},
 		outcome: outcomeOK, count: &counter{},
 	}
 }
@@ -153,14 +147,19 @@ func (c *call) withheld(err error) error {
 }
 
 func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return m.callToolAs(ctx, req, req.Params.Name)
+}
+
+// callToolAs calls a tool that the caller named shown, the name its errors give.
+func (m *Mirror) callToolAs(ctx context.Context, req *mcp.CallToolRequest, shown string) (*mcp.CallToolResult, error) {
 	name := req.Params.Name
 	c := m.begin(ctx, "tools/call", req.Extra, keyTool, m.logText(name))
 	defer c.end()
 	c.req = Request{Method: "tools/call", Name: name, Arguments: toolArguments(req.Params.Arguments)}
-	c.decision = m.opts.Tokens.For(c.principal).Tool(name)
+	c.decision = m.decision(c.principal, keyTool, name)
 	if !m.opts.Policy.Tools.Allows(name) || c.decision == policy.Denied {
 		c.outcome = outcomeDenied
-		return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", name)}
+		return nil, errUnknownTool(shown)
 	}
 	params := &mcp.CallToolParams{Name: name}
 	if len(req.Params.Arguments) > 0 {
@@ -206,14 +205,19 @@ func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.C
 }
 
 func (m *Mirror) getPrompt(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	return m.getPromptAs(ctx, req, req.Params.Name)
+}
+
+// getPromptAs gets a prompt that the caller named shown, the name its errors give.
+func (m *Mirror) getPromptAs(ctx context.Context, req *mcp.GetPromptRequest, shown string) (*mcp.GetPromptResult, error) {
 	name := req.Params.Name
 	c := m.begin(ctx, "prompts/get", req.Extra, keyPrompt, m.logText(name))
 	defer c.end()
 	c.req = Request{Method: "prompts/get", Name: name, Arguments: promptArguments(req.Params.Arguments)}
-	c.decision = m.opts.Tokens.For(c.principal).Prompt(name)
+	c.decision = m.decision(c.principal, keyPrompt, name)
 	if !m.opts.Policy.Prompts.Allows(name) || c.decision == policy.Denied {
 		c.outcome = outcomeDenied
-		return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown prompt %q", name)}
+		return nil, errUnknownPrompt(shown)
 	}
 	params := &mcp.GetPromptParams{Name: name, Arguments: req.Params.Arguments}
 	var res *mcp.GetPromptResult
@@ -238,10 +242,10 @@ func (m *Mirror) readResource(ctx context.Context, req *mcp.ReadResourceRequest)
 	c := m.begin(ctx, "resources/read", req.Extra, keyURI, m.logText(uri))
 	defer c.end()
 	c.req = Request{Method: "resources/read", Name: uri}
-	c.decision = m.readDecision(m.opts.Tokens.For(c.principal), uri)
+	c.decision = m.decision(c.principal, keyURI, uri)
 	if !m.opts.Policy.ReadAllowed(uri) || c.decision == policy.Denied {
 		c.outcome = outcomeDenied
-		return nil, mcp.ResourceNotFoundError(uri)
+		return nil, errUnknownResource(uri)
 	}
 	params := &mcp.ReadResourceParams{URI: uri}
 	var res *mcp.ReadResourceResult
@@ -344,16 +348,24 @@ func downstreamMeta(meta mcp.Meta, forward []string) mcp.Meta {
 	return out
 }
 
-// mirrored reports whether the tool or prompt name is in the mirrored catalog.
-func (m *Mirror) mirrored(key, name string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if key == keyTool {
+// mirrored reports whether the mirrored catalog has the tool or prompt name, or serves the
+// resource URI.
+func (m *Mirror) mirrored(key auditKey, name string) bool {
+	switch key {
+	case keyTool:
+		m.mu.Lock()
+		defer m.mu.Unlock()
 		_, ok := m.tools[name]
 		return ok
+	case keyPrompt:
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		_, ok := m.prompts[name]
+		return ok
+	case keyURI:
+		return m.serves(name)
 	}
-	_, ok := m.prompts[name]
-	return ok
+	return false
 }
 
 // serves reports whether the mirrored catalog lists the resource URI or has a template that
@@ -361,49 +373,7 @@ func (m *Mirror) mirrored(key, name string) bool {
 func (m *Mirror) serves(uri string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.resources[uri]; ok {
-		return true
-	}
-	for ut := range m.templates {
-		if t, err := uritemplate.New(ut); err == nil && t.Regexp().MatchString(uri) {
-			return true
-		}
-	}
-	return false
-}
-
-// readDecision returns what a token policy decides about a read of uri, given the mirrored
-// resources and the mirrored templates that match it.
-func (m *Mirror) readDecision(p *policy.Token, uri string) policy.Decision {
-	if p == nil {
-		return policy.NoPolicy
-	}
-	m.mu.Lock()
-	resources := make([]policy.Entry, 0, len(m.resources))
-	for _, r := range m.resources {
-		resources = append(resources, policy.Entry{Key: r.URI, Name: r.Name})
-	}
-	var matching []policy.Entry
-	for ut, t := range m.templates {
-		if tmpl, err := uritemplate.New(ut); err == nil && tmpl.Regexp().MatchString(uri) {
-			matching = append(matching, policy.Entry{Key: ut, Name: t.Name})
-		}
-	}
-	m.mu.Unlock()
-	return p.Read(uri, resources, matching)
-}
-
-// decision returns what a token policy decides about a tool, a prompt or a resource read (key
-// keyTool, keyPrompt or keyURI).
-func (m *Mirror) decision(p *policy.Token, key, name string) policy.Decision {
-	switch key {
-	case keyTool:
-		return p.Tool(name)
-	case keyPrompt:
-		return p.Prompt(name)
-	default:
-		return m.readDecision(p, name)
-	}
+	return m.served.uris[uri] || slices.ContainsFunc(m.served.templates, func(re *regexp.Regexp) bool { return re.MatchString(uri) })
 }
 
 // servesSpelling reports whether the mirror serves uri, or lists a resource whose URI has the
@@ -415,12 +385,44 @@ func (m *Mirror) servesSpelling(uri string) bool {
 	key := policy.NormalizeURI(uri)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for u := range m.resources {
-		if policy.NormalizeURI(u) == key {
-			return true
+	return m.served.keys[key]
+}
+
+// decision returns what the policy of the token named principal decides about a tool, a prompt
+// or a resource read. A policy decides only about what the mirrored catalog holds: a name it
+// does not have, or a URI it does not serve in any spelling, is NoPolicy, so that the audit
+// line does not credit a policy with what the server's own filter or the server itself refused.
+func (m *Mirror) decision(principal string, key auditKey, name string) policy.Decision {
+	v := m.views[principal]
+	if v == nil || principal == "" {
+		return policy.NoPolicy
+	}
+	switch key {
+	case keyTool:
+		if m.mirrored(keyTool, name) {
+			return policy.DecisionOf(v.policy.Tools.Allows(name))
+		}
+	case keyPrompt:
+		if m.mirrored(keyPrompt, name) {
+			return policy.DecisionOf(v.policy.Prompts.Allows(name))
+		}
+	case keyURI:
+		if m.servesSpelling(name) {
+			m.mu.Lock()
+			reads := v.reads
+			m.mu.Unlock()
+			return policy.DecisionOf(reads.Allowed(name))
 		}
 	}
-	return false
+	return policy.NoPolicy
+}
+
+// principalOf returns the token name of a request, or "".
+func principalOf(extra *mcp.RequestExtra) string {
+	if extra == nil {
+		return ""
+	}
+	return upstream.Principal(extra.TokenInfo)
 }
 
 // reachedKey marks, in a request's context, whether the request reached a mirror handler.
@@ -440,7 +442,8 @@ func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
 				res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "mcp-gate: internal error"}
 			}
 		}()
-		var key, name string
+		var key auditKey
+		var name string
 		switch r := req.(type) {
 		case *mcp.CallToolRequest:
 			if r.Params != nil {
@@ -462,7 +465,7 @@ func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
 		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
 		// A read of a URI the server does not serve is not audited; one the token's policy hides
 		// is.
-		if err != nil && !*reached && (key != keyURI || m.servesSpelling(name) && m.decision(m.tokenPolicy(req.GetExtra()), key, name) == policy.Denied) {
+		if err != nil && !*reached && (key != keyURI || m.decision(principalOf(req.GetExtra()), key, name) == policy.Denied) {
 			m.refused(ctx, method, req.GetExtra(), key, name, false)
 		}
 		return res, err
@@ -472,9 +475,9 @@ func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
 // refused writes the audit line of a tool call, prompt get or resource read (key keyTool,
 // keyPrompt or keyURI) that did not reach a handler: denied when the name is not in the mirrored
 // catalog, hidden is set or the caller's token policy hides it, an error otherwise.
-func (m *Mirror) refused(ctx context.Context, method string, extra *mcp.RequestExtra, key, name string, hidden bool) {
+func (m *Mirror) refused(ctx context.Context, method string, extra *mcp.RequestExtra, key auditKey, name string, hidden bool) {
 	c := m.begin(ctx, method, extra, key, m.logText(name))
-	c.decision = m.decision(m.tokenPolicy(extra), key, name)
+	c.decision = m.decision(principalOf(extra), key, name)
 	c.outcome = outcomeError
 	if hidden || c.decision == policy.Denied || !m.mirrored(key, name) {
 		c.outcome = outcomeDenied

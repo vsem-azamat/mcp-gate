@@ -11,24 +11,32 @@ func TestFilters(t *testing.T) {
 	deny := &config.Filter{Deny: []string{"a"}}
 	emptyAllow := &config.Filter{Allow: []string{}}
 	emptyDeny := &config.Filter{Deny: []string{}}
+	type filter interface {
+		Allows(...string) bool
+		ExposesNothing() bool
+	}
 	cases := []struct {
 		name    string
-		f       Filter
+		f       filter
 		keys    []string
 		want    bool
 		nothing bool
 	}{
-		{name: "no tool filter", f: NewToolFilter(nil), keys: []string{"x"}, want: true},
-		{name: "no filter", f: NewFilter(nil), keys: []string{"x"}, want: true},
-		{name: "allow listed", f: NewFilter(allow), keys: []string{"a"}, want: true},
-		{name: "allow other key listed", f: NewFilter(allow), keys: []string{"x", "b"}, want: true},
-		{name: "allow unlisted", f: NewFilter(allow), keys: []string{"x"}, want: false},
-		{name: "deny listed", f: NewFilter(deny), keys: []string{"a"}, want: false},
-		{name: "deny other key listed", f: NewFilter(deny), keys: []string{"x", "a"}, want: false},
-		{name: "deny unlisted", f: NewFilter(deny), keys: []string{"x"}, want: true},
-		{name: "empty tool allow list filters nothing", f: NewToolFilter(emptyAllow), keys: []string{"x"}, want: true},
-		{name: "empty allow list exposes nothing", f: NewFilter(emptyAllow), keys: []string{"x"}, want: false, nothing: true},
-		{name: "empty deny list", f: NewFilter(emptyDeny), keys: []string{"x"}, want: true},
+		{name: "no tool filter", f: NewServerToolFilter(nil), keys: []string{"x"}, want: true},
+		{name: "no filter", f: NewServerFilter(nil), keys: []string{"x"}, want: true},
+		{name: "allow listed", f: NewServerFilter(allow), keys: []string{"a"}, want: true},
+		{name: "allow other key listed", f: NewServerFilter(allow), keys: []string{"x", "b"}, want: true},
+		{name: "allow unlisted", f: NewServerFilter(allow), keys: []string{"x"}, want: false},
+		{name: "deny listed", f: NewServerFilter(deny), keys: []string{"a"}, want: false},
+		{name: "deny other key listed", f: NewServerFilter(deny), keys: []string{"x", "a"}, want: false},
+		{name: "deny unlisted", f: NewServerFilter(deny), keys: []string{"x"}, want: true},
+		{name: "empty tool allow list filters nothing", f: NewServerToolFilter(emptyAllow), keys: []string{"x"}, want: true},
+		{name: "empty allow list exposes nothing", f: NewServerFilter(emptyAllow), keys: []string{"x"}, want: false, nothing: true},
+		{name: "empty deny list", f: NewServerFilter(emptyDeny), keys: []string{"x"}, want: true},
+		{name: "no token filter", f: NewTokenFilter(nil), keys: []string{"x"}, want: true},
+		{name: "token none", f: NewTokenFilter(&config.PolicyFilter{None: true}), keys: []string{"x"}, want: false, nothing: true},
+		{name: "token allow", f: NewTokenFilter(&config.PolicyFilter{Allow: []string{"a"}}), keys: []string{"a"}, want: true},
+		{name: "token deny", f: NewTokenFilter(&config.PolicyFilter{Deny: []string{"a"}}), keys: []string{"a"}, want: false},
 	}
 	for _, c := range cases {
 		if got := c.f.Allows(c.keys...); got != c.want {
@@ -38,10 +46,10 @@ func TestFilters(t *testing.T) {
 			t.Errorf("%s: ExposesNothing = %v", c.name, got)
 		}
 	}
-	if !NewFilter(deny).Deny() || NewFilter(allow).Deny() || NewFilter(nil).Deny() {
+	if !NewServerFilter(deny).Deny() || NewServerFilter(allow).Deny() || NewServerFilter(nil).Deny() {
 		t.Error("Deny reports the wrong kind of list")
 	}
-	if got := NewFilter(allow).Listed(); got != nil {
+	if got := NewServerFilter(allow).Listed(); got != nil {
 		t.Errorf("Listed of an allow list = %v", got)
 	}
 }
@@ -87,8 +95,8 @@ func TestNormalizeURI(t *testing.T) {
 }
 
 func TestReadAllowed(t *testing.T) {
-	deny := New(&config.Server{Resources: &config.Filter{Deny: []string{"fake://listed"}}})
-	deny.SetHiddenResources([]string{"fake://hidden"})
+	deny := New(&config.Server{Resources: &config.Filter{Deny: []string{"fake://listed", "hidden", "secret"}}})
+	deny.SetCatalog([]Entry{{"fake://hidden", "hidden"}, {"fake://ok", "ok"}}, []Entry{{"fake://{+path}", "any"}, {"fake://secret/{id}", "secret"}})
 	for uri, want := range map[string]bool{
 		"fake://listed":      false,
 		"FAKE://listed":      false,
@@ -96,6 +104,7 @@ func TestReadAllowed(t *testing.T) {
 		"fake://%68idden":    false,
 		"fake://hidden#x":    false,
 		"fake://other":       true,
+		"fake://ok":          true,
 		"fake://HIDDEN":      false, // the host is not case-sensitive
 		"fake://items/one":   true,
 		"fake://hidden/":     false,
@@ -104,6 +113,7 @@ func TestReadAllowed(t *testing.T) {
 		"fake://x/../hidden": false,
 		"fake://hidden%2F":   false,
 		"fake://hidden;":     false,
+		"fake://secret/7":    false, // a hidden template matches it
 	} {
 		if got := deny.ReadAllowed(uri); got != want {
 			t.Errorf("deny list: ReadAllowed(%q) = %v, want %v", uri, got, want)
@@ -116,80 +126,73 @@ func TestReadAllowed(t *testing.T) {
 	if none.ReadAllowed("fake://anything") {
 		t.Error("an empty allow list lets a read through")
 	}
-	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"fake://a"}}})
-	allow.SetHiddenResources([]string{"fake://b"})
-	if !allow.ReadAllowed("fake://b") {
-		t.Error("an allow list checks reads against hidden resources; the catalog filter does that")
+	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"fake://a", "any"}}})
+	allow.SetCatalog([]Entry{{"fake://a", "a"}, {"fake://b", "b"}}, []Entry{{"fake://{+path}", "any"}, {"other://{id}", "other"}})
+	for uri, want := range map[string]bool{
+		"fake://a": true, "fake://b": false, "FAKE://%62": false, "fake://c": true, "other://1": false, "none://x": false,
+	} {
+		if got := allow.ReadAllowed(uri); got != want {
+			t.Errorf("allow list: ReadAllowed(%q) = %v, want %v", uri, got, want)
+		}
 	}
 }
 
 func TestTokenPolicies(t *testing.T) {
 	cfg := &config.Config{Policies: map[string]*config.TokenPolicy{
 		"agent": {Servers: map[string]*config.ServerPolicy{
-			"a": {Tools: &config.Filter{Allow: []string{}}, Prompts: &config.Filter{Deny: []string{"p"}}},
-			"b": {Resources: &config.Filter{Allow: []string{"items"}}},
+			"a": {Tools: &config.PolicyFilter{None: true}, Prompts: &config.PolicyFilter{Deny: []string{"p"}}},
+			"b": {Resources: &config.PolicyFilter{Allow: []string{"items"}}},
 		}},
 	}}
 	a, b := NewTokens(cfg, "a"), NewTokens(cfg, "b")
 	if a.For("other") != nil || a.For("") != nil || NewTokens(cfg, "c").For("agent") != nil {
 		t.Error("a policy where none is set")
 	}
-	var none *Token
-	if none.Tool("x") != NoPolicy || none.Read("x://y", nil, nil) != NoPolicy {
-		t.Error("a nil policy decides")
-	}
 	p := a.For("agent")
-	for _, c := range []struct {
-		name      string
-		got, want Decision
-	}{
-		{"an empty tool allow list exposes nothing", p.Tool("echo"), Denied},
-		{"prompt denied", p.Prompt("p"), Denied},
-		{"prompt passed", p.Prompt("q"), Allowed},
-		{"no resource filter", p.Resource("x://y", "y"), Allowed},
-		{"template allowed by name", b.For("agent").Resource("x://items/{id}", "items"), Allowed},
-		{"tool without a filter", b.For("agent").Tool("echo"), Allowed},
-	} {
-		if c.got != c.want {
-			t.Errorf("%s: %s, want %s", c.name, c.got, c.want)
-		}
+	if p.Tools.Allows("echo") || p.Prompts.Allows("p") || !p.Prompts.Allows("q") || !p.Resources.Allows("x://y", "y") {
+		t.Error("agent's filters on a")
+	}
+	if q := b.For("agent"); !q.Resources.Allows("x://items/{id}", "items") || !q.Tools.Allows("echo") {
+		t.Error("agent's filters on b")
+	}
+	if DecisionOf(true) != Allowed || DecisionOf(false) != Denied {
+		t.Error("DecisionOf")
 	}
 }
 
 func TestTokenReads(t *testing.T) {
 	resources := []Entry{{"fake://info", "info"}, {"fake://hidden", "hidden"}}
-	items := Entry{"fake://items/{id}", "items"}
-	anyPath := Entry{"fake://{+path}", "any"}
-	policy := func(f config.Filter) *Token {
+	templates := []Entry{{"fake://items/{id}", "items"}, {"fake://{+path}", "any"}}
+	reads := func(f config.PolicyFilter) *Reads {
 		cfg := &config.Config{Policies: map[string]*config.TokenPolicy{"t": {Servers: map[string]*config.ServerPolicy{"s": {Resources: &f}}}}}
-		return NewTokens(cfg, "s").For("t")
+		return NewTokens(cfg, "s").For("t").Reads(resources, templates)
 	}
-	allow := policy(config.Filter{Allow: []string{"fake://info", "items"}})
-	deny := policy(config.Filter{Deny: []string{"hidden", "items"}})
-	none := policy(config.Filter{Allow: []string{}})
+	allow := reads(config.PolicyFilter{Allow: []string{"fake://info", "items"}})
+	anyTemplate := reads(config.PolicyFilter{Allow: []string{"any"}})
+	deny := reads(config.PolicyFilter{Deny: []string{"hidden", "items"}})
+	none := reads(config.PolicyFilter{None: true})
 	for _, c := range []struct {
-		name     string
-		p        *Token
-		uri      string
-		matching []Entry
-		want     Decision
+		name string
+		r    *Reads
+		uri  string
+		want bool
 	}{
-		{"allowed resource", allow, "fake://info", []Entry{anyPath}, Allowed},
-		{"resource not allowed", allow, "fake://hidden", []Entry{anyPath}, Denied},
-		{"through an allowed template", allow, "fake://items/7", []Entry{items, anyPath}, Allowed},
-		{"through a template not allowed", allow, "fake://other", []Entry{anyPath}, Denied},
-		{"hidden resource in another spelling through an allowed template", policy(config.Filter{Allow: []string{"any"}}), "FAKE://%68idden", []Entry{anyPath}, Denied},
-		{"resource through an allowed template", policy(config.Filter{Allow: []string{"any"}}), "fake://other", []Entry{anyPath}, Allowed},
-		{"nothing matches", allow, "other://x", nil, Denied},
-		{"resource denied by name", deny, "fake://hidden", []Entry{anyPath}, Denied},
-		{"hidden resource in another spelling", deny, "FAKE:///%68idden/", []Entry{anyPath}, Denied},
-		{"through a denied template", deny, "fake://items/7", []Entry{items, anyPath}, Denied},
-		{"through a template passed", deny, "fake://other", []Entry{anyPath}, Allowed},
-		{"resource passed", deny, "fake://info", []Entry{anyPath}, Allowed},
-		{"empty allow list", none, "fake://info", nil, Denied},
+		{"allowed resource", allow, "fake://info", true},
+		{"resource not allowed", allow, "fake://hidden", false},
+		{"through an allowed template", allow, "fake://items/7", true},
+		{"through a template not allowed", allow, "fake://other", false},
+		{"nothing matches", allow, "other://x", false},
+		{"hidden resource in another spelling through an allowed template", anyTemplate, "FAKE://%68idden", false},
+		{"resource through an allowed template", anyTemplate, "fake://other", true},
+		{"resource denied by name", deny, "fake://hidden", false},
+		{"hidden resource in another spelling", deny, "FAKE:///%68idden/", false},
+		{"through a denied template", deny, "fake://items/7", false},
+		{"through a template passed", deny, "fake://other", true},
+		{"resource passed", deny, "fake://info", true},
+		{"none", none, "fake://info", false},
 	} {
-		if got := c.p.Read(c.uri, resources, c.matching); got != c.want {
-			t.Errorf("%s: Read(%s) = %s, want %s", c.name, c.uri, got, c.want)
+		if got := c.r.Allowed(c.uri); got != c.want {
+			t.Errorf("%s: Allowed(%s) = %v, want %v", c.name, c.uri, got, c.want)
 		}
 	}
 }

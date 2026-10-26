@@ -273,3 +273,34 @@ func TestSlowReader(t *testing.T) {
 	}
 	_, _ = io.CopyN(io.Discard, res.Body, 1)
 }
+
+// A server's filters refuse a read the server could answer through a template they hide, and,
+// under an allow list, another spelling of a listed resource they hide.
+func TestFilteredReadsThroughTemplates(t *testing.T) {
+	f := testkit.Fake{Catalog: true}
+	r := startGate(t, configDoc("", map[string]string{
+		"deny":  stdioServer(t, f, "resources: {deny: [items]}\n"),
+		"allow": stdioServer(t, f, "resources: {allow: [any, fake://info]}\n"),
+	}), gateOpts{})
+	r.waitReady(t, "deny")
+	r.waitReady(t, "allow")
+	read := func(server, uri string) error {
+		_, err := r.connect(t, server, clientOpts{}).ReadResource(t.Context(), &mcp.ReadResourceParams{URI: uri})
+		return err
+	}
+	for _, c := range []struct {
+		server, uri string
+		ok          bool
+	}{
+		{"deny", "fake://items/7", false},
+		{"deny", "fake://other", true},
+		{"allow", "fake://other", true},
+		{"allow", "fake://info", true},
+		{"allow", "fake://hidden", false},
+		{"allow", "FAKE://%68idden", false},
+	} {
+		if err := read(c.server, c.uri); (err == nil) != c.ok {
+			t.Errorf("%s reads %s: %v", c.server, c.uri, err)
+		}
+	}
+}

@@ -238,7 +238,7 @@ func TestDownstreamErrorHidesURL(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Redaction: c.redaction})
 			m.Attach(urlDown{})
-			call := m.begin(t.Context(), "tools/call", nil)
+			call := m.begin(t.Context(), "tools/call", nil, keyTool, "x")
 			out := call.downstreamError(t.Context(), c.err)
 			var rpc *jsonrpc.Error
 			if !errors.As(out, &rpc) || rpc.Code != c.code {

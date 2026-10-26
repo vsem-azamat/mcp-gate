@@ -11,30 +11,39 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/testkit"
 )
 
-// policyGate serves cat (a full catalog) and plain (tools only) to the global tokens laptop and
-// phone, also on the aggregate endpoint. laptop has no policy; phone sees only echo, no prompts
-// and only fake://info and the items template on cat, and every tool but env on plain. open has
-// no policies.
-func policyGate(t *testing.T) *running {
+// policyDoc is the config of policyGate with the given policies of phone.
+func policyDoc(t *testing.T, policies string) string {
 	t.Helper()
-	doc := `version: 1
+	return `version: 1
 auth:
   tokens: {laptop: "${LAPTOP}", phone: "${PHONE}"}
 aggregate: {}
 policies:
   phone:
     servers:
-      cat:
+` + policies + `servers:
+  cat:
+` + stdioServer(t, testkit.Fake{Catalog: true}, "") + `  plain:
+` + stdioServer(t, testkit.Fake{}, "tools: {deny: [pids]}\n") + `  open:
+` + stdioServer(t, testkit.Fake{}, "")
+}
+
+// The policies of phone that policyGate serves.
+const phonePolicies = `      cat:
         tools: {allow: [echo]}
-        prompts: {allow: []}
+        prompts: none
         resources: {allow: [fake://info, items]}
       plain:
         tools: {deny: [env]}
-servers:
-  cat:
-` + stdioServer(t, testkit.Fake{Catalog: true}, "") + `  plain:
-` + stdioServer(t, testkit.Fake{}, "") + `  open:
-` + stdioServer(t, testkit.Fake{}, "")
+`
+
+// policyGate serves cat (a full catalog), plain (tools only, without pids by its own filter)
+// and open to the global tokens laptop and phone, also on the aggregate endpoint. laptop has no
+// policy; phone sees only echo, no prompts and only fake://info and the items template on cat,
+// and every tool but env on plain. Nobody has a policy on open.
+func policyGate(t *testing.T) *running {
+	t.Helper()
+	doc := policyDoc(t, phonePolicies)
 	r := startGate(t, doc, gateOpts{})
 	for _, s := range []string{"cat", "plain", "open"} {
 		r.waitReady(t, s)
@@ -164,6 +173,26 @@ func TestTokenPolicyRefusals(t *testing.T) {
 	}
 	if err := read(laptop)("fake://hidden"); err != nil {
 		t.Errorf("laptop reads fake://hidden: %v", err)
+	}
+
+	// A policy decides only about what the server has: an unknown name, or one the server's
+	// own filter hides, is no policy's doing.
+	plain := r.connect(t, "plain", clientOpts{header: "Bearer " + phoneToken})
+	for _, name := range []string{"nosuch", "pids"} {
+		if _, err := plain.CallTool(t.Context(), &mcp.CallToolParams{Name: name}); err == nil {
+			t.Errorf("phone called %s on plain", name)
+		}
+	}
+	for _, c := range []struct{ server, tool string }{{"cat", "nosuch"}, {"plain", "nosuch"}, {"plain", "pids"}} {
+		var found map[string]any
+		for _, l := range r.calls("tool", c.tool) {
+			if l["server"] == c.server && l["principal"] == "phone" {
+				found = l
+			}
+		}
+		if found["outcome"] != "denied" || found["tokenPolicy"] != "none" {
+			t.Errorf("audit line of phone's %s on %s: %v", c.tool, c.server, found)
+		}
 	}
 
 	// The audit line records the decision.

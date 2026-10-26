@@ -110,6 +110,9 @@ func New(opts Options) (*Gate, error) {
 	if cfg.Listen.BehindProxy && len(cfg.Listen.AllowedHosts) == 0 {
 		g.logger.Warn("listen.behindProxy is set without listen.allowedHosts: no Host is checked, so the proxy must check it")
 	}
+	for _, w := range cfg.Warnings {
+		g.logger.Warn("config: " + w)
+	}
 	if cfg.FileRootsUnchecked {
 		g.logger.Warn("$HOME is unset or relative, so redact.files.roots were not checked against the home directory")
 	}

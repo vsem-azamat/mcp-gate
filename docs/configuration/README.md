@@ -31,7 +31,7 @@ aggregate:
 policies:
   phone:                   # a token name
     servers:
-      notes: {tools: {allow: [search]}, resources: {allow: []}}
+      notes: {tools: {allow: [search]}, resources: none}
       mail: {tools: {deny: [send_message, delete_message]}}
 servers:
   notes:
@@ -102,7 +102,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `aggregate` | none | Serve servers together at `/mcp`, tools and prompts named `<server>__<name>` (see [serve](../commands/serve.md#aggregate-endpoint)). `aggregate: {}` serves every enabled server; `aggregate:` without a value is an error |
 | `aggregate.servers` | every server | The servers served at `/mcp`; not empty, no name twice. A disabled server is left out. A server served there cannot have `__` in its name or end in `_`, and its name is at most 61 characters |
 | `aggregate.log.requests` | `false` | Log each HTTP request to `/mcp`, as `log.requests` does for a server |
-| `policies.<token>.servers.<server>` | none | The token's own filters on that server, applied after the server's (see [Token policies](#token-policies)): `tools`, `prompts` and `resources`, at least one |
+| `policies.<token>.servers.<server>` | none | The token's own filters on that server, applied after the server's (see [Token policies](#token-policies)): `tools`, `prompts` and `resources`, at least one, each a non-empty `allow` or `deny` list or `none` |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |
@@ -145,9 +145,9 @@ Each server has exactly one of `stdio` and `http`. Every server that is not `pub
 
 ## Token policies
 
-`policies.<token>.servers.<server>` narrows what one token sees and may call on one server. Its `tools`, `prompts` and `resources` read like a server's filters of the same name, matched by the same keys, and apply after them: an entry reaches the token only when both pass it. One difference: an empty allow list exposes nothing for tools too, so `tools: {allow: []}` hides every tool from the token. A filter left out, and a server the policy does not name, narrow nothing. The policy holds on the server's own route and on `/mcp` alike (see [serve](../commands/serve.md#token-policies)).
+`policies.<token>.servers.<server>` narrows what one token sees and may call on one server. Its `tools`, `prompts` and `resources` are matched like a server's filters of the same name, by the same keys, and apply after them: an entry reaches the token only when both pass it. Each is a non-empty `allow` list, a non-empty `deny` list, or `none`, which hides every entry of its kind (`tools: none`). Empty lists are rejected, since a server's empty tool allow list exposes every tool and a snippet moved from one to the other would then fail open; `mcp-gate check` names `none` in its error. Entries are the server's own names, without the `<server>__` prefix of `/mcp`, and have no surrounding space. A filter left out, and a server the policy does not name, narrow nothing. The policy holds on the server's own route and on `/mcp` alike (see [serve](../commands/serve.md#token-policies)).
 
-The token is the name of one in `auth.tokens` or in a server's `auth.tokens`, and each server named must exist and accept that token; a public server takes no token, so it cannot be named. `mcp-gate check` reports a policy that breaks these rules, such as `policies.phone.servers.nope: is not a server in servers`.
+The key under `policies` is a token name as each server knows it: a token from `auth.tokens` on the servers that inherit them, and a server's own `auth.tokens` entry on that server. Two servers with `inherit: false` may each have their own token of the same name, with different values; a policy under that name applies on each server to that server's token. Each server named must exist and accept the token; a public server takes no token, so it cannot be named. `mcp-gate check` reports a policy that breaks these rules, such as `policies.phone.servers.nope: is not a server in servers`, and warns about a policy on a disabled server, which has no effect until the server is enabled. It also warns about a server's `tools: {allow: []}`, which exposes every tool.
 
 ## Values
 

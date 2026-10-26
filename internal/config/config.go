@@ -78,6 +78,9 @@ type Config struct {
 	// Escrow configures the secret escrow, which is on when its key hash is in the config or the
 	// environment.
 	Escrow Escrow `yaml:"escrow,omitempty"`
+	// Warnings are set by Parse: problems that do not stop the config from loading, each
+	// naming its field.
+	Warnings []string `yaml:"-"`
 	// Aggregate, if set, serves the tools, prompts and resources of several servers at
 	// AggregatePath.
 	Aggregate *Aggregate `yaml:"aggregate,omitempty"`
@@ -94,13 +97,75 @@ type TokenPolicy struct {
 	Servers map[string]*ServerPolicy `yaml:"servers"`
 }
 
-// ServerPolicy is a token's filters on one server, each read as a server's filter of the same
-// kind, except that an empty allow list exposes nothing for tools too. A nil filter narrows
-// nothing.
+// ServerPolicy is a token's filters on one server, each matched as a server's filter of the same
+// kind. A nil filter narrows nothing.
 type ServerPolicy struct {
-	Tools     *Filter `yaml:"tools,omitempty"`
-	Prompts   *Filter `yaml:"prompts,omitempty"`
-	Resources *Filter `yaml:"resources,omitempty"`
+	Tools     *PolicyFilter `yaml:"tools,omitempty"`
+	Prompts   *PolicyFilter `yaml:"prompts,omitempty"`
+	Resources *PolicyFilter `yaml:"resources,omitempty"`
+}
+
+// PolicyNone is the value of a policy filter that hides every entry of its kind.
+const PolicyNone = "none"
+
+// PolicyFilter is one filter of a token policy: an allow list, a deny list, or PolicyNone,
+// written as a plain value. Validation keeps the lists from being empty, so that no filter
+// reads differently from a server's filter of the same form.
+type PolicyFilter struct {
+	// None hides every entry of the filter's kind.
+	None  bool     `yaml:"-"`
+	Allow []string `yaml:"allow"`
+	Deny  []string `yaml:"deny"`
+}
+
+// UnmarshalYAML decodes PolicyNone or a mapping with the keys allow and deny, strictly.
+func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		if n.Tag == "!!str" && n.Value == PolicyNone {
+			f.None = true
+			return nil
+		}
+	case yaml.MappingNode:
+		seen := map[string]bool{}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			var list *[]string
+			switch k.Value {
+			case "allow":
+				list = &f.Allow
+			case "deny":
+				list = &f.Deny
+			default:
+				return fmt.Errorf("line %d: field %s not found in a policy filter", k.Line, k.Value)
+			}
+			if seen[k.Value] {
+				return fmt.Errorf("line %d: %s is set twice", k.Line, k.Value)
+			}
+			seen[k.Value] = true
+			if err := v.Decode(list); err != nil {
+				return err
+			}
+			if *list == nil {
+				*list = []string{} // written without a value: an empty list
+			}
+		}
+		return nil
+	case yaml.DocumentNode, yaml.SequenceNode, yaml.AliasNode:
+	}
+	return fmt.Errorf("line %d: a policy filter is %q or a mapping with allow or deny", n.Line, PolicyNone)
+}
+
+// Filter returns f as a server filter of prompts or resources would read it: PolicyNone as an
+// empty allow list. f may be nil.
+func (f *PolicyFilter) Filter() *Filter {
+	switch {
+	case f == nil:
+		return nil
+	case f.None:
+		return &Filter{Allow: []string{}}
+	}
+	return &Filter{Allow: f.Allow, Deny: f.Deny}
 }
 
 // ServerPolicy returns the policy of the token named token on server; nil when it has none.

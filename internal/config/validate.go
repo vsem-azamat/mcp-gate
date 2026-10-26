@@ -119,6 +119,9 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 			continue
 		}
 		s.validate(path, add)
+		if s.Tools != nil && s.Tools.Allow != nil && len(s.Tools.Allow) == 0 {
+			c.warn(path+".tools", "an empty allow list exposes every tool, as mcp-proxy's toolFilter did; remove the key to say so")
+		}
 		if f := s.Redact.Files; f != nil && !f.validateHome(path+".redact.files", home, add) {
 			c.FileRootsUnchecked = true
 		}
@@ -129,7 +132,8 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 }
 
 // validatePolicies checks that every policy names a token some server accepts and only servers
-// that accept it.
+// that accept it, with filters that cannot be read the way a server's filter of another form
+// would be.
 func (c *Config) validatePolicies(add func(path, format string, args ...any)) {
 	tokens := make([]string, 0, len(c.Policies))
 	for name := range c.Policies {
@@ -167,16 +171,63 @@ func (c *Config) validatePolicies(add func(path, format string, args ...any)) {
 					add(sp, "the server does not accept the token %s", token)
 				}
 			}
+			if s.Disabled {
+				c.warn(sp, "the server is disabled, so the policy has no effect until it is enabled")
+			}
 			f := p.Servers[server]
 			if f == nil || f.Tools == nil && f.Prompts == nil && f.Resources == nil {
 				add(sp, "needs at least one of tools, prompts and resources")
 				continue
 			}
-			f.Tools.validate(sp+".tools", add)
-			f.Prompts.validate(sp+".prompts", add)
-			f.Resources.validate(sp+".resources", add)
+			f.Tools.validate(sp+".tools", "tool", server, add)
+			f.Prompts.validate(sp+".prompts", "prompt", server, add)
+			f.Resources.validate(sp+".resources", "resource", "", add)
 		}
 	}
+}
+
+// validate checks a policy filter of the kind of entry named by noun. prefix, if set, is the
+// server whose name the aggregate endpoint puts before the entries' names, which a policy does
+// not use.
+func (f *PolicyFilter) validate(path, noun, prefix string, add func(path, format string, args ...any)) {
+	if f == nil || f.None {
+		return
+	}
+	if (f.Allow == nil) == (f.Deny == nil) {
+		add(path, "needs exactly one of allow and deny, or %s", PolicyNone)
+		return
+	}
+	list, which := f.Allow, "allow"
+	if f.Deny != nil {
+		list, which = f.Deny, "deny"
+	}
+	switch {
+	case len(list) == 0 && which == "allow":
+		key := path[strings.LastIndexByte(path, '.')+1:]
+		add(path+".allow", "is empty; a policy takes no empty list, since an empty server tool allow list exposes every tool; write `%s: %s` to hide every %s", key, PolicyNone, noun)
+	case len(list) == 0:
+		add(path+".deny", "is empty and narrows nothing; remove it")
+	}
+	seen := map[string]bool{}
+	for i, v := range list {
+		p := fmt.Sprintf("%s.%s[%d]", path, which, i)
+		switch {
+		case strings.TrimSpace(v) == "":
+			add(p, "cannot be empty")
+		case strings.TrimSpace(v) != v:
+			add(p, "cannot have surrounding space")
+		case seen[v]:
+			add(p, "is listed twice")
+		case prefix != "" && strings.HasPrefix(v, prefix+AggregateSeparator):
+			add(p, "names the %s as the aggregate endpoint does; write the server's own name for it, without %q", noun, prefix+AggregateSeparator)
+		}
+		seen[v] = true
+	}
+}
+
+// warn records a problem that does not stop the config from loading.
+func (c *Config) warn(path, format string, args ...any) {
+	c.Warnings = append(c.Warnings, fmt.Sprintf("%s: %s", path, fmt.Sprintf(format, args...)))
 }
 
 // knownToken reports whether name is a token in auth.tokens or in some server's auth.tokens.
@@ -391,6 +442,7 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	}
 	s.Tools.validate(path+".tools", add)
 	s.Prompts.validate(path+".prompts", add)
+
 	s.Resources.validate(path+".resources", add)
 	seen := map[string]bool{}
 	for i, k := range s.ForwardMeta {

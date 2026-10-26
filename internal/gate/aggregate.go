@@ -13,7 +13,6 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
-	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -39,13 +38,13 @@ type grant struct {
 
 type grantKey struct{}
 
-// policies returns the token policies of an access, by server; servers on which the token has
-// none are left out.
-func (a *aggregate) policies(access map[string]string) map[string]*policy.Token {
-	out := map[string]*policy.Token{}
+// policyTokens returns, for the servers of an access on which its token has a policy, the
+// token's name there.
+func (a *aggregate) policyTokens(access map[string]string) map[string]string {
+	out := map[string]string{}
 	for server, principal := range access {
-		if p := a.mirrors[server].TokenPolicy(principal); p != nil {
-			out[server] = p
+		if a.mirrors[server].TokenPolicy(principal) != nil {
+			out[server] = principal
 		}
 	}
 	return out
@@ -55,11 +54,11 @@ func (a *aggregate) policies(access map[string]string) map[string]*policy.Token 
 // token whose policy narrows it there, if any.
 func (a *aggregate) viewKey(access map[string]string) string {
 	parts := make([]string, 0, len(access))
-	policies := a.policies(access)
+	tokens := a.policyTokens(access)
 	for _, server := range slices.Sorted(maps.Keys(access)) {
 		part := server
-		if policies[server] != nil {
-			part += viewKeyToken + access[server]
+		if token, ok := tokens[server]; ok {
+			part += viewKeyToken + token
 		}
 		parts = append(parts, part)
 	}
@@ -106,7 +105,7 @@ func (g *Gate) aggregateRoute(remote upstream.RemoteFunc) (http.Handler, error) 
 		}
 		key := a.viewKey(access)
 		if a.views[key] == nil {
-			a.views[key] = agg.View(slices.Sorted(maps.Keys(access)), a.policies(access))
+			a.views[key] = agg.View(slices.Sorted(maps.Keys(access)), a.policyTokens(access))
 		}
 	}
 	// A request is served once startup is over, or once every server it may reach was listed or

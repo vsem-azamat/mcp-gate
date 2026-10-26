@@ -30,12 +30,13 @@ func member(t *testing.T, name string, logger *slog.Logger, tools []string, reso
 	for _, u := range resources {
 		rs = append(rs, &mcp.Resource{URI: u, Name: u})
 	}
-	m.resources, _ = m.applyResources(rs)
+	m.resources = m.applyResources(rs)
 	var ts []*mcp.ResourceTemplate
 	for _, u := range templates {
 		ts = append(ts, &mcp.ResourceTemplate{URITemplate: u, Name: u})
 	}
 	m.templates = m.applyTemplates(ts)
+	m.served = newServed(m.resources, m.templates)
 	return m
 }
 
@@ -207,7 +208,8 @@ func TestViewReadRechecksMirror(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := agg.View([]string{"a"}, nil)
-	ma.resources, _ = ma.applyResources(nil)
+	ma.resources = ma.applyResources(nil)
+	ma.served = newServed(ma.resources, ma.templates)
 	req := &mcp.ReadResourceRequest{
 		Params: &mcp.ReadResourceParams{URI: "x://a"},
 		Extra:  &mcp.RequestExtra{TokenInfo: AccessInfo("laptop", map[string]string{"a": "laptop"})},

@@ -71,6 +71,15 @@ func TestCheckInvalid(t *testing.T) {
 	}
 }
 
+func TestCheckWarnings(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, "gate.yaml", "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n    tools: {allow: []}\n")
+	r := runCmd(t, noEnv, "check", path)
+	if r.code != exitOK || !strings.Contains(r.stderr, "warning: servers.a.tools: an empty allow list exposes every tool") {
+		t.Errorf("check = %+v", r)
+	}
+}
+
 func TestCheckPolicies(t *testing.T) {
 	t.Parallel()
 	path := writeFile(t, "gate.yaml", "version: 1\nauth: {tokens: {t: secret}}\n"+
