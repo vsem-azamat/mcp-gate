@@ -28,6 +28,11 @@ escrow:
   socket: {path: /run/mcp-gate/escrow.sock, allowUIDs: [1001]}   # user 1001 needs no key
 aggregate:
   servers: [notes, mail]   # leave out to serve every enabled server
+policies:
+  phone:                   # a token name
+    servers:
+      notes: {tools: {allow: [search]}, resources: {allow: []}}
+      mail: {tools: {deny: [send_message, delete_message]}}
 servers:
   notes:
     stdio:
@@ -97,6 +102,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `aggregate` | none | Serve servers together at `/mcp`, tools and prompts named `<server>__<name>` (see [serve](../commands/serve.md#aggregate-endpoint)). `aggregate: {}` serves every enabled server; `aggregate:` without a value is an error |
 | `aggregate.servers` | every server | The servers served at `/mcp`; not empty, no name twice. A disabled server is left out. A server served there cannot have `__` in its name or end in `_`, and its name is at most 61 characters |
 | `aggregate.log.requests` | `false` | Log each HTTP request to `/mcp`, as `log.requests` does for a server |
+| `policies.<token>.servers.<server>` | none | The token's own filters on that server, applied after the server's (see [Token policies](#token-policies)): `tools`, `prompts` and `resources`, at least one |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |
@@ -136,6 +142,12 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `forwardMeta` | none | `_meta` keys of a client request passed to the server, by exact name, such as `example.com/trace`. Others are dropped: they describe the client. `progressToken` and `mcp`/`modelcontextprotocol`-prefixed keys are the gate's and cannot be listed |
 
 Each server has exactly one of `stdio` and `http`. Every server that is not `public` must accept at least one token, and no two tokens a server accepts may have the same value. Token names are lower-case letters, digits, `.`, `_` and `-`; values may not contain spaces or control characters.
+
+## Token policies
+
+`policies.<token>.servers.<server>` narrows what one token sees and may call on one server. Its `tools`, `prompts` and `resources` read like a server's filters of the same name, matched by the same keys, and apply after them: an entry reaches the token only when both pass it. One difference: an empty allow list exposes nothing for tools too, so `tools: {allow: []}` hides every tool from the token. A filter left out, and a server the policy does not name, narrow nothing. The policy holds on the server's own route and on `/mcp` alike (see [serve](../commands/serve.md#token-policies)).
+
+The token is the name of one in `auth.tokens` or in a server's `auth.tokens`, and each server named must exist and accept that token; a public server takes no token, so it cannot be named. `mcp-gate check` reports a policy that breaks these rules, such as `policies.phone.servers.nope: is not a server in servers`.
 
 ## Values
 

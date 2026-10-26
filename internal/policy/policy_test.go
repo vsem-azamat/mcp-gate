@@ -122,3 +122,72 @@ func TestReadAllowed(t *testing.T) {
 		t.Error("an allow list checks reads against hidden resources; the catalog filter does that")
 	}
 }
+
+func TestTokenPolicies(t *testing.T) {
+	cfg := &config.Config{Policies: map[string]*config.TokenPolicy{
+		"agent": {Servers: map[string]*config.ServerPolicy{
+			"a": {Tools: &config.Filter{Allow: []string{}}, Prompts: &config.Filter{Deny: []string{"p"}}},
+			"b": {Resources: &config.Filter{Allow: []string{"items"}}},
+		}},
+	}}
+	a, b := NewTokens(cfg, "a"), NewTokens(cfg, "b")
+	if a.For("other") != nil || a.For("") != nil || NewTokens(cfg, "c").For("agent") != nil {
+		t.Error("a policy where none is set")
+	}
+	var none *Token
+	if none.Tool("x") != NoPolicy || none.Read("x://y", nil, nil) != NoPolicy {
+		t.Error("a nil policy decides")
+	}
+	p := a.For("agent")
+	for _, c := range []struct {
+		name      string
+		got, want Decision
+	}{
+		{"an empty tool allow list exposes nothing", p.Tool("echo"), Denied},
+		{"prompt denied", p.Prompt("p"), Denied},
+		{"prompt passed", p.Prompt("q"), Allowed},
+		{"no resource filter", p.Resource("x://y", "y"), Allowed},
+		{"template allowed by name", b.For("agent").Resource("x://items/{id}", "items"), Allowed},
+		{"tool without a filter", b.For("agent").Tool("echo"), Allowed},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestTokenReads(t *testing.T) {
+	resources := []Entry{{"fake://info", "info"}, {"fake://hidden", "hidden"}}
+	items := Entry{"fake://items/{id}", "items"}
+	anyPath := Entry{"fake://{+path}", "any"}
+	policy := func(f config.Filter) *Token {
+		cfg := &config.Config{Policies: map[string]*config.TokenPolicy{"t": {Servers: map[string]*config.ServerPolicy{"s": {Resources: &f}}}}}
+		return NewTokens(cfg, "s").For("t")
+	}
+	allow := policy(config.Filter{Allow: []string{"fake://info", "items"}})
+	deny := policy(config.Filter{Deny: []string{"hidden", "items"}})
+	none := policy(config.Filter{Allow: []string{}})
+	for _, c := range []struct {
+		name     string
+		p        *Token
+		uri      string
+		matching []Entry
+		want     Decision
+	}{
+		{"allowed resource", allow, "fake://info", []Entry{anyPath}, Allowed},
+		{"resource not allowed", allow, "fake://hidden", []Entry{anyPath}, Denied},
+		{"through an allowed template", allow, "fake://items/7", []Entry{items, anyPath}, Allowed},
+		{"through a template not allowed", allow, "fake://other", []Entry{anyPath}, Denied},
+		{"nothing matches", allow, "other://x", nil, Denied},
+		{"resource denied by name", deny, "fake://hidden", []Entry{anyPath}, Denied},
+		{"hidden resource in another spelling", deny, "FAKE:///%68idden/", []Entry{anyPath}, Denied},
+		{"through a denied template", deny, "fake://items/7", []Entry{items, anyPath}, Denied},
+		{"through a template passed", deny, "fake://other", []Entry{anyPath}, Allowed},
+		{"resource passed", deny, "fake://info", []Entry{anyPath}, Allowed},
+		{"empty allow list", none, "fake://info", nil, Denied},
+	} {
+		if got := c.p.Read(c.uri, resources, c.matching); got != c.want {
+			t.Errorf("%s: Read(%s) = %s, want %s", c.name, c.uri, got, c.want)
+		}
+	}
+}

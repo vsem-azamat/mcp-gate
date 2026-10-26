@@ -637,3 +637,49 @@ servers:
 		}
 	}
 }
+
+func TestPolicies(t *testing.T) {
+	const servers = `
+auth: {tokens: {laptop: secret-laptop, agent: secret-agent}}
+servers:
+  a: {stdio: {command: /bin/a}}
+  b: {stdio: {command: /bin/b}, auth: {inherit: false, tokens: {bot: secret-bot}}}
+  pub: {stdio: {command: /bin/p}, auth: {public: true}}
+`
+	c, err := Parse([]byte("version: 1\n"+servers+`
+policies:
+  agent:
+    servers:
+      a: {tools: {allow: [search]}, prompts: {allow: []}}
+  bot:
+    servers:
+      b: {resources: {deny: ["b://private"]}}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := c.ServerPolicy("agent", "a"); p == nil || !slices.Equal(p.Tools.Allow, []string{"search"}) || p.Prompts.Allow == nil || p.Resources != nil {
+		t.Errorf("agent on a: %+v", p)
+	}
+	if c.ServerPolicy("agent", "b") != nil || c.ServerPolicy("laptop", "a") != nil || c.ServerPolicy("bot", "b") == nil {
+		t.Error("a policy applies where none is written, or is missing")
+	}
+	for doc, want := range map[string]string{
+		"policies: {nobody: {servers: {a: {tools: {allow: [x]}}}}}":           "policies.nobody: is not a token in auth.tokens or in a server's auth.tokens",
+		"policies: {agent: {servers: {nope: {tools: {allow: [x]}}}}}":         "policies.agent.servers.nope: is not a server in servers",
+		"policies: {agent: {servers: {b: {tools: {allow: [x]}}}}}":            "policies.agent.servers.b: the server does not accept the token agent",
+		"policies: {bot: {servers: {a: {tools: {allow: [x]}}}}}":              "policies.bot.servers.a: the server does not accept the token bot",
+		"policies: {agent: {servers: {pub: {tools: {allow: [x]}}}}}":          "policies.agent.servers.pub: the server is public",
+		"policies: {agent: {servers: {a: {}}}}":                               "policies.agent.servers.a: needs at least one of tools, prompts and resources",
+		"policies: {agent: {servers: {}}}":                                    "policies.agent.servers: must name at least one server",
+		"policies: {agent: {}}":                                               "policies.agent.servers: must name at least one server",
+		"policies: {agent: {servers: {a: {tools: {allow: [x], deny: [y]}}}}}": "policies.agent.servers.a.tools: needs exactly one of allow and deny",
+		"policies: {agent: {servers: {a: {resources: {deny: [\" \"]}}}}}":     "policies.agent.servers.a.resources[0]: cannot be empty",
+		"policies: {agent: {servers: {a: {tools: {allow: [x]}, other: 1}}}}":  "field other not found",
+	} {
+		_, err := Parse([]byte("version: 1\n"+doc+"\n"+servers), noEnv)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: err = %v, want %q", doc, err, want)
+		}
+	}
+}

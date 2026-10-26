@@ -57,7 +57,7 @@ func TestAggregateNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := a.View([]string{"s"})
+	v := a.View([]string{"s"}, nil)
 	want := []string{"s__" + long[1:], "s__a", "s__b__c"}
 	sort.Strings(want)
 	if got := registered(v); !slices.Equal(got, want) {
@@ -82,7 +82,7 @@ func TestAggregateFollowsChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := a.View([]string{"s"})
+	v := a.View([]string{"s"}, nil)
 	m.tools = m.applyTools([]*mcp.Tool{{Name: "b", InputSchema: map[string]any{"type": "object"}}})
 	m.ready.Store(true)
 	if a.Listed("s") {
@@ -110,7 +110,7 @@ func TestViewRechecksAccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := agg.View([]string{"a", "b"})
+	v := agg.View([]string{"a", "b"}, nil)
 	call := v.callTool("b", "echo")
 	req := func(access map[string]string) *mcp.CallToolRequest {
 		return &mcp.CallToolRequest{
@@ -167,7 +167,7 @@ func TestViewRoutesResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	both := agg.View([]string{"a", "b"})
+	both := agg.View([]string{"a", "b"}, nil)
 	for uri, want := range map[string]string{
 		"x://a": "a", "x://b": "b", "x://a/1": "a", "x://b/1": "b",
 		"y://listed": "a", // listed by a, matched by both templates: the listing wins
@@ -188,7 +188,7 @@ func TestViewRoutesResources(t *testing.T) {
 	if shared || sameTemplate {
 		t.Error("an entry both servers list is registered")
 	}
-	onlyA := agg.View([]string{"a"})
+	onlyA := agg.View([]string{"a"}, nil)
 	if got, ok := onlyA.route("x://shared"); !ok || got != "a" {
 		t.Errorf("a alone: route(x://shared) = %q %v", got, ok)
 	}
@@ -206,7 +206,7 @@ func TestViewReadRechecksMirror(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := agg.View([]string{"a"})
+	v := agg.View([]string{"a"}, nil)
 	ma.resources, _ = ma.applyResources(nil)
 	req := &mcp.ReadResourceRequest{
 		Params: &mcp.ReadResourceParams{URI: "x://a"},

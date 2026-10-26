@@ -54,9 +54,13 @@ A route answers 503 with `Retry-After: 5` until its server has connected once. A
 - **Names.** Tools and prompts are named `<server>__<name>`, such as `notes__search`. A tool or prompt name that would be longer than 64 characters, or hold characters other than letters, digits, `_`, `.` and `-`, is left out, with a warning in the log; it is still on its server's own route. A server on the endpoint cannot have `__` in its name or end in `_`, so a name splits one way only, and its name is at most 61 characters, so that a prefixed name fits.
 - **Resources** keep their URIs. A read goes to the server that lists the URI, or else to the one whose template matches it. A URI or template that two of the caller's servers both list is left out, with a warning in the log, and a read no single server claims fails; read those on the server's own route.
 - **Tokens.** A token sees and calls only the servers whose own routes accept it, plus the public ones; without a token, only the public ones. A token that no server on the endpoint accepts gets 401, even when some are public. If every server listed in `aggregate.servers` is disabled, `/mcp` answers every request with 401 and the gate logs a warning at start. Each call is checked again against its server before it is forwarded.
-- **The same handling.** A call runs through its server exactly as on `/<server>/mcp`: filters, `callTimeout`, progress, cancellation, redaction, file scanning, escrow, and the `call` log line, which names the real server and the token name that server knows.
+- **The same handling.** A call runs through its server exactly as on `/<server>/mcp`: filters, token policies, `callTimeout`, progress, cancellation, redaction, file scanning, escrow, and the `call` log line, which names the real server and the token name that server knows.
 - **Changes.** A server's new or removed tools reach the endpoint, and clients listening for changes are told. A server that is down keeps its tools there, as on its own route; one that never connected, or waits for a login, has none until it does.
 - `/mcp` answers 503 until startup is over or every server the caller reaches has listed its catalog or waits for a login. `/_readyz` and `/_status` report servers, not the endpoint.
+
+## Token policies
+
+`policies` gives a token its own allow or deny lists on some servers, on top of the servers' own (see [Configuration](../configuration/README.md#token-policies)). The token's lists show only what its lists pass, and a call, prompt get or resource read of something they hide fails exactly as one of a name the server does not have, so a token cannot tell a hidden tool from a missing one. The `call` line records the decision in `tokenPolicy`. A list shaped by a policy carries the cache scope `private`. The capabilities a server advertises do not depend on the token: a policy that hides every prompt leaves the prompt list empty.
 
 ## Health and status
 
@@ -120,10 +124,12 @@ The access log names a socket client `unix:uid=<n>`, and the failed-auth limit c
 
 ## Logs
 
-Every forwarded call writes one `call` line with the server, the token name (`principal`), the method, the tool or prompt or resource URI, the duration, the outcome and the number of redactions; arguments and results are never logged:
+Every forwarded call writes one `call` line with the server, the token name (`principal`), the method, the tool or prompt or resource URI, the duration, the outcome, what the token's policy decided (`tokenPolicy`: `none` without a policy on the server, `allow` or `deny`) and the number of redactions; arguments and results are never logged:
 
 ```json
-{"time":"…","level":"INFO","msg":"call","server":"notes","principal":"laptop","method":"tools/call","tool":"search","durMs":412,"outcome":"ok","redactions":0}
+{"time":"…","level":"INFO","msg":"call","server":"notes","principal":"laptop","method":"tools/call","tool":"search","durMs":412,"outcome":"ok","tokenPolicy":"none","redactions":0}
 ```
+
+A call a token's policy hides is a line with outcome `denied` and `tokenPolicy` `deny`.
 
 With `log.requests`, each HTTP request to the route also writes a `request` line with its method, status, duration and remote address; `aggregate.log.requests` does the same for `/mcp`, with `server` `/mcp`. A call the aggregate endpoint refuses before any server sees it (a name of a server the token does not reach, say) is a `call` line with outcome `denied` and an empty `server`.

@@ -80,8 +80,35 @@ type Config struct {
 	Escrow Escrow `yaml:"escrow,omitempty"`
 	// Aggregate, if set, serves the tools, prompts and resources of several servers at
 	// AggregatePath.
-	Aggregate *Aggregate         `yaml:"aggregate,omitempty"`
-	Servers   map[string]*Server `yaml:"servers"`
+	Aggregate *Aggregate `yaml:"aggregate,omitempty"`
+	// Policies narrows what a token may reach, by token name.
+	Policies map[string]*TokenPolicy `yaml:"policies,omitempty"`
+	Servers  map[string]*Server      `yaml:"servers"`
+}
+
+// TokenPolicy narrows what one token sees and may call, server by server, on top of each
+// server's own filters.
+type TokenPolicy struct {
+	// Servers maps a server's name to the token's filters there; a server left out is not
+	// narrowed.
+	Servers map[string]*ServerPolicy `yaml:"servers"`
+}
+
+// ServerPolicy is a token's filters on one server, each read as a server's filter of the same
+// kind, except that an empty allow list exposes nothing for tools too. A nil filter narrows
+// nothing.
+type ServerPolicy struct {
+	Tools     *Filter `yaml:"tools,omitempty"`
+	Prompts   *Filter `yaml:"prompts,omitempty"`
+	Resources *Filter `yaml:"resources,omitempty"`
+}
+
+// ServerPolicy returns the policy of the token named token on server; nil when it has none.
+func (c *Config) ServerPolicy(token, server string) *ServerPolicy {
+	if p := c.Policies[token]; p != nil {
+		return p.Servers[server]
+	}
+	return nil
 }
 
 // AggregatePath is the route of the aggregate endpoint. It has one segment, so it never

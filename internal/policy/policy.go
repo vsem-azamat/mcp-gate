@@ -1,9 +1,10 @@
-// Package policy decides which tools, prompts and resources of a server are exposed.
+// Package policy decides which tools, prompts and resources of a server are exposed, to every
+// caller and to each token.
 //
 // A filter is an allow list or a deny list. An entry passes an allow list when any of its keys
-// is listed, and fails a deny list when any of its keys is listed. A tool filter with an empty
-// allow list filters nothing, as mcp-proxy's toolFilter did; a prompt or resource filter with an
-// empty allow list exposes nothing.
+// is listed, and fails a deny list when any of its keys is listed. A server's tool filter with
+// an empty allow list filters nothing, as mcp-proxy's toolFilter did; a prompt or resource
+// filter with an empty allow list, and every filter of a token policy with one, exposes nothing.
 package policy
 
 import (
@@ -138,6 +139,149 @@ func (p *Policy) ReadAllowed(uri string) bool {
 	}
 	_, blocked := p.blocked[NormalizeURI(uri)]
 	return !blocked
+}
+
+// Decision is what a token policy decided about an entry, as the audit line records it.
+type Decision string
+
+// The decisions of a token policy.
+const (
+	// NoPolicy is the decision for a caller without a policy on the server.
+	NoPolicy Decision = "none"
+	// Allowed is the decision for an entry the caller's policy passes.
+	Allowed Decision = "allow"
+	// Denied is the decision for an entry the caller's policy hides.
+	Denied Decision = "deny"
+)
+
+// Token is the policy of one token on one server, applied on top of the server's own filters.
+// It does not change once made. A nil *Token decides NoPolicy for everything.
+type Token struct {
+	tools, prompts, resources Filter
+}
+
+// Tokens are the token policies of one server, by token name. They do not change once made.
+type Tokens map[string]*Token
+
+// NewTokens returns the token policies cfg sets on server.
+func NewTokens(cfg *config.Config, server string) Tokens {
+	out := Tokens{}
+	for name := range cfg.Policies {
+		if p := cfg.ServerPolicy(name, server); p != nil {
+			out[name] = &Token{tools: NewFilter(p.Tools), prompts: NewFilter(p.Prompts), resources: NewFilter(p.Resources)}
+		}
+	}
+	return out
+}
+
+// For returns the policy of the token named token; nil when it has none.
+func (ts Tokens) For(token string) *Token {
+	if token == "" {
+		return nil
+	}
+	return ts[token]
+}
+
+func decide(f Filter, keys ...string) Decision {
+	if f.Allows(keys...) {
+		return Allowed
+	}
+	return Denied
+}
+
+// Tool decides a tool by name.
+func (t *Token) Tool(name string) Decision {
+	if t == nil {
+		return NoPolicy
+	}
+	return decide(t.tools, name)
+}
+
+// Prompt decides a prompt by name.
+func (t *Token) Prompt(name string) Decision {
+	if t == nil {
+		return NoPolicy
+	}
+	return decide(t.prompts, name)
+}
+
+// Resource decides a listed resource by its URI and name, or a resource template by its URI
+// template and name.
+func (t *Token) Resource(key, name string) Decision {
+	if t == nil {
+		return NoPolicy
+	}
+	return decide(t.resources, key, name)
+}
+
+// Entry is a resource or a resource template of a server's catalog: its URI or URI template,
+// and its name.
+type Entry struct{ Key, Name string }
+
+// Read decides a read of uri, given the resources the server lists and the templates of its
+// catalog that match uri. A read reaches the resource listed under uri, or else a template
+// that matches it, so it passes when that entry passes. Under a deny list it is refused, as
+// under a server's deny list, when the comparison key of uri is the key of a listed entry or of
+// the URI of a resource the list hides, and when any template that matches it is hidden; it
+// errs towards refusing.
+func (t *Token) Read(uri string, resources, matching []Entry) Decision {
+	if t == nil {
+		return NoPolicy
+	}
+	f := t.resources
+	switch {
+	case f.any:
+		return Allowed
+	case f.none:
+		return Denied
+	}
+	for _, r := range resources {
+		if r.Key == uri {
+			return t.readListed(uri, r, resources)
+		}
+	}
+	if f.Deny() {
+		if t.blocked(uri, resources) {
+			return Denied
+		}
+		for _, e := range matching {
+			if !f.Allows(e.Key, e.Name) {
+				return Denied
+			}
+		}
+		return Allowed
+	}
+	for _, e := range matching {
+		if f.Allows(e.Key, e.Name) {
+			return Allowed
+		}
+	}
+	return Denied
+}
+
+// readListed decides a read of a URI the server lists as r.
+func (t *Token) readListed(uri string, r Entry, resources []Entry) Decision {
+	if !t.resources.Allows(r.Key, r.Name) || t.resources.Deny() && t.blocked(uri, resources) {
+		return Denied
+	}
+	return Allowed
+}
+
+// blocked reports, under a deny list, whether the comparison key of uri is that of a listed
+// entry or of the URI of a resource the list hides.
+func (t *Token) blocked(uri string, resources []Entry) bool {
+	key := NormalizeURI(uri)
+	for _, l := range t.resources.Listed() {
+		if NormalizeURI(l) == key {
+			return true
+		}
+	}
+	for _, r := range resources {
+		if !t.resources.Allows(r.Key, r.Name) && NormalizeURI(r.Key) == key {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeURI returns the key a URI is compared by, so that a deny list is not sidestepped by

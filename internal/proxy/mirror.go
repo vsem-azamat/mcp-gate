@@ -6,7 +6,8 @@
 // and on list-changed notifications, and changes only the entries that differ. Calls go through
 // the server's supervisor with a downstream _meta holding only the keys in the server's
 // forwardMeta, progress remapped to the upstream request, and results redacted, failing closed.
-// Every call is logged as one audit line.
+// A token with a policy on the server sees the lists filtered by it, and a call of an entry it
+// hides fails as one of an unknown entry. Every call is logged as one audit line.
 package proxy
 
 import (
@@ -55,6 +56,8 @@ type Options struct {
 	// Version is reported as the server version to clients.
 	Version string
 	Policy  *policy.Policy
+	// Tokens are the token policies on the server, applied on top of Policy.
+	Tokens policy.Tokens
 	// ForwardMeta are the _meta keys of a request passed downstream.
 	ForwardMeta []string
 	// Redaction redacts results; nil passes them unchanged.
@@ -121,6 +124,11 @@ func New(opts Options) *Mirror {
 	m.server = mcp.NewServer(&mcp.Implementation{Name: opts.Name, Version: opts.Version}, &mcp.ServerOptions{
 		Logger:       upstream.SDKLogger(logger),
 		Capabilities: Capabilities(opts.Policy),
+		SetCacheable: func(_ context.Context, req mcp.Request, c *mcp.Cacheable) {
+			if m.tokenPolicy(req.GetExtra()) != nil {
+				c.CacheScope = cachePrivate
+			}
+		},
 	})
 	m.server.AddReceivingMiddleware(m.receive)
 	return m
@@ -138,6 +146,21 @@ func Capabilities(p *policy.Policy) *mcp.ServerCapabilities {
 		caps.Resources = &mcp.ResourceCapabilities{ListChanged: true}
 	}
 	return caps
+}
+
+// cachePrivate is the cache scope of a result shaped by the caller's token policy, which only
+// the caller's own client may cache.
+const cachePrivate = "private"
+
+// TokenPolicy returns the policy of the token named token on the server; nil when it has none.
+func (m *Mirror) TokenPolicy(token string) *policy.Token { return m.opts.Tokens.For(token) }
+
+// tokenPolicy returns the policy of the token a request carries; nil when it has none.
+func (m *Mirror) tokenPolicy(extra *mcp.RequestExtra) *policy.Token {
+	if extra == nil {
+		return nil
+	}
+	return m.opts.Tokens.For(upstream.Principal(extra.TokenInfo))
 }
 
 // Server is the upstream-facing MCP server.

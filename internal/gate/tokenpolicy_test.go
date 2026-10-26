@@ -1,0 +1,253 @@
+package gate_test
+
+import (
+	"slices"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/vsem-azamat/mcp-gate/internal/testkit"
+)
+
+// policyGate serves cat (a full catalog) and plain (tools only) to the global tokens laptop and
+// phone, also on the aggregate endpoint. laptop has no policy; phone sees only echo, no prompts
+// and only fake://info and the items template on cat, and every tool but env on plain.
+func policyGate(t *testing.T) *running {
+	t.Helper()
+	doc := `version: 1
+auth:
+  tokens: {laptop: "${LAPTOP}", phone: "${PHONE}"}
+aggregate: {}
+policies:
+  phone:
+    servers:
+      cat:
+        tools: {allow: [echo]}
+        prompts: {allow: []}
+        resources: {allow: [fake://info, items]}
+      plain:
+        tools: {deny: [env]}
+servers:
+  cat:
+` + stdioServer(t, testkit.Fake{Catalog: true}, "") + `  plain:
+` + stdioServer(t, testkit.Fake{}, "")
+	r := startGate(t, doc, gateOpts{})
+	r.waitReady(t, "cat")
+	r.waitReady(t, "plain")
+	return r
+}
+
+func promptNames(t *testing.T, cs *mcp.ClientSession) []string {
+	t.Helper()
+	res, err := cs.ListPrompts(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, p := range res.Prompts {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+func resourceKeys(t *testing.T, cs *mcp.ClientSession) (resources, templates []string) {
+	t.Helper()
+	rs, err := cs.ListResources(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rs.Resources {
+		resources = append(resources, r.URI)
+	}
+	ts, err := cs.ListResourceTemplates(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tp := range ts.ResourceTemplates {
+		templates = append(templates, tp.URITemplate)
+	}
+	sort.Strings(resources)
+	sort.Strings(templates)
+	return resources, templates
+}
+
+// sameRefusal checks that refusing hidden fails exactly as refusing unknown, an entry that does
+// not exist, once the names are swapped.
+func sameRefusal(t *testing.T, what, hidden, unknown string, call func(name string) error) {
+	t.Helper()
+	errHidden, errUnknown := call(hidden), call(unknown)
+	if errHidden == nil || errUnknown == nil {
+		t.Fatalf("%s: hidden %v, unknown %v", what, errHidden, errUnknown)
+	}
+	if got, want := strings.ReplaceAll(errHidden.Error(), hidden, unknown), errUnknown.Error(); got != want {
+		t.Errorf("%s: a hidden entry fails as %q, an unknown one as %q", what, got, want)
+	}
+}
+
+func TestTokenPolicyLists(t *testing.T) {
+	r := policyGate(t)
+	laptop := r.connect(t, "cat", clientOpts{})
+	phone := r.connect(t, "cat", clientOpts{header: "Bearer " + phoneToken})
+
+	if got := toolNames(t, laptop); len(got) < 10 {
+		t.Errorf("laptop, without a policy, lists %v", got)
+	}
+	if got := toolNames(t, phone); !slices.Equal(got, []string{"echo"}) {
+		t.Errorf("phone lists the tools %v", got)
+	}
+	if got := promptNames(t, laptop); !slices.Equal(got, []string{"greet"}) {
+		t.Errorf("laptop lists the prompts %v", got)
+	}
+	if got := promptNames(t, phone); len(got) != 0 {
+		t.Errorf("phone lists the prompts %v", got)
+	}
+	res, tpl := resourceKeys(t, phone)
+	if !slices.Equal(res, []string{"fake://info"}) || !slices.Equal(tpl, []string{"fake://items/{id}"}) {
+		t.Errorf("phone lists the resources %v and templates %v", res, tpl)
+	}
+	if res, tpl := resourceKeys(t, laptop); len(res) != 2 || len(tpl) != 2 {
+		t.Errorf("laptop lists the resources %v and templates %v", res, tpl)
+	}
+	// A list shaped by a policy is not for shared caches.
+	if lt, err := phone.ListTools(t.Context(), nil); err != nil || lt.CacheScope != "private" {
+		t.Errorf("phone's list: %v %v", lt, err)
+	}
+	if lt, err := laptop.ListTools(t.Context(), nil); err != nil || lt.CacheScope != "public" {
+		t.Errorf("laptop's list: %v %v", lt, err)
+	}
+
+	plain := r.connect(t, "plain", clientOpts{header: "Bearer " + phoneToken})
+	if got := toolNames(t, plain); slices.Contains(got, "env") || !slices.Contains(got, "echo") {
+		t.Errorf("phone lists the tools of plain %v", got)
+	}
+}
+
+func TestTokenPolicyRefusals(t *testing.T) {
+	r := policyGate(t)
+	phone := r.connect(t, "cat", clientOpts{header: "Bearer " + phoneToken})
+	laptop := r.connect(t, "cat", clientOpts{})
+
+	callTool := func(cs *mcp.ClientSession) func(string) error {
+		return func(name string) error {
+			_, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: name})
+			return err
+		}
+	}
+	getPrompt := func(cs *mcp.ClientSession) func(string) error {
+		return func(name string) error {
+			_, err := cs.GetPrompt(t.Context(), &mcp.GetPromptParams{Name: name})
+			return err
+		}
+	}
+	read := func(cs *mcp.ClientSession) func(string) error {
+		return func(uri string) error {
+			_, err := cs.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: uri})
+			return err
+		}
+	}
+	sameRefusal(t, "tool", "env", "nosuch", callTool(phone))
+	sameRefusal(t, "prompt", "greet", "nosuch", getPrompt(phone))
+	sameRefusal(t, "resource", "fake://hidden", "none://nothing", read(phone))
+	sameRefusal(t, "template", "fake://other", "none://nothing", read(phone))
+	if err := read(phone)("fake://items/7"); err != nil {
+		t.Errorf("phone reads through the allowed template: %v", err)
+	}
+	if err := read(laptop)("fake://hidden"); err != nil {
+		t.Errorf("laptop reads fake://hidden: %v", err)
+	}
+
+	// The audit line records the decision.
+	if res, err := phone.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "x"}}); err != nil || textOf(t, res) != "x" {
+		t.Fatalf("phone calls echo: %v %v", res, err)
+	}
+	if _, err := laptop.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ key, value, principal, outcome, decision string }{
+		{"tool", "env", "phone", "denied", "deny"},
+		{"prompt", "greet", "phone", "denied", "deny"},
+		{"uri", "fake://hidden", "phone", "denied", "deny"},
+		{"uri", "fake://items/7", "phone", "ok", "allow"},
+		{"uri", "fake://hidden", "laptop", "ok", "none"},
+	} {
+		var found map[string]any
+		for _, l := range r.calls(c.key, c.value) {
+			if l["principal"] == c.principal {
+				found = l
+			}
+		}
+		if found["server"] != "cat" || found["outcome"] != c.outcome || found["tokenPolicy"] != c.decision {
+			t.Errorf("audit line of %s %s by %s: %v", c.key, c.value, c.principal, found)
+		}
+	}
+	echo := map[any]any{}
+	for _, l := range r.calls("tool", "echo") {
+		echo[l["principal"]] = l["tokenPolicy"]
+	}
+	if echo["phone"] != "allow" || echo["laptop"] != "none" {
+		t.Errorf("tokenPolicy of the echo calls: %v", echo)
+	}
+}
+
+func TestTokenPolicyAggregate(t *testing.T) {
+	r := policyGate(t)
+	laptop := r.connect(t, "", clientOpts{aggregate: true})
+	phone := r.connect(t, "", clientOpts{aggregate: true, header: "Bearer " + phoneToken})
+
+	got := toolNames(t, phone)
+	if !slices.Contains(got, "cat__echo") || slices.Contains(got, "cat__sleep") || slices.Contains(got, "plain__env") || !slices.Contains(got, "plain__echo") {
+		t.Errorf("phone lists %v", got)
+	}
+	if all := toolNames(t, laptop); !slices.Contains(all, "cat__sleep") || !slices.Contains(all, "plain__env") {
+		t.Errorf("laptop lists %v", all)
+	}
+	if got := promptNames(t, phone); len(got) != 0 {
+		t.Errorf("phone lists the prompts %v", got)
+	}
+	if res, tpl := resourceKeys(t, phone); !slices.Equal(res, []string{"fake://info"}) || !slices.Equal(tpl, []string{"fake://items/{id}"}) {
+		t.Errorf("phone lists the resources %v and templates %v", res, tpl)
+	}
+	if res, _ := resourceKeys(t, laptop); len(res) != 2 {
+		t.Errorf("laptop lists the resources %v", res)
+	}
+	if lt, err := phone.ListTools(t.Context(), nil); err != nil || lt.CacheScope != "private" {
+		t.Errorf("phone's list: %v %v", lt, err)
+	}
+
+	sameRefusal(t, "tool", "plain__env", "plain__nosuch", func(name string) error {
+		_, err := phone.CallTool(t.Context(), &mcp.CallToolParams{Name: name})
+		return err
+	})
+	sameRefusal(t, "prompt", "cat__greet", "cat__nosuch", func(name string) error {
+		_, err := phone.GetPrompt(t.Context(), &mcp.GetPromptParams{Name: name})
+		return err
+	})
+	sameRefusal(t, "resource", "fake://hidden", "none://nothing", func(uri string) error {
+		_, err := phone.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: uri})
+		return err
+	})
+	if res, err := phone.CallTool(t.Context(), &mcp.CallToolParams{Name: "cat__echo", Arguments: map[string]any{"text": "x"}}); err != nil || textOf(t, res) != "x" {
+		t.Fatalf("phone calls cat__echo: %v %v", res, err)
+	}
+	if res, err := laptop.CallTool(t.Context(), &mcp.CallToolParams{Name: "plain__env"}); err != nil || res.IsError {
+		t.Errorf("laptop calls plain__env: %v %v", res, err)
+	}
+
+	if l := r.lastCall("tool", "env"); l["server"] != "plain" || l["principal"] != "laptop" || l["tokenPolicy"] != "none" {
+		t.Errorf("audit line of laptop's plain__env: %v", l)
+	}
+	var denied map[string]any
+	for _, l := range r.calls("tool", "env") {
+		if l["principal"] == "phone" {
+			denied = l
+		}
+	}
+	if denied["server"] != "plain" || denied["outcome"] != "denied" || denied["tokenPolicy"] != "deny" {
+		t.Errorf("audit line of phone's plain__env: %v", denied)
+	}
+	if l := r.lastCall("tool", "echo"); l["server"] != "cat" || l["principal"] != "phone" || l["tokenPolicy"] != "allow" {
+		t.Errorf("audit line of phone's cat__echo: %v", l)
+	}
+}

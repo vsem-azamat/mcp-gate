@@ -15,6 +15,7 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
+	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -160,8 +161,8 @@ func (a *Aggregate) rebuild() {
 		for name, t := range c.Tools {
 			full := server + separator + name
 			if !validAggregateName(full) {
-				skipped["tool\x00"+full] = true
-				a.logSkipped(m, "tool", full)
+				skipped[keyTool+"\x00"+full] = true
+				a.logSkipped(m, keyTool, full)
 				continue
 			}
 			a.tools[full] = routed[mcp.Tool]{server: server, name: name, entry: t}
@@ -169,8 +170,8 @@ func (a *Aggregate) rebuild() {
 		for name, p := range c.Prompts {
 			full := server + separator + name
 			if !validAggregateName(full) {
-				skipped["prompt\x00"+full] = true
-				a.logSkipped(m, "prompt", full)
+				skipped[keyPrompt+"\x00"+full] = true
+				a.logSkipped(m, keyPrompt, full)
 				continue
 			}
 			a.prompts[full] = routed[mcp.Prompt]{server: server, name: name, entry: p}
@@ -200,10 +201,11 @@ func (a *Aggregate) logSkipped(m *Mirror, kind, full string) {
 }
 
 // View returns the view of the given members, which a caller who may reach exactly those
-// servers is served.
-func (a *Aggregate) View(servers []string) *View {
+// servers, under the token policies in policies (by server; a server left out is not narrowed),
+// is served.
+func (a *Aggregate) View(servers []string, policies map[string]*policy.Token) *View {
 	v := &View{
-		a: a, servers: map[string]bool{},
+		a: a, servers: map[string]bool{}, policies: policies,
 		tools: map[string]*mcp.Tool{}, prompts: map[string]*mcp.Prompt{},
 		resources: map[string]*mcp.Resource{}, templates: map[string]*mcp.ResourceTemplate{},
 	}
@@ -222,10 +224,11 @@ func (a *Aggregate) View(servers []string) *View {
 			caps.Resources = &mcp.ResourceCapabilities{ListChanged: true}
 		}
 	}
-	v.server = mcp.NewServer(&mcp.Implementation{Name: a.opts.Name, Version: a.opts.Version}, &mcp.ServerOptions{
-		Logger:       upstream.SDKLogger(a.logger),
-		Capabilities: caps,
-	})
+	sopts := &mcp.ServerOptions{Logger: upstream.SDKLogger(a.logger), Capabilities: caps}
+	if len(policies) > 0 {
+		sopts.SetCacheable = func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.CacheScope = cachePrivate }
+	}
+	v.server = mcp.NewServer(&mcp.Implementation{Name: a.opts.Name, Version: a.opts.Version}, sopts)
 	v.server.AddReceivingMiddleware(v.receive)
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -236,9 +239,10 @@ func (a *Aggregate) View(servers []string) *View {
 
 // View is the aggregate catalog of one set of servers.
 type View struct {
-	a       *Aggregate
-	servers map[string]bool
-	server  *mcp.Server
+	a        *Aggregate
+	servers  map[string]bool
+	policies map[string]*policy.Token // by server
+	server   *mcp.Server
 
 	// Guarded by a.mu.
 	tools     map[string]*mcp.Tool
@@ -258,14 +262,16 @@ type claim struct {
 // Server is the upstream-facing MCP server of the view.
 func (v *View) Server() *mcp.Server { return v.server }
 
-// sync registers the view's share of the aggregate catalog. A resource URI or a template that
-// more than one of the view's servers lists is left out, since a read could not tell which
-// server it is for. The caller holds a.mu.
+// sync registers the view's share of the aggregate catalog, without the entries the view's
+// token policies hide. A resource URI or a template that more than one of the view's servers
+// lists is left out, since a read could not tell which server it is for; hidden entries count
+// there too, and still route a read to their server, which refuses it, so that a policy does
+// not change where a read goes. The caller holds a.mu.
 func (v *View) sync() {
 	a := v.a
 	tools := map[string]*mcp.Tool{}
 	for full, r := range a.tools {
-		if v.servers[r.server] {
+		if v.servers[r.server] && v.policies[r.server].Tool(r.name) != policy.Denied {
 			t := *r.entry
 			t.Name = full
 			tools[full] = &t
@@ -278,7 +284,7 @@ func (v *View) sync() {
 
 	prompts := map[string]*mcp.Prompt{}
 	for full, r := range a.prompts {
-		if v.servers[r.server] {
+		if v.servers[r.server] && v.policies[r.server].Prompt(r.name) != policy.Denied {
 			p := *r.entry
 			p.Name = full
 			prompts[full] = &p
@@ -296,18 +302,23 @@ func (v *View) sync() {
 	v.claims = map[string]claim{}
 	for server := range v.servers {
 		c := a.cats[server]
+		p := v.policies[server]
 		cl := claim{uris: map[string]bool{}}
 		for uri, r := range c.Resources {
 			cl.uris[uri] = true
 			seenURI[uri]++
-			resources[uri] = r
+			if p.Resource(uri, r.Name) != policy.Denied {
+				resources[uri] = r
+			}
 		}
 		for ut, t := range c.Templates {
 			if tmpl, err := uritemplate.New(ut); err == nil {
 				cl.templates = append(cl.templates, tmpl)
 			}
 			seenTemplate[ut]++
-			templates[ut] = t
+			if p.Resource(ut, t.Name) != policy.Denied {
+				templates[ut] = t
+			}
 		}
 		v.claims[server] = cl
 	}
@@ -367,12 +378,12 @@ func (v *View) callTool(server, name string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		extra, m, ok := v.admit(req.Extra, server)
 		if !ok {
-			v.a.deny(ctx, "tools/call", req.Extra, "tool", req.Params.Name)
+			v.a.deny(ctx, "tools/call", req.Extra, keyTool, req.Params.Name)
 			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", req.Params.Name)}
 		}
-		if !m.mirrored("tool", name) {
+		if !m.mirrored(keyTool, name) {
 			// Gone from the mirror but not yet from the view: refused as on the server's route.
-			m.refused(ctx, "tools/call", extra, "tool", name, true)
+			m.refused(ctx, "tools/call", extra, keyTool, name, true)
 			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", req.Params.Name)}
 		}
 		params := *req.Params
@@ -385,11 +396,11 @@ func (v *View) getPrompt(server, name string) mcp.PromptHandler {
 	return func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		extra, m, ok := v.admit(req.Extra, server)
 		if !ok {
-			v.a.deny(ctx, "prompts/get", req.Extra, "prompt", req.Params.Name)
+			v.a.deny(ctx, "prompts/get", req.Extra, keyPrompt, req.Params.Name)
 			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown prompt %q", req.Params.Name)}
 		}
-		if !m.mirrored("prompt", name) {
-			m.refused(ctx, "prompts/get", extra, "prompt", name, true)
+		if !m.mirrored(keyPrompt, name) {
+			m.refused(ctx, "prompts/get", extra, keyPrompt, name, true)
 			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown prompt %q", req.Params.Name)}
 		}
 		params := *req.Params
@@ -409,13 +420,13 @@ func (v *View) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (
 		if extra, m, ok = v.admit(req.Extra, server); ok {
 			if !m.serves(uri) {
 				// Gone from the mirror but not yet from the view: refused as on the server's route.
-				m.refused(ctx, "resources/read", extra, "uri", uri, true)
+				m.refused(ctx, "resources/read", extra, keyURI, uri, true)
 				return nil, mcp.ResourceNotFoundError(uri)
 			}
 			return m.readResource(ctx, &mcp.ReadResourceRequest{Session: req.Session, Params: req.Params, Extra: extra})
 		}
 	}
-	v.a.deny(ctx, "resources/read", req.Extra, "uri", uri)
+	v.a.deny(ctx, "resources/read", req.Extra, keyURI, uri)
 	return nil, mcp.ResourceNotFoundError(uri)
 }
 
@@ -455,7 +466,7 @@ func (a *Aggregate) deny(ctx context.Context, method string, extra *mcp.RequestE
 		principal = upstream.Principal(extra.TokenInfo)
 	}
 	a.logger.Info("call", "server", "", "principal", principal, "method", method, key, a.logText(name),
-		"durMs", int64(0), "outcome", outcomeDenied, "redactions", 0)
+		"durMs", int64(0), "outcome", outcomeDenied, "tokenPolicy", string(policy.NoPolicy), "redactions", 0)
 }
 
 // receive is the view's receiving middleware, as a mirror's: it answers a panic with an internal
@@ -473,11 +484,11 @@ func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
 		switch r := req.(type) {
 		case *mcp.CallToolRequest:
 			if r.Params != nil {
-				key, name = "tool", r.Params.Name
+				key, name = keyTool, r.Params.Name
 			}
 		case *mcp.GetPromptRequest:
 			if r.Params != nil {
-				key, name = "prompt", r.Params.Name
+				key, name = keyPrompt, r.Params.Name
 			}
 		}
 		if key == "" {

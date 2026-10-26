@@ -216,7 +216,7 @@ func (g *Gate) newServer(name string, s *config.Server) (*server, error) {
 		files = sc
 	}
 	mirror := proxy.New(proxy.Options{
-		Name: name, Version: g.opts.Version, Policy: policy.New(s), ForwardMeta: s.ForwardMeta,
+		Name: name, Version: g.opts.Version, Policy: policy.New(s), Tokens: policy.NewTokens(g.cfg, name), ForwardMeta: s.ForwardMeta,
 		Redaction: redaction, Files: files, Logger: g.logger,
 	})
 	o := DownstreamOptions(g.cfg, name, s, g.opts.Environ, g.opts.Version, oauth.NewStore(g.opts.StateDir), g.logger)

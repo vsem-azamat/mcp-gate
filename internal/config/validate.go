@@ -125,6 +125,73 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 		c.validateServerAuth(name, path+".auth", add)
 	}
 	c.validateAggregate(add)
+	c.validatePolicies(add)
+}
+
+// validatePolicies checks that every policy names a token some server accepts and only servers
+// that accept it.
+func (c *Config) validatePolicies(add func(path, format string, args ...any)) {
+	tokens := make([]string, 0, len(c.Policies))
+	for name := range c.Policies {
+		tokens = append(tokens, name)
+	}
+	sort.Strings(tokens)
+	for _, token := range tokens {
+		path := "policies." + token
+		p := c.Policies[token]
+		if !c.knownToken(token) {
+			// Names are keys the operator wrote, not values, so they can be shown.
+			add(path, "is not a token in auth.tokens or in a server's auth.tokens")
+		}
+		if p == nil || len(p.Servers) == 0 {
+			add(path+".servers", "must name at least one server")
+			continue
+		}
+		servers := make([]string, 0, len(p.Servers))
+		for name := range p.Servers {
+			servers = append(servers, name)
+		}
+		sort.Strings(servers)
+		for _, server := range servers {
+			sp := path + ".servers." + server
+			s := c.Servers[server]
+			switch {
+			case s == nil:
+				add(sp, "is not a server in servers")
+				continue
+			case s.Auth.Public:
+				add(sp, "the server is public and takes no token, so a token policy cannot apply to it")
+			case c.knownToken(token):
+				if _, ok := c.EffectiveTokens(server)[token]; !ok {
+					add(sp, "the server does not accept the token %s", token)
+				}
+			}
+			f := p.Servers[server]
+			if f == nil || f.Tools == nil && f.Prompts == nil && f.Resources == nil {
+				add(sp, "needs at least one of tools, prompts and resources")
+				continue
+			}
+			f.Tools.validate(sp+".tools", add)
+			f.Prompts.validate(sp+".prompts", add)
+			f.Resources.validate(sp+".resources", add)
+		}
+	}
+}
+
+// knownToken reports whether name is a token in auth.tokens or in some server's auth.tokens.
+func (c *Config) knownToken(name string) bool {
+	if _, ok := c.Auth.Tokens[name]; ok {
+		return true
+	}
+	for _, s := range c.Servers {
+		if s == nil {
+			continue
+		}
+		if _, ok := s.Auth.Tokens[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Config) validateAggregate(add func(path, format string, args ...any)) {

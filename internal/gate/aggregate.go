@@ -13,18 +13,21 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
 
 // aggregate is the access control of the aggregate route. A request may reach a member server
 // exactly when that server's own route would take its Authorization header: a public member
-// always, any other when the token is one the member accepts. The servers a request may reach
-// select the view it is served, which holds only their entries.
+// always, any other when the token is one the member accepts. The servers a request may reach,
+// and the token policies it has on them, select the view it is served, which holds only the
+// entries of those servers that the policies pass.
 type aggregate struct {
 	members []string                    // sorted
 	tokens  map[string]*upstream.Tokens // by member; nil for a public one
-	views   map[string]*proxy.View      // by viewKey of the servers it serves
+	mirrors map[string]*proxy.Mirror    // by member
+	views   map[string]*proxy.View      // by viewKey of the access it serves
 }
 
 // grant is what one request to the aggregate route may reach.
@@ -36,17 +39,42 @@ type grant struct {
 
 type grantKey struct{}
 
-// viewKey identifies a set of servers.
-func viewKey(servers []string) string { return strings.Join(servers, "\x00") }
+// policies returns the token policies of an access, by server; servers on which the token has
+// none are left out.
+func (a *aggregate) policies(access map[string]string) map[string]*policy.Token {
+	out := map[string]*policy.Token{}
+	for server, principal := range access {
+		if p := a.mirrors[server].TokenPolicy(principal); p != nil {
+			out[server] = p
+		}
+	}
+	return out
+}
 
-// aggregateRoute builds the aggregate route and a view for every set of servers a token, or no
-// token, may reach. Tokens do not change while the gate runs, so the sets are known here.
+// viewKey identifies the view of an access: the servers it reaches, each with the name of the
+// token whose policy narrows it there, if any.
+func (a *aggregate) viewKey(access map[string]string) string {
+	parts := make([]string, 0, len(access))
+	policies := a.policies(access)
+	for _, server := range slices.Sorted(maps.Keys(access)) {
+		part := server
+		if policies[server] != nil {
+			part += "\x01" + access[server]
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "\x00")
+}
+
+// aggregateRoute builds the aggregate route and a view for every access a token, or no token,
+// has. Tokens and policies do not change while the gate runs, so the accesses are known here.
 func (g *Gate) aggregateRoute(remote upstream.RemoteFunc) (http.Handler, error) {
 	members := g.cfg.AggregateMembers()
 	mirrors := make([]*proxy.Mirror, 0, len(members))
-	a := &aggregate{members: members, tokens: map[string]*upstream.Tokens{}, views: map[string]*proxy.View{}}
+	a := &aggregate{members: members, tokens: map[string]*upstream.Tokens{}, mirrors: map[string]*proxy.Mirror{}, views: map[string]*proxy.View{}}
 	for _, name := range members {
 		mirrors = append(mirrors, g.servers[name].mirror)
+		a.mirrors[name] = g.servers[name].mirror
 		if t := g.cfg.EffectiveTokens(name); t != nil {
 			a.tokens[name] = upstream.NewTokens(t)
 		}
@@ -69,9 +97,9 @@ func (g *Gate) aggregateRoute(remote upstream.RemoteFunc) (http.Handler, error) 
 		if !ok {
 			continue
 		}
-		key := viewKey(slices.Sorted(maps.Keys(access)))
+		key := a.viewKey(access)
 		if a.views[key] == nil {
-			a.views[key] = agg.View(slices.Sorted(maps.Keys(access)))
+			a.views[key] = agg.View(slices.Sorted(maps.Keys(access)), a.policies(access))
 		}
 	}
 	// A request is served once startup is over, or once every server it may reach was listed or
@@ -150,7 +178,7 @@ func (a *aggregate) authorize(next http.Handler) http.Handler {
 		access, ok := a.access(upstream.Credential(header), strings.TrimSpace(header) != "")
 		var view *proxy.View
 		if ok {
-			view = a.views[viewKey(slices.Sorted(maps.Keys(access)))]
+			view = a.views[a.viewKey(access)]
 		}
 		if view == nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
