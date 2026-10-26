@@ -1,7 +1,6 @@
 package policy
 
 import (
-	"slices"
 	"strings"
 	"testing"
 
@@ -191,30 +190,54 @@ func TestReadQueries(t *testing.T) {
 	}
 }
 
+// TestQueryParams checks which values queryParams compares alike: the values of a group share a
+// form, and no two groups do.
 func TestQueryParams(t *testing.T) {
-	for in, want := range map[string]string{
-		"x://a?id=1.0":                         "id=1",
-		"x://a?id=0xA":                         "id=10",
-		"x://a?id=-0":                          "id=0",
-		"x://a?id=0.000":                       "id=0",
-		"x://a?id=1e40":                        "id=1e+40",
-		"x://a?id=%E2%80%8B==1":                "id=1",
-		"x://a?a[b]=X&flag":                    "a=x flag=",
-		"x://a?id=abc&e=e5&dot=.&s=-":          "dot=. e=e5 id=abc s=-",
-		"x://a?id=" + strings.Repeat("9", 200): "id=" + strings.Repeat("9", 200),
-	} {
-		var got []string
-		for k, vs := range queryParams(in) {
-			for _, v := range vs {
-				got = append(got, k+"="+v)
-			}
+	groups := [][]string{
+		{"1", "01", "1.0", "1.", "0x1", "0X01", "0o1", "0b1", "1e0", "10e-1", "+1", "%2B1", "0x1p0", "1_", "%E2%80%8B==1", "1%E2%80%8B", "%011"},
+		{"10", "0xa", "1e1", "1%090", "1 0", "010.000"},
+		{"0", "-0", "0.000", "0x0", "00"},
+		{"2"},
+		{"12"},
+		{"1.5"},
+		{"-1"},
+		{"abc"},
+		{"inf"},
+		{"00inf"},
+		{"e5"},
+		{"."},
+		{"0x"},
+		{strings.Repeat("9", 200), strings.Repeat("0", 10) + strings.Repeat("9", 200)},
+		// Large exponents stay cheap, since the canonical form is binary.
+		{"1e-300000000"},
+		{"1e600000000"},
+		{"0x1p-2000000000"},
+	}
+	value := func(v string) string {
+		vs := queryParams("x://a?id=" + v)["id"]
+		if len(vs) != 1 {
+			t.Fatalf("queryParams(id=%s) = %q", v, vs)
 		}
-		slices.Sort(got)
-		if g := strings.Join(got, " "); g != want {
-			t.Errorf("queryParams(%q) = %q, want %q", in, g, want)
+		return vs[0]
+	}
+	group := map[string]int{}
+	for i, g := range groups {
+		for _, v := range g {
+			got := value(v)
+			if j, ok := group[got]; ok && j != i {
+				t.Errorf("%q (group %d) reads as group %d", v, i, j)
+			}
+			if first := value(g[0]); got != first {
+				t.Errorf("%q reads as %q, %q as %q", v, got, g[0], first)
+			}
+			group[got] = i
 		}
 	}
-	if got := readParams("x://a;id=1/b;k=2?q=3"); len(got) != 3 || got["id"][0] != "1" || got["k"][0] != "2" || got["q"][0] != "3" {
+	got := queryParams("x://a?a[b]=X&flag&ID%E2%80%8B[]=2")
+	if len(got) != 3 || got["a"][0] != "x" || got["flag"][0] != "" || len(got["id"]) != 1 {
+		t.Errorf("queryParams of keys = %v", got)
+	}
+	if got := readParams("x://a;id=1/b;k=2?q=3"); len(got) != 3 || got["id"][0] != value("1") || got["k"][0] != value("2") || got["q"][0] != value("3") {
 		t.Errorf("readParams = %v", got)
 	}
 }

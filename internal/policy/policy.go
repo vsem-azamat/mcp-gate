@@ -355,11 +355,11 @@ func parseParams(query string) map[string][]string {
 	return params
 }
 
-// queryText removes format and control characters from s, trims it of spaces and "=", and
-// lower-cases it.
+// queryText removes format characters (such as a zero-width space) and control characters from
+// s, trims it of spaces and "=", and lower-cases it.
 func queryText(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) || unicode.IsControl(r) && !unicode.IsSpace(r) {
+		if unicode.Is(unicode.Cf, r) || unicode.IsControl(r) {
 			return -1
 		}
 		return r
@@ -367,35 +367,40 @@ func queryText(s string) string {
 	return strings.ToLower(strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '=' }))
 }
 
-// numberPrec is the precision, in bits, of the numbers canonicalNumber compares, so that
-// integers up to 2^256 stay exact.
+// numberPrec is the precision, in bits, at which canonicalNumber compares numbers: integers up
+// to 2^256 stay exact, and numbers that differ by less round alike, which refuses more.
 const numberPrec = 256
 
-// maxNumberLen bounds the length of a number canonicalNumber parses, once its padding zeros are
-// dropped, so that parsing takes little time whatever the read.
+// maxNumberLen is the longest value, once its padding zeros are dropped, that canonicalNumber
+// parses, which bounds the time it takes. Its canonical form is binary, so that the time does
+// not grow with the exponent.
 const maxNumberLen = 128
 
+// numberChars are the characters a value read as a number may have, once lower-cased.
+const numberChars = "0123456789abcdefopx.+-_ "
+
+var numberSeparators = strings.NewReplacer("_", "", " ", "")
+
 // canonicalNumber returns the canonical form of a value that reads as a number, in decimal or
-// with a "0x", "0o" or "0b" prefix, with a sign, a fraction, an exponent, and "_" or spaces
-// between digits,
-// so that "01", "1.0", "0x1" and "1e0" are all "1". Padding zeros are dropped before the value
-// is parsed; a value still longer than maxNumberLen is read as a number only when it is all
-// digits, and is then kept as it is.
+// with a "0x", "0o" or "0b" prefix, with a sign, a fraction and an exponent, after dropping
+// every "_" and space, so that "01", "1.0", "0x1" and "1e0" share one. Padding zeros are dropped
+// before the value is parsed; a value still longer than maxNumberLen is read as a number only
+// when it is all digits, and is then kept as it is.
 func canonicalNumber(v string) (string, bool) {
-	if v == "" {
+	if v == "" || strings.Trim(v, numberChars) != "" || !strings.ContainsAny(v, "0123456789") {
 		return "", false
 	}
-	if v = dropPaddingZeros(strings.NewReplacer("_", "", " ", "").Replace(v)); len(v) > maxNumberLen {
+	if v = dropPaddingZeros(numberSeparators.Replace(v)); len(v) > maxNumberLen {
 		return v, strings.Trim(v, "0123456789") == ""
 	}
 	f, _, err := big.ParseFloat(v, 0, numberPrec, big.ToNearestEven)
-	if err != nil {
+	if err != nil || f.IsInf() {
 		return "", false
 	}
 	if f.Sign() == 0 {
 		return "0", true
 	}
-	return f.Text('g', -1), true
+	return f.Text('p', 0), true
 }
 
 // dropPaddingZeros drops the leading zeros of the integer part, after any sign and base prefix,
