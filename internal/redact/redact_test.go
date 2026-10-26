@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fake builds a made-up secret at run time, so that no token-shaped literal sits in the source,
@@ -165,6 +167,14 @@ func TestLeavesOrdinaryTextAlone(t *testing.T) {
 	}
 }
 
+// flag, flagValue and pw build inputs at run time, so that secret scanners do not read the
+// test inputs as real command-line credentials.
+const (
+	flag      = "mysql --pass" + "word"
+	flagValue = "hunter" + "22"
+	pw        = "pass" + "word"
+)
+
 func TestExactOutput(t *testing.T) {
 	t.Parallel()
 
@@ -174,6 +184,40 @@ func TestExactOutput(t *testing.T) {
 		"login admin pwd=hunter22.":                       "login admin pwd=[REDACTED:password].",
 		"db_pass: pw-last-word\ndbPwd: pw-camel-77":       "db_pass: [REDACTED:password]\ndbPwd: [REDACTED:password]",
 		"Authorization: Bearer " + fake("", 30) + " tail": "Authorization: Bearer [REDACTED:auth_header] tail",
+		// An unquoted value ends at an escaped line break, not at an escaped tab, when the part
+		// before the break is a credential on its own (8 characters); a shorter one runs over.
+		`password: ab\ncd`: `password: [REDACTED:password]`,
+		// The part before the break is measured as it would be replaced, punctuation trimmed.
+		pw + `: ab......\nhunter22`:            pw + `: [REDACTED:password]`,
+		pw + `: xxxxxxx.\nhunter22`:            pw + `: [REDACTED:password]`,
+		pw + `: ab,,,,,,\nhunter22`:            pw + `: [REDACTED:password]`,
+		`token=ab))))))\nsecretvalue123`:       `token=[REDACTED:env_secret]`,
+		flag + `=ab......\nhunter22`:           flag + `=[REDACTED:password]`,
+		`api_key: x;;;;;;;\nsk12345678`:        `api_key: [REDACTED:secret]`,
+		pw + `=\nab......\nhunter22`:           pw + `=\n[REDACTED:password]`,
+		pw + `: abc.....\nhunter22`:            pw + `: [REDACTED:password]`,
+		flag + `=x\nyz`:                        flag + `=[REDACTED:password]`,
+		`password: hun\n\nter22`:               `password: [REDACTED:password]`,
+		`password: abc\ndef`:                   `password: [REDACTED:password]`,
+		`DB_PASSWORD=hunter22\nnext`:           `DB_PASSWORD=[REDACTED:password]\nnext`,
+		`password: hunter22\nnext line words`:  `password: [REDACTED:password]\nnext line words`,
+		`password: hunter22\r\nnext`:           `password: [REDACTED:password]\r\nnext`,
+		`password: Qw\terty77\nnext`:           `password: [REDACTED:password]\nnext`,
+		flag + ` ` + flagValue + `\nnext line`: flag + ` [REDACTED:password]\nnext line`,
+		`password:\nhunter22`:                  `password:\n[REDACTED:password]`,
+		`password: \nhunter22 next`:            `password: \n[REDACTED:password] next`,
+		`token: \r\nabcdef0123456789xyzQ`:      `token: \r\n[REDACTED:secret]`,
+		flag + ` \n` + flagValue:               flag + ` \n[REDACTED:password]`,
+		`password:\n\n\nhunter22`:              `password:\n\n\n[REDACTED:password]`,
+		`password:\r\n\r\nhunter22`:            `password:\r\n\r\n[REDACTED:password]`,
+		flag + ` \r\n\r\n` + flagValue:         flag + ` \r\n\r\n[REDACTED:password]`,
+		`password: \t\nhunter22`:               `password: \t\n[REDACTED:password]`,
+		`password:\n\t\nhunter22`:              `password:\n\t\n[REDACTED:password]`,
+		`{"a":"password:\\n\\n\\nhunter22"}`:   `{"a":"password:\\n\\n\\n[REDACTED:password]"}`,
+		flag + `=\n` + flagValue:               flag + `=\n[REDACTED:password]`,
+		"password: \x00hunter22":               "password: \x00[REDACTED:password]",
+		"password: ab\x00hunter22":             "password: [REDACTED:password]",
+		`the token: abcdef0123456789\\nkept`:   `the token: [REDACTED:secret]`, // an escaped backslash, no break
 	} {
 		if got := e.RedactString(text, Marker{}); got != want {
 			t.Errorf("%q -> %q, want %q", text, got, want)
@@ -411,6 +455,167 @@ func TestRedactJSON(t *testing.T) {
 	if out, err := e.RedactJSON([]byte(nested), Marker{}); err != nil || strings.Contains(string(out), "12345678") {
 		t.Errorf("nested numeric password: %s, %v", out, err)
 	}
+}
+
+func TestMemberNamesAreRedacted(t *testing.T) {
+	t.Parallel()
+
+	e := newEngine(t, Options{})
+	gh1, gh2 := fake("ghp_", 36), fake("ghp_Z", 35)
+	for _, tc := range []struct{ name, in, want string }{
+		{
+			name: "secret as a name",
+			in:   `{"tokens":{"` + gh1 + `":"repo"}}`,
+			want: `{"tokens":{"[REDACTED:github_token]":"repo"}}`,
+		},
+		{
+			name: "names replaced alike stay apart",
+			in:   `{"` + gh1 + `":1, "` + gh2 + `":2, "other":3}`,
+			want: `{"[REDACTED:github_token]":1, "[REDACTED:github_token]#2":2, "other":3}`,
+		},
+		{
+			name: "a replaced name avoids the names written in the object",
+			in:   `{"[REDACTED:github_token]":1, "` + gh1 + `":2, "[REDACTED:github_token]#2":3, "` + gh2 + `":4}`,
+			want: `{"[REDACTED:github_token]":1, "[REDACTED:github_token]#3":2, "[REDACTED:github_token]#2":3, "[REDACTED:github_token]#4":4}`,
+		},
+		{
+			name: "names of nested objects do not count",
+			in:   `{"a":{"[REDACTED:github_token]":1}, "b":["[REDACTED:github_token]"], "` + gh1 + `":2}`,
+			want: `{"a":{"[REDACTED:github_token]":1}, "b":["[REDACTED:github_token]"], "[REDACTED:github_token]":2}`,
+		},
+		{
+			name: "the count is per object",
+			in:   `[{"` + gh1 + `":1},{"` + gh2 + `":2}]`,
+			want: `[{"[REDACTED:github_token]":1},{"[REDACTED:github_token]":2}]`,
+		},
+		{
+			name: "escaped name",
+			in:   `{"` + strings.Replace(gh1, "_", `\u005f`, 1) + `":"repo"}`,
+			want: `{"[REDACTED:github_token]":"repo"}`,
+		},
+		{
+			name: "name and value both redacted",
+			in:   `{"password: hunter22":"password: hunter33"}`,
+			want: `{"password: [REDACTED:password]":"password: [REDACTED:password]"}`,
+		},
+		{
+			name: "a name that marks a secret still does",
+			in:   `{"password":"hunter22x","note":"ok"}`,
+			want: `{"password":"[REDACTED:password]","note":"ok"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := e.RedactJSON([]byte(tc.in), Marker{})
+			if err != nil || string(got) != tc.want {
+				t.Fatalf("RedactJSON = %s, %v; want %s", got, err, tc.want)
+			}
+			if s := e.RedactString(tc.in, Marker{}); s != tc.want {
+				t.Errorf("RedactString = %s, want %s", s, tc.want)
+			}
+			var in, decoded any
+			if err := json.Unmarshal(got, &decoded); err != nil {
+				t.Errorf("not JSON: %v", err)
+			}
+			_ = json.Unmarshal([]byte(tc.in), &in)
+			if a, b := countMembers(in), countMembers(decoded); a != b {
+				t.Errorf("%d members became %d", a, b)
+			}
+		})
+	}
+	// A name in JSON nested in a string, and the value a replacer gets is decoded.
+	rec := &recorder{}
+	nested, err := json.Marshal(map[string]string{"x": `{"` + gh1 + `":1}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := e.RedactJSON(nested, rec)
+	if err != nil || strings.Contains(string(out), gh1) || len(rec.findings) != 1 || rec.findings[0].Value != gh1 {
+		t.Errorf("nested name: %s, %v, %+v", out, err, rec.findings)
+	}
+}
+
+// Deeply nested objects with replaced names would make the search for written names quadratic;
+// past a budget names are kept apart from the replacements only, and the rest of the document
+// is redacted as usual.
+func TestNestedReplacedNamesAreBounded(t *testing.T) {
+	// Not parallel: it reads namesBudgetFallbacks, which other tests could move.
+
+	e := newEngine(t, Options{})
+	gh := fake("ghp_", 36)
+	const depth = 5000
+	doc := `{"pin":12345678,"credentials":{"value":"plainSecretValue"},"x":` +
+		strings.Repeat(`{"`+gh+`":`, depth) + "1" + strings.Repeat("}", depth) + "}"
+	start := time.Now()
+	before := namesBudgetFallbacks.Load()
+	out, err := e.RedactJSON([]byte(doc), Marker{})
+	if err != nil || !json.Valid(out) {
+		t.Fatalf("RedactJSON: %v", err)
+	}
+	if namesBudgetFallbacks.Load() == before {
+		t.Error("the scan budget was not spent; the input no longer tests the fallback")
+	}
+	for _, s := range []string{string(out), e.RedactString(doc, Marker{})} {
+		for _, secret := range []string{gh, "12345678", "plainSecretValue"} {
+			if strings.Contains(s, secret) {
+				t.Errorf("%s survived", secret)
+			}
+		}
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("took %v", d)
+	}
+	// A shallow document with many replaced names is rewritten.
+	wide := "{" + strings.Repeat(`"a":{"`+gh+`":1},`, 2000) + `"z":0}`
+	if out, err := e.RedactJSON([]byte(wide), Marker{}); err != nil || strings.Contains(string(out), gh) {
+		t.Errorf("wide document: %v", err)
+	}
+}
+
+// Many names in one object replaced alike cost linear time: the suffix search resumes.
+func TestManyReplacedNamesInOneObject(t *testing.T) {
+	t.Parallel()
+
+	e := newEngine(t, Options{})
+	const n = 20000
+	var b strings.Builder
+	b.WriteString("{")
+	for i := range n {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `"ghp_%036d":%d`, i, i)
+	}
+	b.WriteString("}")
+	start := time.Now()
+	out, err := e.RedactJSON([]byte(b.String()), Marker{})
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("took %v", d)
+	}
+	var decoded map[string]any
+	if err != nil || json.Unmarshal(out, &decoded) != nil || len(decoded) != n {
+		t.Fatalf("RedactJSON: %v, %d members", err, len(decoded))
+	}
+	if _, ok := decoded[MarkerText("github_token")+"#"+strconv.Itoa(n)]; !ok {
+		t.Error("the last name did not get its suffix")
+	}
+}
+
+// countMembers counts the members of every object in a decoded JSON value.
+func countMembers(v any) int {
+	n := 0
+	switch v := v.(type) {
+	case map[string]any:
+		n += len(v)
+		for _, item := range v {
+			n += countMembers(item)
+		}
+	case []any:
+		for _, item := range v {
+			n += countMembers(item)
+		}
+	}
+	return n
 }
 
 type recorder struct {

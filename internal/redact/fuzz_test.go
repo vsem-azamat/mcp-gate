@@ -115,7 +115,65 @@ func FuzzRedactJSON(f *testing.F) {
 		if shape(t, data) != shape(t, out) {
 			t.Fatalf("top-level shape changed: %q -> %q", data, out)
 		}
+		inNames, outNames := memberNames(t, data), memberNames(t, out)
+		var in, decoded any
+		_ = json.Unmarshal(data, &in)
+		_ = json.Unmarshal(out, &decoded)
+		if countMembers(in) == len(inNames) && countMembers(decoded) != len(inNames) {
+			t.Fatalf("members lost: %q -> %q", data, out)
+		}
+		kept := map[string]bool{}
+		for _, n := range outNames {
+			kept[n] = true
+		}
+		for _, n := range inNames {
+			if len(e.Find(n)) > 0 && kept[n] {
+				t.Fatalf("a name with a finding survived: %q in %q", n, out)
+			}
+		}
 	})
+}
+
+// memberNames lists every member name of a JSON document, duplicates included.
+func memberNames(t *testing.T, data []byte) []string {
+	t.Helper()
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
+	type level struct{ object, expectKey bool }
+	var stack []level
+	var names []string
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return names
+		}
+		top := len(stack) - 1
+		switch v := tok.(type) {
+		case json.Delim:
+			switch v {
+			case '{', '[':
+				if top >= 0 && stack[top].object {
+					stack[top].expectKey = true
+				}
+				stack = append(stack, level{object: v == '{', expectKey: v == '{'})
+			default:
+				stack = stack[:top]
+			}
+		case string:
+			if top >= 0 && stack[top].object && stack[top].expectKey {
+				names = append(names, v)
+				stack[top].expectKey = false
+				continue
+			}
+			if top >= 0 && stack[top].object {
+				stack[top].expectKey = true
+			}
+		default:
+			if top >= 0 && stack[top].object {
+				stack[top].expectKey = true
+			}
+		}
+	}
 }
 
 // shape names the JSON type of a document's top-level value; a number may become a string only

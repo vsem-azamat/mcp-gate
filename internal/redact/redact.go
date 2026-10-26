@@ -121,6 +121,13 @@ func Cut(text string, n int) string {
 	return text[:n] + "…"
 }
 
+// The bytes that stand for an escaped line break and an escaped tab in the text the rules see;
+// the unquoted value classes of the rules exclude maskedBreak (\x00).
+const (
+	maskedBreak = 0x00
+	maskedTab   = 0x01
+)
+
 // markerPrefix starts every marker; a value that contains it is never reported again.
 const markerPrefix = "[REDACTED:"
 
@@ -326,16 +333,28 @@ func mergeSpans(kept, added []span) []span {
 }
 
 // maskEscapedBreaks returns text with each escaped line break or tab (\n, \r, \t written as a
-// backslash and a letter, as in JSON, a log or a repr that was not decoded) replaced by two NUL
-// bytes, so it has the same length. NUL is no word character, so the rules see a boundary
-// before what follows ("API:\n123:AA…" left none between n and the digit), and it is no line
-// break, quote or backslash, so a quoted value that contains one still ends at its quote. An
-// escaped backslash (\\n) is left alone.
+// backslash and a letter, as in JSON, a log or a repr that was not decoded) replaced by two
+// control bytes, so it has the same length: NUL for a line break, 0x01 for a tab. Neither is a
+// word character, so the rules see a boundary before what follows ("API:\n123:AA…" left none
+// between n and the digit), and neither is a line break, quote or backslash, so a quoted value
+// that contains one still ends at its quote. An unquoted value stops at NUL, a line break, and
+// goes on over 0x01, a tab, which a password can hold; a NUL byte in the text becomes 0x01 too.
+// An escaped backslash (\\n) is left alone.
 func maskEscapedBreaks(text string) string {
-	if !strings.Contains(text, `\`) {
+	hasNUL := strings.IndexByte(text, maskedBreak) >= 0
+	if !hasNUL && !strings.Contains(text, `\`) {
 		return text
 	}
 	b := []byte(text)
+	if hasNUL {
+		// A NUL in the text itself is no line break: it reads as maskedTab, so that values go
+		// on over it.
+		for i := range b {
+			if b[i] == maskedBreak {
+				b[i] = maskedTab
+			}
+		}
+	}
 	for i := 0; i < len(b); i++ {
 		if b[i] != '\\' {
 			continue
@@ -344,8 +363,13 @@ func maskEscapedBreaks(text string) string {
 		for j < len(b) && b[j] == '\\' {
 			j++
 		}
-		if (j-i)%2 == 1 && j < len(b) && (b[j] == 'n' || b[j] == 'r' || b[j] == 't') {
-			b[j-1], b[j] = 0, 0
+		if (j-i)%2 == 1 && j < len(b) {
+			switch b[j] {
+			case 'n', 'r':
+				b[j-1], b[j] = maskedBreak, maskedBreak
+			case 't':
+				b[j-1], b[j] = maskedTab, maskedTab
+			}
 		}
 		i = j - 1
 	}

@@ -154,6 +154,27 @@ func TestCallToolResultDecodedFromTheWire(t *testing.T) {
 	}
 }
 
+// A secret used as a member name is replaced, and two names replaced alike stay apart, so no
+// member is lost when the result is decoded again.
+func TestMemberNamesAreRedacted(t *testing.T) {
+	t.Parallel()
+
+	r := newRedactor(t, 0)
+	other := fake("ghp_Q", 35)
+	res := decodeResult(t, `{"content":[],"structuredContent":{"scopes":{"`+secret+`":"repo","`+other+`":"admin"}},"_meta":{"`+secret+`":1}}`)
+	got, err := r.CallToolResult(res, redact.Marker{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"scopes": map[string]any{marker: "repo", marker + "#2": "admin"}}
+	if !reflect.DeepEqual(got.StructuredContent, want) {
+		t.Errorf("structuredContent = %v, want %v", got.StructuredContent, want)
+	}
+	if _, ok := got.Meta[marker]; !ok || len(got.Meta) != 1 {
+		t.Errorf("_meta = %v", got.Meta)
+	}
+}
+
 func TestInputIsNotModified(t *testing.T) {
 	t.Parallel()
 

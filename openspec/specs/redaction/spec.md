@@ -67,16 +67,31 @@ Every rule SHALL have its own numeric priority, and rules SHALL run in priority 
 
 ### Requirement: Escaped line breaks
 
-The rules SHALL treat a `\n`, `\r` or `\t` written as a backslash and a letter, as in undecoded JSON or a log line, as a boundary, while `\\n` (an escaped backslash) is not one. The offsets of findings SHALL refer to the original text.
+The rules SHALL treat a `\n`, `\r` or `\t` written as a backslash and a letter, as in undecoded JSON or a log line, as a boundary, while `\\n` (an escaped backslash) is not one. An unquoted value of a key-value pair, a `.env` assignment or a command-line flag SHALL go on over an escaped `\t` and over a NUL byte, and SHALL end at an escaped `\n` or `\r` only when the part before it, measured as it would be replaced (trailing punctuation and surrounding space removed), has at least 8 characters and is no placeholder: a credential on its own. A shorter part runs over the break, since it may be the start of a value that holds one, so the value is replaced whole and nothing replaced before is let through; only the text after an escaped break that follows such an 8-character part is no longer replaced. Escaped line breaks and tabs that a value starts with SHALL be dropped from it when what is left is no placeholder, so a value on a following line is replaced without the breaks. The Russian label rule still runs over an escaped line break. The offsets of findings SHALL refer to the original text.
 
 #### Scenario: Token after an escaped newline
 
 - **WHEN** a text contains `Use this token to access the HTTP API:\n` (an escaped newline) directly followed by a Telegram bot token
 - **THEN** the token is replaced
 
+#### Scenario: Unquoted value before an escaped newline
+
+- **WHEN** a text is `password: hunter22\nnext line words`, with an escaped newline
+- **THEN** the output is `password: [REDACTED:password]\nnext line words`
+
+#### Scenario: Short value before an escaped newline
+
+- **WHEN** a text is `password: abc\ndef`, with an escaped newline
+- **THEN** the output is `password: [REDACTED:password]`
+
+#### Scenario: Unquoted value after an escaped newline
+
+- **WHEN** a text is `password:\nhunter22`, with an escaped newline
+- **THEN** the output is `password:\n[REDACTED:password]`
+
 ### Requirement: JSON
 
-A text that is a JSON object or array SHALL be rewritten value by value: each string value is decoded, redacted and re-encoded, and every other byte (key order, whitespace, numbers) SHALL stay as it was. A value under a member whose name marks a secret SHALL be replaced as a whole. Member names SHALL be compared without case and separators, so `client_secret`, `clientSecret` and `client-secret` are equal; `token` SHALL count only as the whole name or as part of a listed name such as `accessToken`, `refreshToken`, `authToken`, `idToken`, `bearerToken`, `sessionToken` or `apiToken`, and `pin`, `pass` and `pwd` only as the whole name or its last word, so `nextPageToken`, `db_token`, `token_count` and `bypass` do not mark a secret, and names starting with `is` or `has` SHALL NOT mark one. `Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` SHALL mark an `auth_header` value.
+A text that is a JSON object or array SHALL be rewritten value by value: each string value is decoded, redacted and re-encoded, and every other byte (key order, whitespace, numbers) SHALL stay as it was. A value under a member whose name marks a secret SHALL be replaced as a whole. Member names SHALL be scanned by the rules as string values outside a secret member are (a name under a secret member is not replaced for that alone), and a name holding a finding SHALL be replaced by its redacted form, with `#2`, `#3` and so on appended when that text is already a name of the object, written or given to another replaced name, so that every member stays distinct. Once the search for written names has read eight times the document's size plus 1 MiB (each JSON document nested in a string having a budget of its own) (deeply nested objects with replaced names), replaced names SHALL be kept apart only from the other replacements for the rest of the document, which is otherwise redacted as usual; only there can a replaced name equal a written one. Whether a name marks a secret SHALL be decided on the name as written. Member names SHALL be compared without case and separators, so `client_secret`, `clientSecret` and `client-secret` are equal; `token` SHALL count only as the whole name or as part of a listed name such as `accessToken`, `refreshToken`, `authToken`, `idToken`, `bearerToken`, `sessionToken` or `apiToken`, and `pin`, `pass` and `pwd` only as the whole name or its last word, so `nextPageToken`, `db_token`, `token_count` and `bypass` do not mark a secret, and names starting with `is` or `has` SHALL NOT mark one. `Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` SHALL mark an `auth_header` value.
 
 Objects and arrays under a secret member SHALL inherit it: every value below is secret except under members that describe the secret (`type`, `scope`, `expires_in`, `user`, `id` and the like). A number of three or more characters under a secret member SHALL be replaced by the replacement as a JSON string. A string that holds a JSON document SHALL be rewritten the same way, up to five levels deep; below that it is matched as text. A replacer SHALL get the value of a finding inside a JSON string literal decoded.
 
@@ -89,6 +104,11 @@ Objects and arrays under a secret member SHALL inherit it: every value below is 
 
 - **WHEN** a pretty-printed JSON text has a member `"a": "password: hunter22"` after `"z": 1`
 - **THEN** the output differs from the input only in `hunter22`
+
+#### Scenario: Secret as a member name
+
+- **WHEN** a JSON text is `{"scopes":{"<GitHub token A>":"repo","<GitHub token B>":"admin"}}`
+- **THEN** the output is `{"scopes":{"[REDACTED:github_token]":"repo","[REDACTED:github_token]#2":"admin"}}`
 
 #### Scenario: Numeric password
 
