@@ -30,6 +30,7 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
+	"github.com/vsem-azamat/mcp-gate/internal/systemd"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
 
@@ -37,6 +38,10 @@ import (
 const (
 	// ShutdownGrace is how long calls in flight may finish once shutdown begins.
 	ShutdownGrace = 10 * time.Second
+	// drainLinger is how long, at the start of the shutdown grace, requests that arrive on open
+	// connections are still served, each connection closed after its response, before the
+	// connections that are idle are closed.
+	drainLinger = time.Second
 	// stopTimeout bounds stopping one server.
 	stopTimeout = 15 * time.Second
 	// readyPoll is how often startup checks whether every server has connected.
@@ -60,6 +65,9 @@ type Options struct {
 	Replacer func(server string, req proxy.Request) redact.Replacer
 	// Tune, if set, adjusts each server's supervisor options; for tests.
 	Tune func(*downstream.Options)
+	// Notify, if set, is told the gate's state in sd_notify form: systemd.Ready once startup is
+	// over, systemd.Stopping when shutdown begins.
+	Notify func(state string)
 }
 
 // Gate is a configured mcp-gate.
@@ -71,10 +79,12 @@ type Gate struct {
 	servers map[string]*server
 	escrow  *escrow.Escrow // nil when off
 	mux     *http.ServeMux
-	srv     *http.Server
-	sock    *http.Server // serves the escrow socket; nil without one
+	srv     *upstream.Server
+	sock    *upstream.Server // serves the escrow socket; nil without one
 	pins    *pinStore
 	started atomic.Bool
+	// startupOver is closed when the startup watcher returns: started, or shutting down first.
+	startupOver chan struct{}
 	// drain is closed when shutdown begins; it ends the subscriptions/listen streams, which
 	// would otherwise hold the shutdown for its whole grace.
 	drain     chan struct{}
@@ -96,6 +106,7 @@ func New(opts Options) (*Gate, error) {
 	cfg := opts.Config
 	g := &Gate{opts: opts, cfg: cfg, logger: opts.Logger, servers: map[string]*server{}, mux: http.NewServeMux()}
 	g.drain = make(chan struct{})
+	g.startupOver = make(chan struct{})
 	var err error
 	if g.pins, err = loadPins(opts.StateDir); err != nil {
 		g.logger.Warn("cannot read the learned protocol pins; starting without them", "error", err.Error())
@@ -144,7 +155,10 @@ func New(opts Options) (*Gate, error) {
 			mux := http.NewServeMux()
 			mux.Handle(escrow.Route, api)
 			g.sock = upstream.NewServer("", mux, g.logger)
-			g.sock.ConnContext = escrow.ConnContext
+			connContext := g.sock.ConnContext
+			g.sock.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+				return escrow.ConnContext(connContext(ctx, c), c)
+			}
 		}
 		g.logger.Info("secret escrow enabled", "route", escrow.Route, "tcp", *cfg.Escrow.TCP,
 			"maxEntries", g.escrow.MaxEntries(), "keySource", opts.EscrowKey.Source)
@@ -310,9 +324,9 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 }
 
 // route builds the handler chain of a server's /<name>/mcp: recover, the request log, the Host
-// check, the token check, cross-origin protection, 503 until the server has connected once, the
-// body limit, and the SDK's stateless streamable handler over the mirror's server for the
-// request's token.
+// check, the token check, cross-origin protection, 503 until the server has connected once (a
+// request held during startup), the body limit, and the SDK's stateless streamable handler over
+// the mirror's server for the request's token.
 func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 	mirror := s.mirror
 	var authorize func(http.Handler) http.Handler
@@ -321,7 +335,10 @@ func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 		authorize = func(h http.Handler) http.Handler { return upstream.RequireToken(t, h) }
 	}
 	return g.chain(s.name, s.cfg.Log.Requests, remote, authorize,
-		func(*http.Request) bool { return mirror.Ready() },
+		func(*http.Request) (bool, bool) {
+			// A server waiting for a login does not connect without someone.
+			return mirror.Ready(), s.sup.Status().State != downstream.NeedsLogin
+		},
 		func(r *http.Request) *mcp.Server {
 			return mirror.ServerFor(upstream.Principal(auth.TokenInfoFromContext(r.Context())))
 		})
@@ -329,10 +346,10 @@ func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 
 // chain builds an MCP route around the SDK's stateless streamable handlers for the servers
 // getServer returns: recover, the request log when logRequests, the Host check, authorize when
-// set, cross-origin protection, 503 while ready is false, the body limit, and respond choosing
-// between an event stream and plain JSON.
+// set, cross-origin protection, 503 while ready is false (see awaitReady), the body limit, and
+// respond choosing between an event stream and plain JSON.
 func (g *Gate) chain(name string, logRequests bool, remote upstream.RemoteFunc, authorize func(http.Handler) http.Handler,
-	ready func(*http.Request) bool, getServer func(*http.Request) *mcp.Server,
+	ready func(*http.Request) (ok, pending bool), getServer func(*http.Request) *mcp.Server,
 ) http.Handler {
 	opts := mcp.StreamableHTTPOptions{
 		Stateless:                    true,
@@ -348,7 +365,7 @@ func (g *Gate) chain(name string, logRequests bool, remote upstream.RemoteFunc, 
 	h := upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, g.respond(stream, plain))
 	inner := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !ready(r) {
+		if !g.awaitReady(r, ready) {
 			w.Header().Set("Retry-After", upstream.RetryAfter)
 			http.Error(w, "Service Unavailable: the server has not connected yet", http.StatusServiceUnavailable)
 			return
@@ -414,6 +431,7 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	startupDone := make(chan struct{})
 	go func() {
 		defer close(startupDone)
+		defer close(g.startupOver)
 		g.awaitStartup(startup)
 	}()
 
@@ -428,6 +446,8 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	}
 	cancelStartup()
 	<-startupDone
+	// After the startup watcher, so that READY=1 never follows it.
+	g.notify(systemd.Stopping)
 	err = errors.Join(err, g.shutdown(context.WithoutCancel(ctx)))
 	if sockServed != nil {
 		if serr := <-sockServed; !errors.Is(serr, http.ErrServerClosed) {
@@ -450,18 +470,57 @@ func (g *Gate) awaitStartup(ctx context.Context) {
 			all = all && (s.mirror.Ready() || s.sup.Status().State == downstream.NeedsLogin)
 		}
 		if all {
-			g.started.Store(true)
+			g.markStarted()
 			g.logger.Info("every server connected")
 			return
 		}
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				g.started.Store(true)
+				g.markStarted()
 				g.logger.Warn("reporting ready while servers are still connecting", "grace", g.cfg.StartupGracePeriod.D().String())
 			}
 			return
 		case <-t.C:
+		}
+	}
+}
+
+// markStarted ends the startup and tells systemd the gate is ready.
+func (g *Gate) markStarted() {
+	g.started.Store(true)
+	g.notify(systemd.Ready)
+}
+
+// notify passes a state notification to Options.Notify.
+func (g *Gate) notify(state string) {
+	if g.opts.Notify != nil {
+		g.opts.Notify(state)
+	}
+}
+
+// awaitReady holds a request that ready refuses while the gate is starting, until ready takes it,
+// says it is no longer pending (it will not connect on its own), or the startup is over, and
+// reports whether ready took it. A gate that was just restarted thus answers calls once their
+// server is back instead of refusing them while it reconnects.
+func (g *Gate) awaitReady(r *http.Request, ready func(*http.Request) (ok, pending bool)) bool {
+	ok, pending := ready(r)
+	if ok || !pending {
+		return ok
+	}
+	t := time.NewTicker(readyPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-g.startupOver:
+			ok, _ = ready(r)
+			return ok
+		case <-r.Context().Done():
+			return false
+		case <-t.C:
+			if ok, pending = ready(r); ok || !pending {
+				return ok
+			}
 		}
 	}
 }
@@ -483,6 +542,8 @@ func (g *Gate) shutdown(parent context.Context) error {
 		})
 	}
 	defer sockDone.Wait()
+	g.drainOnce.Do(func() { close(g.drain) })
+	g.srv.Drain(ctx, drainLinger)
 	if err := g.srv.Shutdown(ctx); err != nil {
 		g.logger.Warn("calls still running at shutdown are cut off", "error", err.Error())
 		if err := g.srv.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {

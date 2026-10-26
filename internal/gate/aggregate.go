@@ -109,23 +109,24 @@ func (g *Gate) aggregateRoute(remote upstream.RemoteFunc) (http.Handler, error) 
 		}
 	}
 	// A request is served once startup is over, or once every server it may reach was listed or
-	// waits for a login (which does not hold the startup either), so that a client that connects
-	// early does not take an empty catalog for the whole one.
-	ready := func(r *http.Request) bool {
+	// waits for a login (which does not hold the startup either); until then it is held (see
+	// awaitReady), so that a client that connects early does not take an empty catalog for the
+	// whole one.
+	ready := func(r *http.Request) (ok, pending bool) {
 		if g.started.Load() {
-			return true
+			return true, false
 		}
 		gr, _ := r.Context().Value(grantKey{}).(*grant)
 		if gr == nil {
-			return false
+			return false, false
 		}
 		for name := range gr.access {
 			s := g.servers[name]
 			if !agg.Listed(name) && s.sup.Status().State != downstream.NeedsLogin {
-				return false
+				return false, true
 			}
 		}
-		return true
+		return true, false
 	}
 	getServer := func(r *http.Request) *mcp.Server {
 		gr, _ := r.Context().Value(grantKey{}).(*grant)

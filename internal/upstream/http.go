@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,56 +41,219 @@ const (
 // write is bounded by BoundWrites instead.
 // Its Shutdown closes the connections on which no request has arrived. It serves HTTP/1 only:
 // net/http does not report an HTTP/2 connection becoming active, which the tracking relies on.
-func NewServer(addr string, handler http.Handler, logger *slog.Logger) *http.Server {
-	unused := &unusedConns{conns: map[net.Conn]struct{}{}}
+func NewServer(addr string, handler http.Handler, logger *slog.Logger) *Server {
+	s := &Server{conns: &conns{open: map[net.Conn]*connState{}}}
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)
-	srv := &http.Server{
+	s.Server = &http.Server{
 		Protocols:         &protocols,
 		Addr:              addr,
-		Handler:           BoundWrites(WriteTimeout, handler),
+		Handler:           s.closeWhenDraining(BoundWrites(WriteTimeout, handler)),
 		ReadHeaderTimeout: ReadHeaderTimeout,
 		IdleTimeout:       IdleTimeout,
 		MaxHeaderBytes:    MaxHeaderBytes,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
-		ConnState:         unused.track,
+		ConnState:         s.conns.track,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			return context.WithValue(ctx, connKey{}, c)
+		},
 	}
-	srv.RegisterOnShutdown(unused.closeAll)
-	return srv
+	s.RegisterOnShutdown(s.conns.closeUnused)
+	return s
 }
 
-// unusedConns holds the connections on which no request has arrived. http.Server.Shutdown
-// waits until such a connection is 5 seconds old, and HTTP clients open spare ones that they
-// may never use, so a shutdown closes them instead: they carry no call. A request whose headers
-// are still arriving when the shutdown begins is refused with them.
-type unusedConns struct {
-	mu      sync.Mutex
-	closing bool
-	conns   map[net.Conn]struct{}
+// Server is an http.Server whose shutdown can begin with Drain: it stops accepting, but serves
+// for a while longer the requests that arrive on connections it has open, closing each one after
+// its response, so that a client that sends a request just as the shutdown begins gets an answer
+// rather than a closed connection. A ConnContext set in place of NewServer's must call it.
+type Server struct {
+	*http.Server
+	conns     *conns
+	draining  atomic.Bool
+	mu        sync.Mutex
+	listeners []net.Listener
 }
 
-func (u *unusedConns) track(c net.Conn, st http.ConnState) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if st != http.StateNew {
-		delete(u.conns, c)
+// connKey is the context key of a request's connection.
+type connKey struct{}
+
+// Serve serves ln, as http.Server.Serve does; a listener that Drain closed ends it with
+// http.ErrServerClosed.
+func (s *Server) Serve(ln net.Listener) error {
+	s.mu.Lock()
+	if s.draining.Load() {
+		s.mu.Unlock()
+		_ = ln.Close()
+		return http.ErrServerClosed
+	}
+	// Drain and Shutdown both close it; the second close must not fail the Shutdown.
+	ln = &closeOnce{Listener: ln}
+	s.listeners = append(s.listeners, ln)
+	s.mu.Unlock()
+	err := s.Server.Serve(ln)
+	if s.draining.Load() && errors.Is(err, net.ErrClosed) {
+		return http.ErrServerClosed
+	}
+	return err
+}
+
+// Drain closes the listeners, so that new connections are no longer accepted (on a socket
+// systemd holds they wait for the next process), and from then on answers every request with
+// Connection: close. It returns once every open connection is closing after its response, or
+// after linger, or when ctx is done; Shutdown then closes the idle ones and waits for the rest.
+func (s *Server) Drain(ctx context.Context, linger time.Duration) {
+	s.mu.Lock()
+	s.draining.Store(true)
+	for _, ln := range s.listeners {
+		_ = ln.Close()
+	}
+	s.mu.Unlock()
+	timer := time.NewTimer(linger)
+	defer timer.Stop()
+	tick := time.NewTicker(drainPoll)
+	defer tick.Stop()
+	for s.conns.kept() > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// closeOnce is a listener whose Close closes it once and then reports success.
+type closeOnce struct {
+	net.Listener
+	once sync.Once
+	err  error
+}
+
+func (l *closeOnce) Close() error {
+	l.once.Do(func() { l.err = l.Listener.Close() })
+	return l.err
+}
+
+// drainPoll is how often Drain checks the open connections.
+const drainPoll = 10 * time.Millisecond
+
+// closeWhenDraining answers with Connection: close once Drain has begun, decided when the
+// response's header is written, so that a call that began before still closes its connection.
+func (s *Server) closeWhenDraining(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := r.Context().Value(connKey{}).(net.Conn)
+		cw := &closingWriter{ResponseWriter: w, server: s, conn: c}
+		// A handler that writes nothing has its header written after it returns.
+		defer cw.mark()
+		next.ServeHTTP(cw, r)
+	})
+}
+
+// closingWriter adds Connection: close to a response whose header is written while draining.
+type closingWriter struct {
+	http.ResponseWriter
+	server  *Server
+	conn    net.Conn
+	written bool
+}
+
+func (w *closingWriter) mark() {
+	if w.written {
 		return
 	}
-	if u.closing {
-		_ = c.Close()
-		return
+	w.written = true
+	if w.server.draining.Load() {
+		w.Header().Set("Connection", "close")
+		w.server.conns.closing(w.conn)
 	}
-	u.conns[c] = struct{}{}
 }
 
-func (u *unusedConns) closeAll() {
+func (w *closingWriter) WriteHeader(code int) {
+	if code >= http.StatusOK || code == http.StatusSwitchingProtocols {
+		w.mark()
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *closingWriter) Write(p []byte) (int, error) {
+	w.mark()
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *closingWriter) FlushError() error {
+	w.mark()
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *closingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// conns tracks the open connections. http.Server.Shutdown waits until a connection on which no
+// request has arrived is 5 seconds old, and HTTP clients open spare ones that they may never
+// use, so a shutdown closes those instead: they carry no call. A request whose headers are still
+// arriving when the shutdown begins is refused with them.
+type conns struct {
+	mu       sync.Mutex
+	shutdown bool
+	open     map[net.Conn]*connState
+}
+
+type connState struct {
+	state http.ConnState
+	// closes is set when the connection's current response says Connection: close.
+	closes bool
+}
+
+func (u *conns) track(c net.Conn, st http.ConnState) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.closing = true
-	for c := range u.conns {
+	switch {
+	case st == http.StateClosed || st == http.StateHijacked:
+		delete(u.open, c)
+	case st == http.StateNew && u.shutdown:
 		_ = c.Close()
+	case u.open[c] == nil:
+		u.open[c] = &connState{state: st}
+	default:
+		u.open[c].state = st
 	}
-	clear(u.conns)
+}
+
+// closing records that c closes after its current response.
+func (u *conns) closing(c net.Conn) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if cs := u.open[c]; cs != nil {
+		cs.closes = true
+	}
+}
+
+// kept counts the open connections that do not close after their current response: unused,
+// idle, or busy with a response whose header was written before Drain.
+func (u *conns) kept() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	n := 0
+	for _, cs := range u.open {
+		if !cs.closes {
+			n++
+		}
+	}
+	return n
+}
+
+// closeUnused closes the connections on which no request has arrived; http.Server.Shutdown
+// closes the idle ones itself.
+func (u *conns) closeUnused() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.shutdown = true
+	for c, cs := range u.open {
+		if cs.state == http.StateNew {
+			_ = c.Close()
+			delete(u.open, c)
+		}
+	}
 }
 
 // BoundWrites gives every write of a response, cut into pieces of at most writeChunk bytes, and

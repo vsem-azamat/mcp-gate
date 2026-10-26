@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,7 +33,8 @@ import (
 //   - hang: never returns (until cancelled);
 //   - crash: the stdio fake exits with status 3; the HTTP fake fails the call;
 //   - env: returns the process environment, one variable per line, sorted;
-//   - pids: returns {"pid", "pgid", "grandchild"} of the stdio fake;
+//   - pids: returns {"pid", "pgid", "grandchild"} of the stdio fake, and "sockets", how many of
+//     its open descriptors are sockets;
 //   - stats: returns {"pingsDuringCalls", "cancelled"}: the pings that arrived while a tool call
 //     ran, and the calls of sleep, hang and progress that ended because they were cancelled;
 //   - progress {"steps": number, "ms": number, "size": number}: sends that many progress
@@ -340,10 +342,31 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 	}
 	tool("pids", func(context.Context, map[string]any) (*mcp.CallToolResult, error) {
 		pgid, _ := syscall.Getpgid(os.Getpid())
-		data, err := json.Marshal(map[string]int{"pid": os.Getpid(), "pgid": pgid, "grandchild": grandchild})
+		data, err := json.Marshal(map[string]int{"pid": os.Getpid(), "pgid": pgid, "grandchild": grandchild, "sockets": openSockets()})
 		return text(string(data)), err
 	})
 	return s
+}
+
+// openSockets counts the process's open descriptors that are sockets, or returns -1 when it
+// cannot list them.
+func openSockets() int {
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, e := range entries {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFSOCK {
+			n++
+		}
+	}
+	return n
 }
 
 // behaviour applies the scripted request handling of f.

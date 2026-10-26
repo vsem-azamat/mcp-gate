@@ -11,6 +11,8 @@ mcp-gate serve -state-dir /var/lib/mcp-gate gate.yaml
 
 The config is validated as `check` does; an invalid one exits with status 2 before anything starts. Logs are JSON lines on stderr, at `logLevel` and above. SIGINT and SIGTERM shut the gate down: it stops accepting connections, gives calls in flight 10 seconds, and stops the servers. Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate cannot listen.
 
+Under systemd the gate serves the listening socket that a socket unit passes it (`LISTEN_FDS`), instead of opening `listen.addr`, and reports `READY=1` once startup is over and `STOPPING=1` at shutdown (`NOTIFY_SOCKET`). With the socket held by systemd, a restart refuses no connection and fails no call; see [systemd](../operations/systemd.md#restarts) for the units and what a restart keeps.
+
 `-state-dir` is where the gate keeps the protocol pins it learns (`pins.json`), so that a server that ignores `server/discover` does not cost the 5 second sub-deadline again after a restart, and the OAuth grants (`oauth/<server>.json`, see [auth](auth.md)). It defaults to the first directory of `$STATE_DIRECTORY`, which systemd sets for a unit with `StateDirectory=`; without one, pins last only while the process runs and OAuth servers cannot log in. Delete `pins.json` to make the gate try discover again.
 
 An OAuth server without a usable grant is `needs-login`: it sends nothing to the server, its route answers 503 until it has connected once, and its calls fail. It picks up a login made with `mcp-gate auth login` at its next attempt, within `restart.maxBackoff`, without a restart.
@@ -33,7 +35,7 @@ A client connects to `http://<listen.addr>/<name>/mcp` with one of the server's 
 
 With `aggregate` in the config, one entry reaches many servers at `/mcp` (see [Aggregate endpoint](#aggregate-endpoint)).
 
-A route answers 503 with `Retry-After: 5` until its server has connected once. After that, a restart of the server keeps its catalog: listing still works, and calls fail with a tool error saying the server is not available until it is back.
+A request that arrives while the gate is starting is held until its server has connected, or `startupGracePeriod` ends. After startup, a route answers 503 with `Retry-After: 5` until its server has connected once. After that, a restart of the server keeps its catalog: listing still works, and calls fail with a tool error saying the server is not available until it is back.
 
 ## Aggregate endpoint
 
@@ -56,7 +58,7 @@ A route answers 503 with `Retry-After: 5` until its server has connected once. A
 - **Tokens.** A token sees and calls only the servers whose own routes accept it, plus the public ones; without a token, only the public ones. A token that no server on the endpoint accepts gets 401, even when some are public. If every server listed in `aggregate.servers` is disabled, `/mcp` answers every request with 401 and the gate logs a warning at start. Each call is checked again against its server before it is forwarded.
 - **The same handling.** A call runs through its server exactly as on `/<server>/mcp`: filters, token policies, `callTimeout`, progress, cancellation, redaction, file scanning, escrow, and the `call` log line, which names the real server and the token name that server knows.
 - **Changes.** A server's new or removed tools reach the endpoint, and clients listening for changes are told. A server that is down keeps its tools there, as on its own route; one that never connected, or waits for a login, has none until it does.
-- `/mcp` answers 503 until startup is over or every server the caller reaches has listed its catalog or waits for a login. `/_readyz` and `/_status` report servers, not the endpoint.
+- A request to `/mcp` that arrives while the gate is starting is held until every server the caller reaches has listed its catalog or waits for a login, or startup is over. `/_readyz` and `/_status` report servers, not the endpoint.
 
 ## Token policies
 

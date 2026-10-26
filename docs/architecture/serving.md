@@ -9,7 +9,8 @@ How `mcp-gate serve` puts the downstream servers behind one listener. The behavi
 | Package | Contents |
 | --- | --- |
 | [`internal/gate`](../../internal/gate/gate.go) | Assembles the gate from the config: a supervisor and a mirror per server, the routes, readiness after the startup grace period, `/_status`, the learned pins file, shutdown |
-| [`internal/upstream`](../../internal/upstream/http.go) | The HTTP side: listener limits, body limit, Host check, named tokens, request log, panic recovery, `/_healthz`, `/_readyz` and `/_status` handlers |
+| [`internal/upstream`](../../internal/upstream/http.go) | The HTTP side: listener limits, the drain at shutdown, body limit, Host check, named tokens, request log, panic recovery, `/_healthz`, `/_readyz` and `/_status` handlers |
+| [`internal/systemd`](../../internal/systemd/systemd.go) | Socket activation (the listener systemd passes) and readiness notification (`sd_notify`), without a systemd library |
 | [`internal/proxy`](../../internal/proxy/mirror.go) | `Mirror`: the upstream MCP server of one downstream, its catalog sync, call forwarding, progress, notifications, redaction of results and the audit line; `Aggregate` and `View`: the catalogs of several mirrors at `/mcp` |
 | [`internal/policy`](../../internal/policy/policy.go) | Tool, prompt and resource filters, per-token policies and their decisions, and the URI check for resource reads |
 
@@ -17,7 +18,7 @@ How `mcp-gate serve` puts the downstream servers behind one listener. The behavi
 
 ```
 client ─POST /<name>/mcp─▶ Recover ─▶ LogRequests (log.requests) ─▶ AllowHosts ─▶ RequireToken
-   ─▶ CrossOriginProtection ─▶ 503 until mounted ─▶ ReadBody (4 MiB, 30 s) ─▶ respond
+   ─▶ CrossOriginProtection ─▶ 503 until mounted (held during startup) ─▶ ReadBody (4 MiB, 30 s) ─▶ respond
    ─▶ SDK StreamableHTTPHandler (stateless; event stream or JSONResponse) ─▶ Mirror's mcp.Server ─▶ receive middleware ─▶ handler
    ─▶ Supervisor.Call ─▶ downstream ClientSession
 ```
@@ -56,7 +57,7 @@ With `aggregate` set, [`gate.aggregateRoute`](../../internal/gate/aggregate.go) 
 
 ```
 client ─POST /mcp─▶ Recover ─▶ LogRequests ─▶ AllowHosts ─▶ aggregate.authorize ─▶ CrossOriginProtection
-   ─▶ 503 until started or its servers listed (or waiting for a login) ─▶ ReadBody ─▶ respond ─▶ SDK StreamableHTTPHandler (stateless; event stream or JSONResponse)
+   ─▶ held until started or its servers listed (or waiting for a login) ─▶ ReadBody ─▶ respond ─▶ SDK StreamableHTTPHandler (stateless; event stream or JSONResponse)
    ─▶ the View's mcp.Server ─▶ View.receive ─▶ View handler (access checked again) ─▶ Mirror handler
 ```
 
@@ -66,9 +67,17 @@ client ─POST /mcp─▶ Recover ─▶ LogRequests ─▶ AllowHosts ─▶ ag
 
 A view's handler checks that the request's access names the entry's server, then calls that mirror's own handler (`callTool`, `getPrompt`, `readResource`) with the server's own name for the entry and a `TokenInfo` holding the token name that server knows. From there the call is exactly a call on the server's route, audit line included. `View.receive` does what the mirror's middleware does for refusals the SDK makes before a handler runs: a name whose server the request reaches is audited by that mirror (`Mirror.refused`), anything else by the aggregate with an empty `server`.
 
+## Listener and restarts
+
+`mcp-gate serve` asks [`systemd.Listener`](../../internal/systemd/systemd.go) for a socket passed in `LISTEN_FDS` (checked against `LISTEN_PID`) and only without one calls `Gate.Listen`, which opens `listen.addr`; `Gate.Run` serves whichever listener it is given. `net.FileListener` duplicates the passed descriptor close-on-exec, and `childEnviron` drops the `LISTEN_*` and `NOTIFY_SOCKET` variables, so no stdio child inherits either. `Options.Notify` receives `READY=1` when `awaitStartup` marks the gate started and `STOPPING=1` when the shutdown begins; the command sends them to `NOTIFY_SOCKET` with a `systemd.Notifier`.
+
+A restart under systemd is a plain stop and start: no descriptor is handed from one process to the next. The socket systemd holds outlives both, and connections queue in it while neither accepts. What makes that invisible to clients is in three places. The upstream handler is stateless, so the new process accepts any client's next request as it would have the old one's. `chain` holds a request whose server is not mounted while the gate starts (`awaitReady`, polling every 100 ms until the startup watcher closes `startupOver`), so the queued requests are answered once their server is back rather than refused with 503. And the shutdown drains connections before closing them (below).
+
 ## Shutdown
 
-`http.Server.Shutdown` waits for every open request, and a `2026-07-28` client listening for changes keeps one POST open for good. `respond` recognises `subscriptions/listen` bodies and ties their context to a channel closed from `RegisterOnShutdown`, so those streams end at once and only real calls use the 10 second grace. `Shutdown` also waits until a connection on which no request has arrived is 5 seconds old, and HTTP clients keep spare connections they may never use: `upstream.NewServer` tracks those through `ConnState` and closes them from `RegisterOnShutdown`. That tracking is why the listener serves HTTP/1 only: net/http does not report an HTTP/2 connection becoming active.
+`shutdown` begins with `upstream.Server.Drain`: it closes the listeners and, for up to `drainLinger` (1 second), keeps serving the requests that arrive on connections already open, with `Connection: close` on every response whose header is written from then on (`closingWriter`, which also covers a call that began before). It returns as soon as every open connection is closing after its response. Without it, `Shutdown` would close idle kept-alive connections at once, and a request a client sent on one at that moment would fail with a reset or EOF; HTTP clients retry that only for idempotent requests, which an MCP POST is not. Only connections left idle for the whole linger are then closed under a client; so is the connection of a `subscriptions/listen` stream, whose header was written before the drain and which goes back to idle when the drain ends the stream.
+
+`http.Server.Shutdown` waits for every open request, and a `2026-07-28` client listening for changes keeps one POST open for good. `respond` recognises `subscriptions/listen` bodies and ties their context to a channel closed when the shutdown begins, so those streams end at once and only real calls use the 10 second grace. `Shutdown` also waits until a connection on which no request has arrived is 5 seconds old, and HTTP clients keep spare connections they may never use: `upstream.NewServer` tracks those through `ConnState` and closes them from `RegisterOnShutdown`. That tracking is why the listener serves HTTP/1 only: net/http does not report an HTTP/2 connection becoming active.
 
 `upstream.NewServer` also wraps the handler in `BoundWrites`. There is no `WriteTimeout`, which would bound the whole response and so a long call; instead each write, cut into 64 KiB pieces, and each flush gets a write deadline 30 seconds out, so a client that takes in less than 64 KiB in 30 seconds, about 2 KiB/s, is cut off. A write that stalls fails; net/http then closes the connection and cancels the request's context, which ends the call and the progress sink behind it. The deadline is cleared when a request starts, so that one left by the previous request on the connection cannot fail an early write such as `100 Continue`, and set again when the handler returns, for net/http's final flush. An idle stream (a `subscriptions/listen` POST) is unaffected: the deadline is set before each write, not between them.
  The mirrors run on a context detached from the signal, so calls finishing in the grace still get their progress; `shutdown` closes them after stopping the servers. A server that does not stop in time is logged and does not change the exit status.

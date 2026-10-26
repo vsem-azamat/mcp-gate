@@ -168,7 +168,7 @@ func connectAll(ctx context.Context, cfg *config.Config, names []string, store *
 }
 
 func connectOne(ctx context.Context, cfg *config.Config, name string, s *config.Server, store *oauth.Store, timeout time.Duration, logger *slog.Logger) (string, bool) {
-	sup, err := downstream.New(gate.DownstreamOptions(cfg, name, s, withoutEscrowKey(parentEnviron(), cfg.Escrow.KeyHashVars...), version.Get().Version, store, logger))
+	sup, err := downstream.New(gate.DownstreamOptions(cfg, name, s, childEnviron(parentEnviron(), cfg.Escrow.KeyHashVars...), version.Get().Version, store, logger))
 	if err != nil {
 		return fmt.Sprintf("%s: failed: %v", name, err), false
 	}

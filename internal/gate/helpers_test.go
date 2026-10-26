@@ -84,6 +84,7 @@ type gateOpts struct {
 	// escrowKey, if set, turns the escrow on with the SHA-256 of this key.
 	escrowKey string
 	tune      func(*downstream.Options)
+	notify    func(string)
 }
 
 // startGate parses doc, a config with its listen address left out, and serves it until the test
@@ -111,7 +112,7 @@ func startGate(t *testing.T, doc string, o gateOpts) *running {
 	}
 	g, err := gate.New(gate.Options{
 		Config: cfg, Environ: []string{"PATH=/usr/bin:/bin"}, StateDir: o.stateDir, Version: "test", Logger: logger,
-		Replacer: o.replacer, Tune: tune, EscrowKey: key,
+		Replacer: o.replacer, Tune: tune, EscrowKey: key, Notify: o.notify,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +128,8 @@ func startGate(t *testing.T, doc string, o gateOpts) *running {
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
+			// Idle connections would hold the shutdown's drain for its whole linger.
+			http.DefaultClient.CloseIdleConnections()
 			cancel()
 			if err := <-done; err != nil {
 				t.Errorf("gate: %v", err)

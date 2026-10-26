@@ -1,0 +1,18 @@
+# The listening socket of the user service mcp-gate.service. systemd holds it, so a restart or an
+# upgrade of the gate refuses no connection: connections that arrive while no gate runs wait in
+# the socket's queue for the next one. ListenStream= must be the config's listen.addr.
+# Install and adjust as described in docs/operations/systemd.md; change it with
+# `systemctl --user edit mcp-gate.socket`, not by editing this file in place.
+[Unit]
+Description=mcp-gate: MCP gateway socket
+Documentation=https://github.com/vsem-azamat/mcp-gate/blob/main/docs/operations/systemd.md
+
+[Socket]
+ListenStream=127.0.0.1:9090
+# One gate process accepts every connection itself.
+Accept=no
+# Bind even when the address is not configured yet: the socket starts before the network is up.
+FreeBind=yes
+
+[Install]
+WantedBy=sockets.target

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"net"
 	"strings"
 	"testing"
 
@@ -59,11 +60,39 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func TestWithoutEscrowKey(t *testing.T) {
+func TestChildEnviron(t *testing.T) {
 	t.Parallel()
-	in := []string{"PATH=/bin", "MCP_HUB_ESCROW_KEY_SHA256=abc", "MCP_OTHER=1", "MCP_GATE_ESCROW_KEY_SHA256=abc", "HASH=abc"}
-	got := withoutEscrowKey(in, "HASH")
+	in := []string{
+		"PATH=/bin", "MCP_HUB_ESCROW_KEY_SHA256=abc", "MCP_OTHER=1", "MCP_GATE_ESCROW_KEY_SHA256=abc", "HASH=abc",
+		"LISTEN_PID=1", "LISTEN_FDS=1", "LISTEN_FDNAMES=mcp-gate.socket", "NOTIFY_SOCKET=/run/notify",
+	}
+	got := childEnviron(in, "HASH")
 	if len(got) != 2 || got[0] != "PATH=/bin" || got[1] != "MCP_OTHER=1" || in[1] != "MCP_HUB_ESCROW_KEY_SHA256=abc" {
-		t.Errorf("withoutEscrowKey = %v (input %v)", got, in)
+		t.Errorf("childEnviron = %v (input %v)", got, in)
+	}
+}
+
+func TestSameAddr(t *testing.T) {
+	t.Parallel()
+	tcp := func(ip string, port int) net.Addr { return &net.TCPAddr{IP: net.ParseIP(ip), Port: port} }
+	for _, c := range []struct {
+		socket     net.Addr
+		configured string
+		want       bool
+	}{
+		{tcp("127.0.0.1", 9090), "127.0.0.1:9090", true},
+		{tcp("127.0.0.1", 9090), "127.0.0.1:9091", false},
+		{tcp("127.0.0.1", 9090), "localhost:9090", true},
+		{tcp("::1", 9090), "localhost:9090", true},
+		{tcp("0.0.0.0", 9090), "localhost:9090", false},
+		{tcp("::", 9090), "0.0.0.0:9090", true},
+		{tcp("::", 9090), ":9090", true},
+		{tcp("127.0.0.1", 9090), ":9090", false},
+		{tcp("10.0.0.1", 9090), "10.0.0.2:9090", false},
+		{tcp("10.0.0.1", 9090), "mcp.example.com:9090", false},
+	} {
+		if got := sameAddr(c.socket, c.configured); got != c.want {
+			t.Errorf("sameAddr(%s, %q) = %v, want %v", c.socket, c.configured, got, c.want)
+		}
 	}
 }

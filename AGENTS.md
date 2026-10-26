@@ -73,10 +73,11 @@ This repository is public. Before every commit and PR, check that nothing privat
 | `internal/redact/` | Redaction engine: rules with priorities, findings, replacers (no MCP or HTTP imports) |
 | `internal/redact/mcpredact/` | Redaction of MCP SDK results and errors, failing closed |
 | `internal/smoke/` | The binary smoke test: a built `mcp-gate` run as a process against fake servers |
+| `internal/systemd/` | Socket activation and readiness notification, without a systemd library |
 | `internal/testkit/` | Fake MCP servers for tests: catalog hub, scriptable stdio and HTTP fakes, a fake behind OAuth; the escrow contract check |
-| `internal/upstream/` | HTTP listener side: limits, named tokens, Host check, request log, health and status handlers |
+| `internal/upstream/` | HTTP listener side: limits, the drain at shutdown, named tokens, Host check, request log, health and status handlers |
 | `internal/version/` | Build version and commit |
-| `packaging/systemd/` | The system and user systemd units shipped in the release archives |
+| `packaging/systemd/` | The system and user systemd services and sockets shipped in the release archives |
 | `openspec/specs/` | Behavior specifications, one directory per capability |
 | [`docs/`](docs/README.md) | Engineering documentation |
 | `scripts/` | Repository checks run by `make repo` |
