@@ -78,3 +78,105 @@ func TestRestoreSplitToken(t *testing.T) {
 		t.Error("a marker with an unknown handle was changed")
 	}
 }
+
+// Whole tokens in adjacent strings are kept apart: each secret gets a handle that holds exactly
+// it, and a neighbouring identifier stays visible.
+func TestAdjacentTokensKeepTheirOwnHandles(t *testing.T) {
+	t.Parallel()
+	engine, err := redact.New(redact.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	random := func(seed, n int) string {
+		const alphabet = "a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXyZ"
+		var b strings.Builder
+		for i := range n {
+			b.WriteByte(alphabet[(i*seed+3)%len(alphabet)])
+		}
+		return b.String()
+	}
+	jwt := func(seed int) string {
+		return "ey" + "J" + random(seed, 30) + ".ey" + "J" + random(seed+2, 60) + "." + random(seed+4, 43)
+	}
+	slack := "xoxe.xo" + "xp-1-" + random(7, 140)
+	slackRefresh := "xo" + "xe-1-" + random(11, 140)
+	refresh := "GEbRxBN" + random(13, 40)
+	bot := "xo" + "xb-" + random(17, 40)
+	for _, tc := range []struct {
+		name    string
+		doc     map[string]any
+		secrets map[string]string // member name, or index in "tokens", to its secret
+		visible []string
+	}{
+		{
+			name:    "Slack rotation",
+			doc:     map[string]any{"token": slack, "refresh_token": slackRefresh},
+			secrets: map[string]string{"token": slack, "refresh_token": slackRefresh},
+		},
+		{
+			name:    "JWT and a refresh token",
+			doc:     map[string]any{"access_token": jwt(5), "refresh_token": refresh},
+			secrets: map[string]string{"access_token": jwt(5), "refresh_token": refresh},
+		},
+		{
+			name:    "two JWTs",
+			doc:     map[string]any{"access_token": jwt(5), "id_token": jwt(19)},
+			secrets: map[string]string{"access_token": jwt(5), "id_token": jwt(19)},
+		},
+		{
+			name:    "JWTs in a list",
+			doc:     map[string]any{"tokens": []string{jwt(5), jwt(19)}},
+			secrets: map[string]string{"0": jwt(5), "1": jwt(19)},
+		},
+		{
+			name:    "token and a request id",
+			doc:     map[string]any{"token": bot, "x_request_id": "aB3dE5fG7hJ9"},
+			secrets: map[string]string{"token": bot},
+			visible: []string{"aB3dE5fG7hJ9"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := json.Marshal(tc.doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := New(Options{KeyHash: testHash()})
+			out, err := engine.RedactJSON(raw, e.Replacer(Source{Server: "s"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			text := func(key string) string {
+				v := got[key]
+				if list, ok := got["tokens"].([]any); ok {
+					v = list[map[string]int{"0": 0, "1": 1}[key]]
+				}
+				str, ok := v.(string)
+				if !ok {
+					t.Fatalf("%s is %T, want a string", key, v)
+				}
+				return str
+			}
+			for key, secret := range tc.secrets {
+				field := text(key)
+				m := markerRE.FindStringSubmatch(field)
+				if m == nil {
+					t.Fatalf("%s = %q, want a marker with a handle", key, field)
+				}
+				ent, ok := e.store.get(m[2])
+				if !ok || string(ent.value) != secret {
+					t.Errorf("%s: handle holds %q, want %q", key, ent.value, secret)
+				}
+			}
+			for _, v := range tc.visible {
+				if !strings.Contains(string(out), v) {
+					t.Errorf("%q was hidden: %s", v, out)
+				}
+			}
+		})
+	}
+}

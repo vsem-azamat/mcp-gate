@@ -266,6 +266,15 @@ func splitLeft(a string, from int) (left int, jwt bool) {
 	return left, false
 }
 
+// startsJWT reports whether "eyJ" is in a or across its end into b.
+func startsJWT(a, b string) bool {
+	if strings.Contains(a, "eyJ") {
+		return true
+	}
+	joint := a[max(0, len(a)-2):] + b[:min(2, len(b))]
+	return strings.Contains(joint, "eyJ")
+}
+
 // jwtWindow bounds how far back a window reaches for the start of a JWT.
 const jwtWindow = 8 << 10
 
@@ -274,11 +283,12 @@ func isJWTByte(c byte) bool {
 	return isTokenByte(c) || c == '.'
 }
 
-// splitToken looks for a match of a split rule that starts in a, at or after from, and ends in
-// b, over a window that joins the run of splitBytes ending a (at most splitWindow bytes of it)
-// to the run starting b (as much). A match that reaches the edge of a window cut short goes on
-// over the rest of the run, so no part of the token stays visible. The caller has checked the window with maySplit.
-func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
+// splitToken looks for a match of a split rule that starts in a, at or after from, and ends in b,
+// over a window that joins the run of splitBytes ending a (at most splitWindow bytes of it) to the
+// run starting b (as much). A match that reaches the edge of a window cut short goes on over the
+// rest of the run, so no part of the token stays visible. The caller has checked the window with
+// maySplit.
+func (e *Engine) splitToken(a string, from int, b string, aWhole bool) (splitCut, bool) {
 	if len(a) <= from || b == "" || !isSplitByte(a[len(a)-1]) || !isSplitByte(b[0]) {
 		return splitCut{}, false
 	}
@@ -292,6 +302,19 @@ func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
 	for right < len(b) && right < splitWindow && isSplitByte(b[right]) {
 		right++
 	}
+	// A JWT may go on far into b: its window reaches on over JWT bytes, up to jwtWindow.
+	if jwt || startsJWT(a[left:], b) {
+		for right < len(b) && right < jwtWindow && isJWTByte(b[right]) {
+			right++
+		}
+	}
+	// A string that starts with a token of its own is not joined to the one before it, so that
+	// each token keeps its own finding ({"token": "<token>", "refresh_token": "<token>"}).
+	for _, own := range e.splitSpans(b[:right]) {
+		if own.start == 0 {
+			return splitCut{}, false
+		}
+	}
 	window := a[left:] + b[:right]
 	boundary := len(a) - left
 	for _, s := range e.splitSpans(window) {
@@ -299,14 +322,14 @@ func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
 			continue
 		}
 		// A whole token that ends a ({"<token>": "repo"}, ["<token>", "general"]) is found
-		// there, and a rule that runs on into b only took b's start along; it is joined only
-		// when that start looks like the random rest of a token, since a part long enough to
-		// match on its own may still be only the start of a longer one.
-		if !randomTail(b[:min(s.end-boundary, len(b))]) {
-			for _, whole := range e.splitSpans(a[left:]) {
-				if whole.end == boundary && whole.start <= s.start {
-					return splitCut{}, false
-				}
+		// there, and a rule that runs on into b only took b's start along. It is joined only when
+		// that start looks like the random rest of a token, since a part long enough to match on
+		// its own may still be only the start of a longer one. A whole JWT never is, nor a whole token
+		// that ends a secret member's value (aWhole), which is replaced whole as it is.
+		for _, whole := range e.splitSpans(a[left:]) {
+			if whole.end == boundary && whole.start <= s.start &&
+				(aWhole || whole.kind == "jwt" || !randomTail(b[:min(s.end-boundary, len(b))])) {
+				return splitCut{}, false
 			}
 		}
 		tail, head := left+s.start, s.end-boundary

@@ -92,6 +92,11 @@ func russianLabelAccept(text string, match []int, start, end int) (int, int, str
 		return 0, 0, "", false // "пароль от почты сменили"
 	}
 	if unquoted := match[2*russianLabelValueGroup] >= 0 && match[2*russianLabelValueGroup] == start; unquoted {
+		// After an escaped line break, the value is on the next line, and a pair there is not
+		// taken, as after a real one.
+		if s := end - len(trimLeftSet(text[start:end], "\x00")); s > start && s < end && opensPair(text, s, end) {
+			return 0, 0, "", false
+		}
 		end = trimTrailingPunctuation(text, start, end)
 	}
 	value := text[start:end]
@@ -152,25 +157,25 @@ func opensPair(text string, start, end int) bool {
 }
 
 // keyShaped reports whether a name looks like the key of a pair rather than a password: at most
-// 64 characters, letters with "_", "-", "." or "/" between them, and no digit ("username",
-// "токен", "логин/пароль", but not "Qwerty123" or "P@ssw0rd").
+// 64 characters, letters and "_" only ("username", "user_name", "токен", but not "Qwerty123",
+// "admin/qwerty" or "Summer-Sale").
 func keyShaped(name string) bool {
 	if name == "" || utf8.RuneCountInString(name) > 64 {
 		return false
 	}
 	for _, r := range name {
-		if !unicode.IsLetter(r) && !strings.ContainsRune("_-./", r) {
+		if !unicode.IsLetter(r) && r != '_' {
 			return false
 		}
 	}
 	return true
 }
 
-// russianKeyLineRegions returns, for the Russian next-line rule, each line that ends, before
-// spaces and a carriage return, with a label separator and holds a Russian label, together with
-// the line after it, and with the line before it when that one ends with "код" and the key line
-// starts with "доступа" (the space of "код доступа" may be a line break). A line is in at most three regions, so the cost
-// stays linear.
+// russianKeyLineRegions returns, for the Russian next-line rule, each line that ends, before spaces
+// and a carriage return, with a label separator and holds a Russian label, together with the line
+// after it, and with the line before it when that one ends with "код" and the key line starts with
+// "доступа" (the space of "код доступа" may be a line break). A line is in at most three regions,
+// so the cost stays linear.
 func russianKeyLineRegions(text string) []region {
 	var regions []region
 	prevStart, prevEndsWithCode := 0, false

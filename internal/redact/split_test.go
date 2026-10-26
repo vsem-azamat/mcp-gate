@@ -42,8 +42,8 @@ func TestNamesUnderSecretMembers(t *testing.T) {
 		},
 		{
 			name: "identifiers with digits stay, a word with digits does not",
-			in:   `{"credentials":{"oauth2":{},"auth_provider_x509_cert_url":"","sha256Hash":null,"hunter2":true,"pass1234":false}}`,
-			want: `{"credentials":{"oauth2":{},"auth_provider_x509_cert_url":"","sha256Hash":null,"[REDACTED:secret]":true,"[REDACTED:secret]#2":false}}`,
+			in:   `{"credentials":{"oauth2":{},"auth_provider_x509_cert_url":"","sha256Hash":null,"oauth2Token":0,"apiV2":[],"hunter2":true,"pass1234":false,"MyPassword1":true,"LetMeIn2024":true,"Summer2024Sale":true,"hunter2_x":true}}`,
+			want: `{"credentials":{"oauth2":{},"auth_provider_x509_cert_url":"","sha256Hash":null,"oauth2Token":0,"apiV2":[],"[REDACTED:secret]":true,"[REDACTED:secret]#2":false,"[REDACTED:secret]#3":true,"[REDACTED:secret]#4":true,"[REDACTED:secret]#5":true,"[REDACTED:secret]#6":true}}`,
 		},
 		{
 			name: "in an array under a secret member",
@@ -121,7 +121,7 @@ func TestTokensSplitAcrossStrings(t *testing.T) {
 		{
 			name: "the second part under a secret member",
 			in:   `{"a":"` + gh[:10] + `","password":"` + gh[10:] + ` rest"}`,
-			want: `{"a":"[REDACTED:github_token]","password":"` + cont + `[REDACTED:password]"}`,
+			want: `{"a":"[REDACTED:github_token]","password":"[REDACTED:password]"}`,
 		},
 		{
 			name: "the first part under a secret member",
@@ -211,5 +211,34 @@ func TestTokensSplitAcrossStrings(t *testing.T) {
 	// In text, the strings of a JSON fragment are not joined.
 	if got := newEngine(t, Options{}).RedactText(in, Marker{}); strings.Contains(got, cont) {
 		t.Errorf("text was joined: %s", got)
+	}
+}
+
+// A long JWT is found at every cut between two strings, however far its parts reach into
+// either string; only a cut in its signature after a whole JWT leaves the rest of the signature,
+// since a whole JWT is never joined to the next string.
+func TestLongJWTCutAnywhere(t *testing.T) {
+	t.Parallel()
+
+	header, payload, signature := "eyJ"+fake("", 60), "eyJ"+fake("", 900), fake("", 316)
+	jwt := header + "." + payload + "." + signature
+	whole := len(header) + 1 + len(payload) + 1 + 8 // from here on a holds a whole JWT
+	e := newEngine(t, Options{})
+	for cut := 1; cut < len(jwt); cut++ {
+		in := `{"auth":"Bearer ` + jwt[:cut] + `","next":"` + jwt[cut:] + `"}`
+		got, err := e.RedactJSON([]byte(in), Marker{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct{ Auth, Next string }
+		if err := json.Unmarshal(got, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Auth != "Bearer [REDACTED:jwt]" {
+			t.Fatalf("cut %d: auth = %q", cut, out.Auth)
+		}
+		if cut < whole && out.Next != ContinuationMarker {
+			t.Fatalf("cut %d: next = %q", cut, out.Next)
+		}
 	}
 }

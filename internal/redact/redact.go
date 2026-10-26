@@ -271,11 +271,11 @@ const (
 	rescanSlack  = 64 << 10
 )
 
-// rescanSpans returns the accepted matches of a rule with rescan: after each match the search
-// goes on from the end of its first group (the label), so that a label inside the rest of the
-// match (a qualifier or a value, rejected or not) is matched with its own value. Accepted spans that overlap are merged. The values read
-// again share a budget, since a text made of labels would make that quadratic; past it, the
-// search goes on after each match.
+// rescanSpans returns the accepted matches of a rule with rescan: after each match the search goes
+// on from the end of its first group (the label), so that a label inside the rest of the match (a
+// qualifier or a value, rejected or not) is matched with its own value. Accepted spans that overlap
+// are merged. The values read again share a budget, since a text made of labels would make that
+// quadratic; past it, the search goes on after each match.
 func (e *Engine) rescanSpans(r *rule, text string) []span {
 	var spans []span
 	budget := rescanFactor*len(text) + rescanSlack

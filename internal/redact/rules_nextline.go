@@ -200,8 +200,9 @@ func nextLineValueAccept(text string, match []int, start, end int) (int, int, st
 // the key ("if token", "if not token", "case 'token'", "if(token)"), or any number of words
 // when one before the key is an operator word or holds an operator character ("while retries
 // and token", "if len(token)"). A header word in prose ("for the staging db password") opens
-// no block. keyLineRegions skips such key lines before matching, and nextLineValueAccept rejects
-// them; both pass the line without what follows the key, so that they agree.
+// no block. keyLineRegions skips such key lines before matching, passing the line up to its
+// separator, and nextLineValueAccept rejects them, passing the line up to the end of the key;
+// opensBlock drops a trailing separator, quote and space, so that both see the same words.
 func opensBlock(line string) bool {
 	line = strings.TrimLeft(line, " \t")
 	n := 0

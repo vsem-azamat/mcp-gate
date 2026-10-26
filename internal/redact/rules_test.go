@@ -52,6 +52,8 @@ func TestRussianLabels(t *testing.T) {
 		// A next line that starts with a password, not a key, before a separator.
 		"пароль:\nP@ssw0rd = old":                         "P@ssw0rd",
 		"пароль:\nQwerty123: да":                          "Qwerty123",
+		"секрет:\n  admin/qwerty: x":                      "admin/qwerty",
+		"Пароль:\nSummer-Sale: проверь":                   "Summer-Sale",
 		"пароль:\nдоступа, токен:\nHunter22x":             "Hunter22x",
 		"пароль:\nдоступа к токен:\nHunter22x":            "Hunter22x",
 		"код\nдоступа:\nHunter22x":                        "Hunter22x",
@@ -80,6 +82,7 @@ func TestRussianLabels(t *testing.T) {
 		"пароль от почты сменили",
 		// A next line that is a key-value pair of its own.
 		"пароль:\nusername: alice",
+		`пароль:\nusername: alice`,
 		"пароль:\nlogin = alice",
 		"токен —\nимя: бот",
 	}

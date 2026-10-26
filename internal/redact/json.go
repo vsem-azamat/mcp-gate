@@ -109,13 +109,7 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 			return inherited
 		}
 		top := stack[len(stack)-1]
-		if kind, ok := secretKeyKind(top.key); ok {
-			return kind
-		}
-		if top.inherited != "" && !slices.Contains(nestedSafeKeys, normalizeKey(top.key)) {
-			return top.inherited
-		}
-		return ""
+		return memberKind(top.key, top.inherited)
 	}
 	var out bytes.Buffer
 	last := 0
@@ -174,8 +168,8 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 			isName := len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectKey
 			// The checks that rule out most boundaries come first and cost no call.
 			if len(decoded) > c.head && splitClass[decoded[len(decoded)-1]]&classSplit != 0 {
-				if next := adjacentString(data, end, stack); next >= 0 && (!isName || heads == nil || heads[next] == 0) {
-					if cut, ok := e.splitAfter(decoded, c.head, data, next); ok {
+				if next, name := adjacentString(data, end, stack); next >= 0 && (!isName || heads == nil || heads[next] == 0) {
+					if cut, ok := e.splitAfter(decoded, c.head, data, next, name, stack[len(stack)-1]); ok {
 						c.tail = &cut
 						if heads == nil {
 							heads = map[int]int{}
@@ -355,20 +349,55 @@ func encodeJSONString(s string) []byte {
 // adjacentString returns the offset of the string literal adjacent to the one that ends at
 // data[end], or -1: for a member name, its value; for a member value, the value of the next
 // member; for an array element, the next element. stack is that of rewriteJSON.
-func adjacentString(data []byte, end int, stack []frame) int {
+func adjacentString(data []byte, end int, stack []frame) (next, name int) {
 	if len(stack) == 0 {
-		return -1
+		return -1, -1
 	}
 	top := stack[len(stack)-1]
 	i := skipJSONSpace(data, end)
 	if top.object && top.expectKey {
-		return stringAfter(data, i, ':')
+		return stringAfter(data, i, ':'), -1
 	}
 	i = stringAfter(data, i, ',')
 	if i < 0 || !top.object {
-		return i
+		return i, -1
 	}
-	return stringAfter(data, skipJSONSpace(data, jsonStringEnd(data, i)), ':')
+	return stringAfter(data, skipJSONSpace(data, jsonStringEnd(data, i)), ':'), i
+}
+
+// secretWhole reports whether a value of secret kind kind is replaced whole.
+func secretWhole(e *Engine, kind, value string) bool {
+	return kind != "" && !e.disabled[kind] && !isPlaceholderValue(value)
+}
+
+// memberKind is the secret kind of a value stored under the member name key in an object or
+// array whose enclosing secret kind is inherited, or "".
+func memberKind(key, inherited string) string {
+	if kind, ok := secretKeyKind(key); ok {
+		return kind
+	}
+	if inherited != "" && !slices.Contains(nestedSafeKeys, normalizeKey(key)) {
+		return inherited
+	}
+	return ""
+}
+
+// adjacentKind returns the secret kind of the adjacent string at data[next] (see
+// adjacentString): a is the decoded string before it, name the offset of the member name between
+// them or -1, and top the frame both are in.
+func adjacentKind(a string, data []byte, name int, top frame) string {
+	switch {
+	case top.object && top.expectKey:
+		return memberKind(a, top.inherited)
+	case name >= 0:
+		key, err := decodeJSONString(data[name:jsonStringEnd(data, name)])
+		if err != nil {
+			return ""
+		}
+		return memberKind(key, top.inherited)
+	default:
+		return memberKind(top.key, top.inherited)
+	}
 }
 
 // stringAfter returns the offset of the string literal that follows sep at data[i] and space,
@@ -400,8 +429,10 @@ func splitLeftOnly(a string, from int) int {
 // splitAfter looks for a token that starts in the decoded string a, at or after from, and goes
 // on in the string literal at data[next] (see splitToken). The literal is decoded only when the
 // window passes splitHintOf and maySplit on its raw bytes; maySplit is checked again on the
-// decoded run, which differs when an escape is in it.
-func (e *Engine) splitAfter(a string, from int, data []byte, next int) (splitCut, bool) {
+// decoded run, which differs when an escape is in it. name and top are as adjacentKind takes
+// them. When the second string is a secret member's value, replaced whole anyway, the first part
+// is cut alone, with no continuation.
+func (e *Engine) splitAfter(a string, from int, data []byte, next, name int, top frame) (splitCut, bool) {
 	if len(a) <= from || !isSplitByte(a[len(a)-1]) || next+1 >= len(data) || (!isSplitByte(data[next+1]) && data[next+1] != '\\') {
 		return splitCut{}, false
 	}
@@ -438,7 +469,14 @@ func (e *Engine) splitAfter(a string, from int, data []byte, next int) (splitCut
 	if !maySplit(a[splitLeftOnly(a, from):], b[:head]) {
 		return splitCut{}, false
 	}
-	return e.splitToken(a, from, b)
+	aWhole := (!top.object || !top.expectKey) && secretWhole(e, memberKind(top.key, top.inherited), a)
+	cut, ok := e.splitToken(a, from, b, aWhole)
+	// A second string that is replaced whole anyway, as a secret member's value, keeps its own
+	// finding: the first part is replaced on its own, with no continuation.
+	if ok && secretWhole(e, adjacentKind(a, data, name, top), b) {
+		cut.head, cut.value = 0, a[cut.tail:]
+	}
+	return cut, ok
 }
 
 // nameShape is what a member name under a secret member looks like, as nameShapeOf finds it.
@@ -470,13 +508,23 @@ func nameShapeOf(name string) nameShape {
 }
 
 // plainIdentifier matches the names of members as code writes them: "expires_in", "token-type",
-// "tokenType", "TokenType", "userID", "TOKEN_TYPE". A part may end in up to four digits when the
-// name has more than one part ("auth_provider_x509_cert_url", "oauth2Token"), and a few
-// well-known words hold digits ("oauth2", "sha256"); a single word with digits ("hunter2") is no
-// plain identifier.
-var plainIdentifier = regexp.MustCompile(`^(?:_?[a-z]+(?:[_-][a-z]+)*|_?[A-Z]+(?:_[A-Z]+)*|[A-Za-z][a-z]+(?:[A-Z][a-z]+)*[A-Z]*` +
-	`|_?[a-z]+[0-9]{0,4}(?:[_-][a-z]+[0-9]{0,4})+|[A-Z]+[0-9]{0,4}(?:_[A-Z]+[0-9]{0,4})+|[A-Za-z][a-z]+[0-9]{0,4}(?:[A-Z][a-z]+[0-9]{0,4})+[A-Z]*` +
-	`|oauth[12]|sha(?:1|224|256|384|512)|md5|base(?:32|64)|x509|utf8|utf16|ipv[46]|http[23])$`)
+// "tokenType", "TokenType", "userID", "TOKEN_TYPE". Digits count only in the well-known words of
+// digitWords, alone or as a part of such a name ("oauth2", "auth_provider_x509_cert_url",
+// "sha256Hash", "oauth2Token"); any other word with digits ("hunter2", "MyPassword1",
+// "Summer2024Sale") is no plain identifier.
+var plainIdentifier = regexp.MustCompile(`^(?:` +
+	`_?(?:[a-z]+|` + digitWords + `)(?:[_-](?:[a-z]+|` + digitWords + `))*` +
+	`|_?(?:[A-Z]+|` + upperDigitWords + `)(?:_(?:[A-Z]+|` + upperDigitWords + `))*` +
+	`|(?:[A-Za-z][a-z]+|` + digitWords + `)(?:[A-Z][a-z]+|` + titleDigitWords + `)*[A-Z]*` +
+	`)$`)
+
+// digitWords are the well-known words with digits that identifiers hold, in lower case;
+// upperDigitWords and titleDigitWords are the same words in upper and title case.
+const (
+	digitWords      = `(?:oauth[12]|sha(?:1|224|256|384|512)|md5|base(?:32|64)|x509|utf(?:8|16)|ipv[46]|http[23]|v[0-9])`
+	upperDigitWords = `(?:OAUTH[12]|SHA(?:1|224|256|384|512)|MD5|BASE(?:32|64)|X509|UTF(?:8|16)|IPV[46]|HTTP[23]|V[0-9])`
+	titleDigitWords = `(?:Oauth[12]|OAuth[12]|Sha(?:1|224|256|384|512)|Md5|Base(?:32|64)|X509|Utf(?:8|16)|Ipv[46]|IPv[46]|Http[23]|V[0-9])`
+)
 
 // The length and Shannon entropy, in bits per byte, from which a name of letters only counts as
 // random rather than as an identifier.
