@@ -8,12 +8,17 @@
 
 ### Requirement: serve
 
-`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid, and also when the escrow key hash cannot be resolved (see the escrow spec). Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server (OAuth servers with the grants in the `oauth` directory of the state directory, see the oauth spec), listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. On SIGINT or SIGTERM it SHALL stop accepting connections, end the `subscriptions/listen` streams, give calls in flight up to 10 seconds (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
+`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid, and also when the escrow key hash cannot be resolved (see the escrow spec). Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server (OAuth servers with the grants in the `oauth` directory of the state directory, see the oauth spec), listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. On SIGINT or SIGTERM it SHALL stop accepting connections, close the connections on which no request has arrived, end the `subscriptions/listen` streams, give calls in flight up to 10 seconds (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
 
 #### Scenario: Shutdown with a listening client
 
 - **WHEN** a `2026-07-28` client listens for changes and another runs a call with progress while the gate gets SIGTERM
 - **THEN** the shutdown does not wait for the listening client, and the call completes with its progress
+
+#### Scenario: Shutdown with an unused connection
+
+- **WHEN** a client has opened a connection but sent no request on it when the gate gets SIGTERM
+- **THEN** the gate closes that connection and does not wait for it
 
 #### Scenario: Invalid config
 

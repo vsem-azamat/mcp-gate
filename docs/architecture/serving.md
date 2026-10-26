@@ -46,7 +46,7 @@ The mirror's receiving middleware recovers panics in request handling, which the
 
 ## Shutdown
 
-`http.Server.Shutdown` waits for every open request, and a `2026-07-28` client listening for changes keeps one POST open for good. `endListenOnDrain` recognises `subscriptions/listen` bodies and ties their context to a channel closed from `RegisterOnShutdown`, so those streams end at once and only real calls use the 10 second grace. The mirrors run on a context detached from the signal, so calls finishing in the grace still get their progress; `shutdown` closes them after stopping the servers. A server that does not stop in time is logged and does not change the exit status.
+`http.Server.Shutdown` waits for every open request, and a `2026-07-28` client listening for changes keeps one POST open for good. `endListenOnDrain` recognises `subscriptions/listen` bodies and ties their context to a channel closed from `RegisterOnShutdown`, so those streams end at once and only real calls use the 10 second grace. `Shutdown` also waits until a connection on which no request has arrived is 5 seconds old, and HTTP clients keep spare connections they may never use: `upstream.NewServer` tracks those through `ConnState` and closes them from `RegisterOnShutdown`. That tracking is why the listener serves HTTP/1 only: net/http does not report an HTTP/2 connection becoming active. The mirrors run on a context detached from the signal, so calls finishing in the grace still get their progress; `shutdown` closes them after stopping the servers. A server that does not stop in time is logged and does not change the exit status.
 
 ## Readiness and status
 
