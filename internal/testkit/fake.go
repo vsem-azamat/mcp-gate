@@ -70,6 +70,9 @@ type Fake struct {
 	// RejectListen answers subscriptions/listen with a JSON-RPC error, like a server that does
 	// not offer change notifications to 2026-07-28 clients.
 	RejectListen bool `json:"rejectListen,omitempty"`
+	// NoTemplates answers resources/templates/list with "method not found", like a server that
+	// lists resources but implements no templates.
+	NoTemplates bool `json:"noTemplates,omitempty"`
 
 	// The stdio fake only:
 
@@ -376,6 +379,9 @@ func behaviour(f Fake, stop <-chan struct{}, st *fakeStats) mcp.Middleware {
 			}
 			if f.RejectListen && method == "subscriptions/listen" {
 				return nil, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "no subscriptions"}
+			}
+			if f.NoTemplates && method == "resources/templates/list" {
+				return nil, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "Method not found"}
 			}
 			if f.RefuseProbes && (method == "ping" || method == "tools/list") {
 				return nil, &jsonrpc.Error{Code: -32000, Message: "busy"}
