@@ -173,6 +173,9 @@ func TestLoginDiscoveryFallbacks(t *testing.T) {
 			if g.Issuer != srv.Issuer() {
 				t.Errorf("issuer %q, want %q", g.Issuer, srv.Issuer())
 			}
+			if tc.opts.TrailingSlash && g.Resource != strings.TrimSuffix(srv.URL(), "/") {
+				t.Errorf("resource %q, want the endpoint without the slash", g.Resource)
+			}
 		})
 	}
 }
