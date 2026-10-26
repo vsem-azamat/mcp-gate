@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
@@ -141,7 +143,7 @@ func TestReadAllowed(t *testing.T) {
 // of its parameters, however written, and passes other queries; one without a query refuses
 // every query. Under a deny list every query of a hidden URI is refused.
 func TestReadQueries(t *testing.T) {
-	resources := []Entry{{"db://t?id=1", "one"}, {"fake://hidden", "hidden"}}
+	resources := []Entry{{"db://t?id=1", "one"}, {"db://f?flag", "flag"}, {"fake://hidden", "hidden"}}
 	templates := []Entry{{"db://t{?id}", "rows"}, {"db://{+path}", "db"}, {"fake://{+path}", "any"}}
 	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"rows", "db", "any"}}})
 	allow.SetCatalog(resources, templates)
@@ -151,13 +153,33 @@ func TestReadQueries(t *testing.T) {
 		"db://t?id=1", "DB://t?id=%31", "db://t?id=1&", "db://t?&id=1", "db://t?id=1&id=1", "db://t?x=&id=1",
 		"db://t?id=1&x=y", "db://t?id=1;", "db://t?ID=1", "db://t?id=01", "db://t?id=+1", "db://t/?id=1#x",
 		"fake://hidden", "fake://hidden?a=b", "FAKE://%68idden?", "fake://hidden/?x",
+		// A ";" parameter of the path counts as a query parameter.
+		"db://t;id=1", "db://t;x=y;id=1", "db://t/;id=1", "db://t;id=1?x=2", "db://t%3Bid=1",
+		// A "[...]" suffix of a key is dropped.
+		"db://t?id[]=1", "db://t?id%5B%5D=1", "db://t?id[0]=1", "db://t;id[]=1",
+		// A number is compared in its canonical form.
+		"db://t?id=1.0", "db://t?id=1.", "db://t?id=0x1", "db://t?id=0X01", "db://t?id=0o1", "db://t?id=0b1",
+		"db://t?id=1e0", "db://t?id=10e-1", "db://t?id=%2B1", "db://t?id=0x1p0", "db://t?id=1_",
+		"db://t?id=" + strings.Repeat("0", 300) + "1." + strings.Repeat("0", 300),
+		// "=" around a value is trimmed.
+		"db://t?id==1", "db://t?id=1=", "db://t?id===1",
+		// Format characters are removed and Unicode spaces trimmed.
+		"db://t?id=%E2%80%8B1", "db://t?id=1%E2%80%8B", "db://t?i%E2%80%8Bd=1", "db://t?id=%EF%BB%BF1",
+		"db://t?id=%C2%A01", "db://t?id=%E2%80%831", "db://t?id=%011",
+		// A hidden parameter without a value is held by the key with any value.
+		"db://f?flag", "db://f?flag=", "db://f?flag=1", "db://f?FLAG=yes", "db://f;flag=1", "db://f?flag[]=1", "db://f?x=1&flag",
 	}
 	for _, uri := range refused {
 		if allow.ReadAllowed(uri) {
 			t.Errorf("allow list: %s is read", uri)
 		}
 	}
-	for _, uri := range []string{"db://t?id=2", "db://t", "db://t?id=10", "db://t?x=1", "fake://other?a=b"} {
+	for _, uri := range []string{
+		"db://t?id=2", "db://t", "db://t?id=10", "db://t?id=12", "db://t?x=1", "fake://other?a=b",
+		"db://t;x=1", "db://t;id=2", "db://t?id[]=2", "db://t?id=1.5", "db://t?id=0x2", "db://t?id=1e1",
+		"db://t?id==2", "db://t?id=%E2%80%8B2", "db://t?xid=1", "db://t?i=1", "db://t?id=1x",
+		"db://t?id=" + strings.Repeat("1", 200), "db://f", "db://f?other=1", "db://f?flagx=1",
+	} {
 		if !allow.ReadAllowed(uri) {
 			t.Errorf("allow list: %s is refused", uri)
 		}
@@ -166,6 +188,34 @@ func TestReadQueries(t *testing.T) {
 		if deny.ReadAllowed(uri) {
 			t.Errorf("deny list: %s is read", uri)
 		}
+	}
+}
+
+func TestQueryParams(t *testing.T) {
+	for in, want := range map[string]string{
+		"x://a?id=1.0":                         "id=1",
+		"x://a?id=0xA":                         "id=10",
+		"x://a?id=-0":                          "id=0",
+		"x://a?id=0.000":                       "id=0",
+		"x://a?id=1e40":                        "id=1e+40",
+		"x://a?id=%E2%80%8B==1":                "id=1",
+		"x://a?a[b]=X&flag":                    "a=x flag=",
+		"x://a?id=abc&e=e5&dot=.&s=-":          "dot=. e=e5 id=abc s=-",
+		"x://a?id=" + strings.Repeat("9", 200): "id=" + strings.Repeat("9", 200),
+	} {
+		var got []string
+		for k, vs := range queryParams(in) {
+			for _, v := range vs {
+				got = append(got, k+"="+v)
+			}
+		}
+		slices.Sort(got)
+		if g := strings.Join(got, " "); g != want {
+			t.Errorf("queryParams(%q) = %q, want %q", in, g, want)
+		}
+	}
+	if got := readParams("x://a;id=1/b;k=2?q=3"); len(got) != 3 || got["id"][0] != "1" || got["k"][0] != "2" || got["q"][0] != "3" {
+		t.Errorf("readParams = %v", got)
 	}
 }
 
