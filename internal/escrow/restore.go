@@ -13,8 +13,9 @@ var restorable = regexp.MustCompile(`\[REDACTED:[a-z_]+ #(k[a-z2-7]{10})\]|` + r
 // Restore returns text with each marker of a kept value replaced by its value, as value returns
 // it for the handle, and each continuation marker removed: the value kept for the first part of
 // a split token is the whole token, so the token is restored in full where it started. A marker
-// whose handle value does not know is left as it is. It is how a consumer of the API puts the
-// released secrets back into a redacted text.
+// whose handle value does not know is left as it is. It is the reference implementation of the
+// restore procedure the escrow spec defines for consumers of the API; the gate itself never
+// restores.
 func Restore(text string, value func(handle string) (string, bool)) string {
 	return restorable.ReplaceAllStringFunc(text, func(m string) string {
 		if m == redact.ContinuationMarker {

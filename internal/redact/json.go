@@ -166,8 +166,11 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 			// A token may start at the end of this string and go on in the adjacent one: its
 			// rest there is cut off when that string is reached.
 			c := cuts{head: heads[i]}
-			if next := adjacentString(data, end, stack); next >= 0 {
-				if cut, ok := e.splitAfter(decoded, c.head, data, next); ok {
+			// A value that already continues a token from the value before it is not joined to
+			// its name as well, so that each string continues at most one token.
+			isName := len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectKey
+			if next := adjacentString(data, end, stack); next >= 0 && (!isName || heads[next] == 0) {
+				if cut, ok := e.splitAfter(decoded, c.head, data, next, isName); ok {
 					c.tail = &cut
 					if heads == nil {
 						heads = map[int]int{}
@@ -175,7 +178,7 @@ func (e *Engine) rewriteJSON(data []byte, r Replacer, depth int, inherited strin
 					heads[next] = max(heads[next], cut.head)
 				}
 			}
-			if len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectKey {
+			if isName {
 				top := &stack[len(stack)-1]
 				// The name as written marks the value; a name that holds a secret itself
 				// ({"<token>": "repo"}) is replaced as a string value would be, and a name
@@ -385,7 +388,7 @@ func skipJSONSpace(data []byte, i int) int {
 // splitAfter looks for a token that starts in the decoded string a, at or after from, and goes
 // on in the string literal at data[next] (see splitToken). The literal is decoded only when the
 // window passes maySplit, checked on its raw bytes as far as they hold no escape.
-func (e *Engine) splitAfter(a string, from int, data []byte, next int) (splitCut, bool) {
+func (e *Engine) splitAfter(a string, from int, data []byte, next int, nameValue bool) (splitCut, bool) {
 	if len(a) <= from || !isSplitByte(a[len(a)-1]) || next+1 >= len(data) || (!isSplitByte(data[next+1]) && data[next+1] != '\\') {
 		return splitCut{}, false
 	}
@@ -409,7 +412,7 @@ func (e *Engine) splitAfter(a string, from int, data []byte, next int) (splitCut
 			return splitCut{}, false
 		}
 	}
-	return e.splitToken(a, from, b)
+	return e.splitToken(a, from, b, nameValue)
 }
 
 // nameShape is what a member name under a secret member looks like, as nameShapeOf finds it.

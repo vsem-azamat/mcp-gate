@@ -60,6 +60,7 @@ func BenchmarkRedactNextLineEdgeCases(b *testing.B) {
 		"PythonCode":           strings.Repeat("    if not token:\n        return None\n    x = token.split()\n", 20000),
 		"LongKeyLine":          strings.Repeat("x", 1<<20) + " token:\n" + strings.Repeat("y", 1<<20),
 		"KeyLinesLongNextLine": strings.Repeat("token:\n", 1000) + strings.Repeat("z", 1<<20),
+		"RussianKeyLines":      strings.Repeat("пароль:\nQwerty-123\nтокен:\nимя: бот\n", 30000),
 	} {
 		b.Run(name, func(b *testing.B) { benchmarkRedactString(b, Options{Russian: true, HighEntropy: true}, text) })
 	}

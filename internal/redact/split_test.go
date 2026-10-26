@@ -84,6 +84,7 @@ func TestTokensSplitAcrossStrings(t *testing.T) {
 	aws := fake("AKIA", 0) + "IOSFODNN7EXAMPLE"
 	bot := "7123456789:" + fake("AA", 33)
 	long := fake("", 400)
+	oa := fake("sk-proj-", 120)
 	const cont = ContinuationMarker
 	for _, tc := range []struct{ name, in, want string }{
 		{
@@ -125,6 +126,21 @@ func TestTokensSplitAcrossStrings(t *testing.T) {
 			name: "a second part longer than the window",
 			in:   `["` + gh[:10] + `","` + gh[10:] + long + ` tail"]`,
 			want: `["[REDACTED:github_token]","` + cont + ` tail"]`,
+		},
+		{
+			name: "a first part that matches on its own",
+			in:   `["` + oa[:48] + `","` + oa[48:] + `"]`,
+			want: `["[REDACTED:openai_api_key]","` + cont + `"]`,
+		},
+		{
+			name: "a whole token followed by a word, between values",
+			in:   `{"a":"` + gh + `","b":"repo"}`,
+			want: `{"a":"[REDACTED:github_token]","b":"` + cont + `"}`,
+		},
+		{
+			name: "a value continues one token only",
+			in:   `{"a":"x ` + gh[:10] + `","` + gh[:6] + `":"` + gh[10:] + `"}`,
+			want: `{"a":"x [REDACTED:github_token]","` + gh[:6] + `":"` + cont + `"}`,
 		},
 		{
 			name: "a whole token as a name",

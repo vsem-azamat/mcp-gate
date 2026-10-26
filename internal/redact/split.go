@@ -47,9 +47,13 @@ func lowerASCII(c byte) byte {
 	return c
 }
 
+// telegramTokenRun is the number of token bytes after the colon of a Telegram bot token, as
+// hasDigitColonRun checks it.
+const telegramTokenRun = 35
+
 // maySplit is the cheap check of a window that joins a and b: whether it holds, in any letter
-// case, a prefilter word of a split rule, or a digit followed by a colon (a Telegram bot token,
-// the split rule with a precheck instead).
+// case, a prefilter word of a split rule, or a digit, a colon and telegramTokenRun token bytes
+// (a Telegram bot token, the split rule with a precheck instead).
 func maySplit[B string | []byte](a string, b B) bool {
 	at := func(i int) byte {
 		if i < len(a) {
@@ -61,7 +65,13 @@ func maySplit[B string | []byte](a string, b B) bool {
 	for i := 0; i+1 < n; i++ {
 		c, d := at(i), at(i+1)
 		if d == ':' && c >= '0' && c <= '9' {
-			return true
+			run := 0
+			for j := i + 2; j < n && isTokenByte(at(j)); j++ {
+				run++
+			}
+			if run >= telegramTokenRun {
+				return true
+			}
 		}
 		words := splitNeedles[uint16(lowerASCII(c))<<8|uint16(lowerASCII(d))]
 		for _, word := range words {
@@ -101,9 +111,9 @@ func splitLeft(a string, from int) int {
 // splitToken looks for a match of a split rule that starts in a, at or after from, and ends in
 // b, over a window that joins the run of splitBytes ending a (at most splitWindow bytes of it)
 // to the run starting b (as much). A match that reaches the edge of a window cut short goes on
-// over the rest of the run, so no part of the token stays visible. The caller has checked the
-// window with maySplit.
-func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
+// over the rest of the run, so no part of the token stays visible. nameValue is set when a is
+// a member name and b its value. The caller has checked the window with maySplit.
+func (e *Engine) splitToken(a string, from int, b string, nameValue bool) (splitCut, bool) {
 	if len(a) <= from || b == "" || !isSplitByte(a[len(a)-1]) || !isSplitByte(b[0]) {
 		return splitCut{}, false
 	}
@@ -118,11 +128,15 @@ func (e *Engine) splitToken(a string, from int, b string) (splitCut, bool) {
 		if s.start >= boundary || s.end <= boundary {
 			continue
 		}
-		// A token that is whole at the end of a ({"<token>": "repo"}) is found there; a rule
-		// that runs on into b only took b's start along.
-		for _, whole := range e.splitSpans(a[left:]) {
-			if whole.end == boundary && whole.start <= s.start {
-				return splitCut{}, false
+		// A member name that is a whole token ({"<token>": "repo"}) is found there; a rule that
+		// runs on into its value only took the value's start along. Between other strings a
+		// token is joined whenever it crosses, since a part long enough to match on its own may
+		// still be only the start of the token.
+		if nameValue {
+			for _, whole := range e.splitSpans(a[left:]) {
+				if whole.end == boundary && whole.start <= s.start {
+					return splitCut{}, false
+				}
 			}
 		}
 		tail, head := left+s.start, s.end-boundary

@@ -53,6 +53,7 @@ var russianRules = []*rule{
 		groups:    []int{4, 5, 6, 7, 8},
 		prefilter: russianLabelPrefilter,
 		accept:    russianLabelAccept,
+		rescan:    true,
 	},
 	{
 		// "Пароль:" at the end of a line and the value at the start of the next one. A separate
@@ -125,7 +126,8 @@ func russianNextLineAccept(text string, match []int, start, end int) (int, int, 
 
 // opensPair reports whether the unquoted run text[start:end] is the key of a pair on its line:
 // it holds no escaped line break, ends with, or is followed by space and, one of ":", "=" or
-// "：", and more than space follows on the line.
+// "：", more than space follows on the line, and what comes before the separator is
+// keyShaped.
 func opensPair(text string, start, end int) bool {
 	lineEnd := len(text)
 	if i := strings.IndexByte(text[end:], '\n'); i >= 0 {
@@ -136,8 +138,9 @@ func opensPair(text string, start, end int) bool {
 	if strings.IndexByte(run, maskedBreak) >= 0 {
 		return false // the run goes on over an escaped line break, after which a pair may start
 	}
+	name := trimRightSet(run, ":=：")
 	switch {
-	case strings.HasSuffix(run, ":") || strings.HasSuffix(run, "=") || strings.HasSuffix(run, "："):
+	case len(name) < len(run):
 	case strings.HasPrefix(rest, ":") || strings.HasPrefix(rest, "="):
 		rest = rest[1:]
 	case strings.HasPrefix(rest, "："):
@@ -145,37 +148,55 @@ func opensPair(text string, start, end int) bool {
 	default:
 		return false
 	}
-	return strings.TrimSpace(rest) != ""
+	return strings.TrimSpace(rest) != "" && keyShaped(name)
+}
+
+// keyShaped reports whether a name looks like the key of a pair rather than a password: at most
+// 64 characters, letters with "_", "-", "." or "/" between them, and no digit ("username",
+// "токен", "логин/пароль", but not "Qwerty123" or "P@ssw0rd").
+func keyShaped(name string) bool {
+	if name == "" || utf8.RuneCountInString(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		if !unicode.IsLetter(r) && !strings.ContainsRune("_-./", r) {
+			return false
+		}
+	}
+	return true
 }
 
 // russianKeyLineRegions returns, for the Russian next-line rule, each line that ends, before
-// spaces and a carriage return, with a label separator and holds a Russian label in its last
-// maxKeyLineWindow bytes, together with the line after it.
+// spaces and a carriage return, with a label separator and holds a Russian label, together with
+// the line after it, and with the line before it when the key line starts with "доступа" (the
+// space of "код доступа" may be a line break). A line is in at most three regions, so the cost
+// stays linear.
 func russianKeyLineRegions(text string) []region {
 	var regions []region
+	prevStart := 0
 	for lineStart := 0; lineStart < len(text); {
 		i := strings.IndexByte(text[lineStart:], '\n')
 		if i < 0 {
 			break
 		}
 		start, lineEnd := lineStart, lineStart+i
-		lineStart = lineEnd + 1
+		before := prevStart
+		prevStart, lineStart = start, lineEnd+1
 		key := trimRightSet(text[start:lineEnd], " \t\r")
 		if !hasRussianSeparatorSuffix(key) {
 			continue
 		}
-		windowStart := max(start, start+len(key)-maxKeyLineWindow)
-		for windowStart < len(text) && !utf8.RuneStart(text[windowStart]) {
-			windowStart++
-		}
-		if !containsAny(strings.ToLower(text[windowStart:start+len(key)]), russianLabelPrefilter) {
+		lowered := strings.ToLower(key)
+		if strings.HasPrefix(strings.TrimLeft(lowered, " \t"), "доступа") {
+			start = before
+		} else if !containsAny(lowered, russianLabelPrefilter) {
 			continue
 		}
 		valueEnd := len(text)
 		if j := strings.IndexByte(text[lineStart:], '\n'); j >= 0 {
 			valueEnd = lineStart + j
 		}
-		regions = append(regions, region{start: windowStart, end: valueEnd})
+		regions = append(regions, region{start: start, end: valueEnd})
 	}
 	return regions
 }

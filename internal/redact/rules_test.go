@@ -44,6 +44,16 @@ func TestRussianLabels(t *testing.T) {
 		"Пароль:\r\nCrlf-Pw-77\r\nдальше": "Crlf-Pw-77",
 		"пароль:\nQwerty-123 и ещё текст": "Qwerty-123",
 		"пароль: \n  «spaced pw 1»":       "spaced pw 1",
+		// A value does not hide a label inside it.
+		"пароль от почты:\tтокен: Abc12345xyz":                       "Abc12345xyz",
+		"токен:\nистёк,пароль от почты:\tтокен: Abc12345xyz":         "Abc12345xyz",
+		"пароль" + strings.Repeat(" ", 600) + ":\nHunter22x":         "Hunter22x",
+		"пароль от" + strings.Repeat(" ", 600) + "почты:\nHunter22x": "Hunter22x",
+		// A next line that starts with a password, not a key, before a separator.
+		"пароль:\nP@ssw0rd = old":         "P@ssw0rd",
+		"пароль:\nQwerty123: да":          "Qwerty123",
+		"код\nдоступа:\nHunter22x":        "Hunter22x",
+		"токен: \tERC-20,токен: hunter22": "hunter22",
 	}
 	negatives := []string{
 		"пароль был изменён",
@@ -315,6 +325,10 @@ func TestLargeInputsStayFast(t *testing.T) {
 	inputs := []string{
 		strings.Repeat("password: hunter2secret\nAKIAABCDEFGHIJKLMNOP\n", repeat),
 		strings.Repeat("Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0,", repeat),
+		// Labels whose values hold the next label, taken or rejected.
+		strings.Repeat("пароль:", repeat),
+		strings.Repeat("пароль-", repeat),
+		strings.Repeat("токен: истёк,", repeat),
 	}
 	e := newEngine(t, Options{Russian: true, HighEntropy: true})
 	for _, text := range inputs {
