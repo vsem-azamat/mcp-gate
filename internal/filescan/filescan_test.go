@@ -226,7 +226,9 @@ func TestLongLineStaysCheap(t *testing.T) {
 		lookups := 0
 		begin := time.Now()
 		_, _ = candidates(nil, textResult(line), func(string) bool { lookups++; return false })
-		if lookups > (maxCandidates+1)*maxPathWords || time.Since(begin) > 5*time.Second {
+		// The time bound only catches quadratic work, which took minutes on such a line; the race
+		// detector makes the linear scan of a few MiB take seconds.
+		if lookups > (maxCandidates+1)*maxPathWords || time.Since(begin) > time.Minute {
 			t.Errorf("%d lookups in %v", lookups, time.Since(begin))
 		}
 	}
