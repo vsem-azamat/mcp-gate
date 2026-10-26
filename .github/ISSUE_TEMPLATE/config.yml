@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/vsem-azamat/mcp-gate/security/advisories/new
+    about: Report security problems privately, never in a public issue.

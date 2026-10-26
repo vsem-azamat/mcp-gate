@@ -82,5 +82,11 @@ This repository is public. Before every commit and PR, check that nothing privat
 | `scripts/` | Repository checks run by `make repo` |
 | `.githooks/` | Versioned git hooks, enabled by `make hooks` |
 | `tools/`, `tools/lint/` | Pinned development tools, run with `go tool` |
-| `.github/workflows/` | CI (`make check` plus the release config) and the tag-driven release |
+| `.github/workflows/` | CI (`make check`, tests on macOS, the release config) and the tag-driven release |
+| `.github/dependabot.yml` | Weekly grouped dependency updates: the Go module, the pinned tools, the actions |
+| `.github/pull_request_template.md` | The pull request description: what, why, specs and docs, verification, review |
+| `.github/ISSUE_TEMPLATE/` | Bug and feature issue forms; blank issues are off and vulnerabilities go to private reports |
+| `.github/CONTRIBUTING.md` | The short path for contributors, pointing here |
+| `SECURITY.md` | How to report a vulnerability, supported versions, scope |
+| `.gitguardian.yaml` | Paths the GitGuardian secret scan skips: tests and `testdata/` |
 | `.goreleaser.yaml` | Release builds, the smoke test of each built binary, the archives |
