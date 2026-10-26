@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 
@@ -499,61 +498,29 @@ func (a *Aggregate) deny(ctx context.Context, extra *mcp.RequestExtra, kind audi
 	})
 }
 
-// receive is the view's receiving middleware, as a mirror's: it answers a panic with an internal
-// error, and writes the audit line of a tool call or prompt get the SDK refuses before a handler
-// runs, and of a resource read it refuses because the token's policy hides what it names. A name
-// whose server the caller may reach is audited by that server's mirror.
+// receive is the view's receiving middleware (see receiving). A refused name whose server the
+// caller may reach is audited by that server's mirror, as on the server's route; a tool call or
+// prompt get of any other name by the aggregate, and a read of a URI no member the caller may
+// reach serves not at all.
 func (v *View) receive(next mcp.MethodHandler) mcp.MethodHandler {
-	return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
-		defer func() {
-			if p := recover(); p != nil {
-				v.a.logger.Error("request handler panicked", "method", method, "type", fmt.Sprintf("%T", p))
-				res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "mcp-gate: internal error"}
-			}
-		}()
-		var kind audit.Kind
-		var name string
-		switch r := req.(type) {
-		case *mcp.CallToolRequest:
-			if r.Params != nil {
-				kind, name = audit.Tool, r.Params.Name
-			}
-		case *mcp.GetPromptRequest:
-			if r.Params != nil {
-				kind, name = audit.Prompt, r.Params.Name
-			}
-		case *mcp.ReadResourceRequest:
-			if r.Params != nil {
-				kind, name = audit.Resource, r.Params.URI
-			}
-		}
-		if kind == 0 {
-			return next(ctx, method, req)
-		}
-		reached := new(bool)
-		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
-		if err != nil && !*reached && kind == audit.Resource {
-			// A read of a URI no member serves is not audited; one the token's policy hides is, by
-			// its member.
+	return receiving(v.a.logger, func(ctx context.Context, extra *mcp.RequestExtra, kind audit.Kind, name string) {
+		if kind == audit.Resource {
 			if server, ok := v.route(name); ok {
-				if extra, m, ok := v.admit(req.GetExtra(), server); ok && m.decision(principalOf(extra), audit.Resource, name) == policy.Denied {
-					m.refused(ctx, extra, audit.Resource, name, false)
+				if extra, m, ok := v.admit(extra, server); ok {
+					m.refusedEarly(ctx, extra, kind, name, false)
 				}
 			}
-			return res, err
+			return
 		}
-		if err != nil && !*reached {
-			if server, rest, ok := splitName(name); ok {
-				if extra, m, ok := v.admit(req.GetExtra(), server); ok {
-					v.a.mu.Lock()
-					skipped := v.a.skipped[named{kind, name}]
-					v.a.mu.Unlock()
-					m.refused(ctx, extra, kind, rest, skipped)
-					return res, err
-				}
+		if server, rest, ok := splitName(name); ok {
+			if extra, m, ok := v.admit(extra, server); ok {
+				v.a.mu.Lock()
+				skipped := v.a.skipped[named{kind, name}]
+				v.a.mu.Unlock()
+				m.refusedEarly(ctx, extra, kind, rest, skipped)
+				return
 			}
-			v.a.deny(ctx, req.GetExtra(), kind, name)
 		}
-		return res, err
-	}
+		v.a.deny(ctx, extra, kind, name)
+	})(next)
 }

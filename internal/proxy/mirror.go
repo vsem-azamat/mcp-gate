@@ -44,14 +44,25 @@ const (
 	retryLast  = time.Minute
 )
 
-// Downstream is the supervisor of the mirrored server.
+// Downstream is what a mirror's calls go to: the supervisor of the mirrored server, as
+// downstream.Supervisor implements it. A call fails with a *downstream.NotReadyError while the
+// server has no session.
 type Downstream interface {
-	// Call runs fn with the current session, as downstream.Supervisor.Call does.
-	Call(ctx context.Context, fn func(context.Context, *mcp.ClientSession) error) error
+	CallTool(ctx context.Context, p *mcp.CallToolParams) (*mcp.CallToolResult, error)
+	GetPrompt(ctx context.Context, p *mcp.GetPromptParams) (*mcp.GetPromptResult, error)
+	ReadResource(ctx context.Context, p *mcp.ReadResourceParams) (*mcp.ReadResourceResult, error)
 	// ErrorText returns an error's message fit for logs and clients.
 	ErrorText(err error) string
 	// HideURL returns a text with the server's URL replaced by its config path.
 	HideURL(text string) string
+}
+
+// Supervisor is what a Source is attached to: the calls of its mirrors, and the session the
+// catalog is listed on.
+type Supervisor interface {
+	Downstream
+	// Call runs fn with the current session, as downstream.Supervisor.Call does.
+	Call(ctx context.Context, fn func(context.Context, *mcp.ClientSession) error) error
 }
 
 // Options configure a Mirror.

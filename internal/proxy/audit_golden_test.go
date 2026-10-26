@@ -66,7 +66,7 @@ func TestAuditOutcomesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mirror := func(down Downstream, r *Redaction) *Mirror {
+	mirror := func(down sessionRunner, r *Redaction) *Mirror {
 		return newMirror(Options{Name: "s", Policy: policy.New(&config.Server{}), Logger: logger, Redaction: r}, down)
 	}
 	call := func(m *Mirror, name string) {
@@ -190,7 +190,7 @@ func TestAuditMoreOutcomesGolden(t *testing.T) {
 	}
 	// A mirror of fullDown, listed, whose filter hides the template "items".
 	src := NewSource("s", logger)
-	src.Attach(fullDown(t))
+	src.Attach(onSession{fullDown(t)})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	src.Start(ctx)

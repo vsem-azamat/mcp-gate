@@ -536,6 +536,33 @@ func (s *Supervisor) Call(ctx context.Context, fn func(context.Context, *mcp.Cli
 	return err
 }
 
+// CallTool calls a tool on the current session, as Call runs a function on it.
+func (s *Supervisor) CallTool(ctx context.Context, p *mcp.CallToolParams) (res *mcp.CallToolResult, err error) {
+	err = s.Call(ctx, func(ctx context.Context, cs *mcp.ClientSession) (err error) {
+		res, err = cs.CallTool(ctx, p)
+		return err
+	})
+	return res, err
+}
+
+// GetPrompt gets a prompt on the current session, as Call runs a function on it.
+func (s *Supervisor) GetPrompt(ctx context.Context, p *mcp.GetPromptParams) (res *mcp.GetPromptResult, err error) {
+	err = s.Call(ctx, func(ctx context.Context, cs *mcp.ClientSession) (err error) {
+		res, err = cs.GetPrompt(ctx, p)
+		return err
+	})
+	return res, err
+}
+
+// ReadResource reads a resource on the current session, as Call runs a function on it.
+func (s *Supervisor) ReadResource(ctx context.Context, p *mcp.ReadResourceParams) (res *mcp.ReadResourceResult, err error) {
+	err = s.Call(ctx, func(ctx context.Context, cs *mcp.ClientSession) (err error) {
+		res, err = cs.ReadResource(ctx, p)
+		return err
+	})
+	return res, err
+}
+
 // loginLost reports whether the server uses OAuth and has no usable grant.
 func (s *Supervisor) loginLost() bool {
 	h := s.opts.HTTP
