@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
@@ -283,11 +284,18 @@ func (m *Mirror) list(ctx context.Context, cs *mcp.ClientSession, kinds int) lis
 	if kinds&kindResources != 0 && caps.Resources != nil && !m.opts.Policy.Resources.ExposesNothing() {
 		if l.resources, err = collect(cs.Resources(ctx, nil)); err != nil {
 			fail(kindResources, "resources", err)
-		} else if l.templates, err = collect(cs.ResourceTemplates(ctx, nil)); err != nil {
+		} else if l.templates, err = collect(cs.ResourceTemplates(ctx, nil)); err != nil && !methodNotFound(err) {
 			fail(kindResources, "resource templates", err)
 		}
 	}
 	return l
+}
+
+// methodNotFound reports whether a server answered that it has no such method, as servers that
+// list resources but implement no templates answer resources/templates/list.
+func methodNotFound(err error) bool {
+	var we *jsonrpc.Error
+	return errors.As(err, &we) && we.Code == jsonrpc.CodeMethodNotFound
 }
 
 func collect[T any](seq func(func(*T, error) bool)) ([]*T, error) {

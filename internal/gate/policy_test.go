@@ -44,6 +44,27 @@ func firstText(pr *mcp.GetPromptResult) (string, bool) {
 	return tc.Text, true
 }
 
+// A server that lists resources but answers resources/templates/list with "method not found"
+// keeps its resources.
+func TestResourcesWithoutTemplates(t *testing.T) {
+	r := startGate(t, configDoc("", map[string]string{
+		"notpl": stdioServer(t, testkit.Fake{Catalog: true, NoTemplates: true}, ""),
+	}), gateOpts{})
+	r.waitReady(t, "notpl")
+	cs := r.connect(t, "notpl", clientOpts{})
+	res, err := cs.ListResources(t.Context(), nil)
+	if err != nil || len(res.Resources) == 0 {
+		t.Fatalf("resources %v %v", res, err)
+	}
+	tpl, err := cs.ListResourceTemplates(t.Context(), nil)
+	if err != nil || len(tpl.ResourceTemplates) != 0 {
+		t.Errorf("templates %v %v", tpl, err)
+	}
+	for _, l := range r.logs.lines("listing the catalog failed; keeping the last one") {
+		t.Errorf("listing failed: %v", l)
+	}
+}
+
 func TestFilters(t *testing.T) {
 	f := testkit.Fake{Catalog: true}
 	r := startGate(t, configDoc("", map[string]string{
