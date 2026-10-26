@@ -433,29 +433,31 @@ func (m *Mirror) apply(kinds int, l *listing) {
 }
 
 // syncView registers on a token's server the mirrored entries of the given kinds that its policy
-// passes. The caller holds m.mu.
+// passes. An entry the SDK rejects was logged when the mirror's own server rejected it, so it is
+// not logged again here. The caller holds m.mu.
 func (m *Mirror) syncView(v *tokenView, kinds int) {
+	quiet := slog.New(slog.DiscardHandler)
 	if kinds&kindTools != 0 {
 		want := passed(m.tools, func(t *mcp.Tool) bool { return v.policy.Tool(t.Name) != policy.Denied })
-		v.tools = syncSet(m.logger, m.logText, "tool", v.tools, want, func(t *mcp.Tool) error {
+		v.tools = syncSet(quiet, m.logText, "tool", v.tools, want, func(t *mcp.Tool) error {
 			return guard(func() { v.server.AddTool(t, m.callTool) })
 		}, v.server.RemoveTools)
 	}
 	if kinds&kindPrompts != 0 {
 		want := passed(m.prompts, func(p *mcp.Prompt) bool { return v.policy.Prompt(p.Name) != policy.Denied })
-		v.prompts = syncSet(m.logger, m.logText, "prompt", v.prompts, want, func(p *mcp.Prompt) error {
+		v.prompts = syncSet(quiet, m.logText, "prompt", v.prompts, want, func(p *mcp.Prompt) error {
 			return guard(func() { v.server.AddPrompt(p, m.getPrompt) })
 		}, v.server.RemovePrompts)
 	}
 	if kinds&kindResources != 0 {
 		want := passed(m.resources, func(r *mcp.Resource) bool { return v.policy.Resource(r.URI, r.Name) != policy.Denied })
-		v.resources = syncSet(m.logger, m.logText, "resource", v.resources, want, func(r *mcp.Resource) error {
+		v.resources = syncSet(quiet, m.logText, "resource", v.resources, want, func(r *mcp.Resource) error {
 			return guard(func() { v.server.AddResource(r, m.readResource) })
 		}, v.server.RemoveResources)
 		wantT := passed(m.templates, func(t *mcp.ResourceTemplate) bool {
 			return v.policy.Resource(t.URITemplate, t.Name) != policy.Denied
 		})
-		v.templates = syncSet(m.logger, m.logText, "resource template", v.templates, wantT, func(t *mcp.ResourceTemplate) error {
+		v.templates = syncSet(quiet, m.logText, "resource template", v.templates, wantT, func(t *mcp.ResourceTemplate) error {
 			return guard(func() { v.server.AddResourceTemplate(t, m.readResource) })
 		}, v.server.RemoveResourceTemplates)
 	}

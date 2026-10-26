@@ -229,6 +229,7 @@ func (a *Aggregate) View(servers []string, policies map[string]*policy.Token) *V
 		if a.members[s].HasTokenPolicies() {
 			// The view's lists depend on the token whenever any token has a policy on a member.
 			sopts.SetCacheable = privateCache
+			break
 		}
 	}
 	v.server = mcp.NewServer(&mcp.Implementation{Name: a.opts.Name, Version: a.opts.Version}, sopts)

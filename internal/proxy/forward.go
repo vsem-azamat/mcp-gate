@@ -406,6 +406,23 @@ func (m *Mirror) decision(p *policy.Token, key, name string) policy.Decision {
 	}
 }
 
+// servesSpelling reports whether the mirror serves uri, or lists a resource whose URI has the
+// same comparison key.
+func (m *Mirror) servesSpelling(uri string) bool {
+	if m.serves(uri) {
+		return true
+	}
+	key := policy.NormalizeURI(uri)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for u := range m.resources {
+		if policy.NormalizeURI(u) == key {
+			return true
+		}
+	}
+	return false
+}
+
 // reachedKey marks, in a request's context, whether the request reached a mirror handler.
 type reachedKey struct{}
 
@@ -445,7 +462,7 @@ func (m *Mirror) receive(next mcp.MethodHandler) mcp.MethodHandler {
 		res, err = next(context.WithValue(ctx, reachedKey{}, reached), method, req)
 		// A read of a URI the server does not serve is not audited; one the token's policy hides
 		// is.
-		if err != nil && !*reached && (key != keyURI || m.decision(m.tokenPolicy(req.GetExtra()), key, name) == policy.Denied) {
+		if err != nil && !*reached && (key != keyURI || m.servesSpelling(name) && m.decision(m.tokenPolicy(req.GetExtra()), key, name) == policy.Denied) {
 			m.refused(ctx, method, req.GetExtra(), key, name, false)
 		}
 		return res, err

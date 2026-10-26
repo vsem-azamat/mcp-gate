@@ -159,6 +159,9 @@ func TestTokenPolicyRefusals(t *testing.T) {
 	if err := read(phone)("fake://items/7"); err != nil {
 		t.Errorf("phone reads through the allowed template: %v", err)
 	}
+	if lines := r.calls("uri", "none://nothing"); len(lines) != 0 {
+		t.Errorf("a read of a URI the server does not serve is audited: %v", lines)
+	}
 	if err := read(laptop)("fake://hidden"); err != nil {
 		t.Errorf("laptop reads fake://hidden: %v", err)
 	}
