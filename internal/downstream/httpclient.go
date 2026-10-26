@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
@@ -47,7 +48,7 @@ func (t *limitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			req.Header[k] = v
 		}
 	}
-	id, isCall := callID(req)
+	call := sync.OnceValues(func() (jsonrpc.ID, bool) { return callID(req) })
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
@@ -57,11 +58,11 @@ func (t *limitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		resp.Body = limitedBody{io.LimitReader(resp.Body, errorBodyLimit), resp.Body}
 	case mediaType == "application/json":
-		t.limitJSON(resp, id, isCall)
+		t.limitJSON(resp, call)
 	case mediaType == "text/event-stream":
 		resp.Body = &eventLimiter{
 			src: resp.Body, br: bufio.NewReaderSize(resp.Body, 64<<10), limit: t.limit,
-			id: id, isCall: isCall, logger: t.logger, lineStart: true,
+			call: call, logger: t.logger, lineStart: true,
 		}
 	}
 	return resp, nil
@@ -72,7 +73,8 @@ type limitedBody struct {
 	io.Closer
 }
 
-// callID returns the id of the JSON-RPC request in a POST body, if it is a call.
+// callID returns the id of the JSON-RPC request in a POST body, if it is a call. It decodes the
+// body, so it is called only for a response over the limit.
 func callID(req *http.Request) (jsonrpc.ID, bool) {
 	if req.Method != http.MethodPost || req.GetBody == nil {
 		return jsonrpc.ID{}, false
@@ -106,8 +108,9 @@ func oversizedResponse(id jsonrpc.ID, limit int) []byte {
 }
 
 // limitJSON reads a JSON response of at most limit bytes into memory; a larger one is replaced
-// by a JSON-RPC error for the call, which the SDK delivers to that call alone.
-func (t *limitTransport) limitJSON(resp *http.Response, id jsonrpc.ID, isCall bool) {
+// by a JSON-RPC error for the call, which the SDK delivers to that call alone. call returns the
+// id of the request, if it is a call.
+func (t *limitTransport) limitJSON(resp *http.Response, call func() (jsonrpc.ID, bool)) {
 	var buf []byte
 	var readErr error
 	over := resp.ContentLength > int64(t.limit)
@@ -119,7 +122,7 @@ func (t *limitTransport) limitJSON(resp *http.Response, id jsonrpc.ID, isCall bo
 	if over {
 		t.logger.Warn("dropped an HTTP response over maxMessageBytes; its request fails", "limit", t.limit)
 		buf, readErr = nil, nil
-		if isCall {
+		if id, isCall := call(); isCall {
 			buf = oversizedResponse(id, t.limit)
 		} else {
 			readErr = errors.New("mcp-gate: the response is larger than maxMessageBytes")
@@ -150,8 +153,7 @@ type eventLimiter struct {
 	src    io.ReadCloser
 	br     *bufio.Reader
 	limit  int
-	id     jsonrpc.ID
-	isCall bool
+	call   func() (jsonrpc.ID, bool) // the id of the request that opened the stream, if it is a call
 	logger *slog.Logger
 
 	out       bytes.Buffer // bytes ready for Read
@@ -220,13 +222,14 @@ func dataStart(event []byte) []byte {
 // replace writes the error event for a dropped event that answered the call.
 func (l *eventLimiter) replace() {
 	id, ok := frameID(l.big)
-	if !ok || !l.isCall || id != l.id {
+	want, isCall := l.call()
+	if !ok || !isCall || id != want {
 		l.logger.Warn("dropped an event over maxMessageBytes that answers no pending request",
 			"bytes", l.big.size, "limit", l.limit)
 		return
 	}
 	l.logger.Warn("dropped an event over maxMessageBytes; its request fails", "bytes", l.big.size, "limit", l.limit)
 	l.out.WriteString("event: message\ndata: ")
-	l.out.Write(oversizedResponse(l.id, l.limit))
+	l.out.Write(oversizedResponse(want, l.limit))
 	l.out.WriteString("\n")
 }

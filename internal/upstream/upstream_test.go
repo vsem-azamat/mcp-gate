@@ -143,16 +143,20 @@ func TestRemote(t *testing.T) {
 }
 
 func TestReadBody(t *testing.T) {
-	var got []byte
+	var got, peeked []byte
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peeked, _ = BodyBytes(r)
 		got, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	h := ReadBody(8, time.Second, next)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader("12345678")))
-	if rec.Code != http.StatusNoContent || string(got) != "12345678" {
-		t.Errorf("a body at the limit: %d %q", rec.Code, got)
+	if rec.Code != http.StatusNoContent || string(got) != "12345678" || string(peeked) != "12345678" {
+		t.Errorf("a body at the limit: %d %q %q", rec.Code, got, peeked)
+	}
+	if _, ok := BodyBytes(httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader("x"))); ok {
+		t.Error("BodyBytes of a body ReadBody did not read")
 	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader("123456789")))

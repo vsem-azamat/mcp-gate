@@ -86,7 +86,8 @@ func (u *unusedConns) closeAll() {
 }
 
 // ReadBody reads the request body, up to maxBytes within timeout, before next runs, and then
-// clears the read deadline, so that the body is bounded but a long call is not.
+// clears the read deadline, so that the body is bounded but a long call is not. Handlers after it
+// get the bytes read with BodyBytes.
 func ReadBody(maxBytes int64, timeout time.Duration, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body == nil || r.Body == http.NoBody {
@@ -110,9 +111,27 @@ func ReadBody(maxBytes int64, timeout time.Duration, next http.Handler) http.Han
 			}
 			return
 		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.Body = &readBody{Reader: bytes.NewReader(body), data: body}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// readBody is a body that ReadBody has read into memory.
+type readBody struct {
+	*bytes.Reader
+	data []byte
+}
+
+func (*readBody) Close() error { return nil }
+
+// BodyBytes returns the body ReadBody read for r, if it did. The bytes are shared with the body
+// and must not be changed.
+func BodyBytes(r *http.Request) ([]byte, bool) {
+	b, ok := r.Body.(*readBody)
+	if !ok {
+		return nil, false
+	}
+	return b.data, true
 }
 
 // Recover answers a request whose handler panics with 500 and logs the panic without its value,

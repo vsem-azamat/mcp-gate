@@ -3,12 +3,9 @@
 package gate
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -318,21 +315,25 @@ func (g *Gate) route(s *server, remote upstream.RemoteFunc) http.Handler {
 		func(*http.Request) *mcp.Server { return mirror.Server() })
 }
 
-// chain builds an MCP route around the SDK's stateless streamable handler for the servers
+// chain builds an MCP route around the SDK's stateless streamable handlers for the servers
 // getServer returns: recover, the request log when logRequests, the Host check, authorize when
-// set, cross-origin protection, 503 while ready is false, and the body limit.
+// set, cross-origin protection, 503 while ready is false, the body limit, and respond choosing
+// between an event stream and plain JSON.
 func (g *Gate) chain(name string, logRequests bool, remote upstream.RemoteFunc, authorize func(http.Handler) http.Handler,
 	ready func(*http.Request) bool, getServer func(*http.Request) *mcp.Server,
 ) http.Handler {
-	var h http.Handler = mcp.NewStreamableHTTPHandler(getServer,
-		&mcp.StreamableHTTPOptions{
-			Stateless:                    true,
-			PropagateRequestCancellation: true,
-			DisableLocalhostProtection:   g.cfg.Listen.BehindProxy,
-			MaxRequestBodyBytes:          upstream.MaxBodyBytes,
-			Logger:                       upstream.SDKLogger(g.logger.With("server", name)),
-		})
-	h = upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, g.endListenOnDrain(h))
+	opts := mcp.StreamableHTTPOptions{
+		Stateless:                    true,
+		PropagateRequestCancellation: true,
+		DisableLocalhostProtection:   g.cfg.Listen.BehindProxy,
+		MaxRequestBodyBytes:          upstream.MaxBodyBytes,
+		Logger:                       upstream.SDKLogger(g.logger.With("server", name)),
+	}
+	plainOpts := opts
+	plainOpts.JSONResponse = true
+	stream := mcp.NewStreamableHTTPHandler(getServer, &opts)
+	plain := mcp.NewStreamableHTTPHandler(getServer, &plainOpts)
+	h := upstream.ReadBody(upstream.MaxBodyBytes, upstream.BodyTimeout, g.respond(stream, plain))
 	inner := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !ready(r) {
@@ -351,41 +352,6 @@ func (g *Gate) chain(name string, logRequests bool, remote upstream.RemoteFunc, 
 		h = upstream.LogRequests(g.logger, name, remote, h)
 	}
 	return upstream.Recover(g.logger, name, h)
-}
-
-// endListenOnDrain cancels a subscriptions/listen request when shutdown begins. The body has
-// been read into memory by ReadBody.
-func (g *Gate) endListenOnDrain(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil && r.Body != http.NoBody {
-			body, err := io.ReadAll(r.Body)
-			if err == nil && isListen(body) {
-				ctx, cancel := context.WithCancel(r.Context())
-				defer cancel()
-				go func() {
-					select {
-					case <-g.drain:
-						cancel()
-					case <-ctx.Done():
-					}
-				}()
-				r = r.WithContext(ctx)
-			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// isListen reports whether a request body is a subscriptions/listen request.
-func isListen(body []byte) bool {
-	if !bytes.Contains(body, []byte("subscriptions/listen")) {
-		return false
-	}
-	var req struct {
-		Method string `json:"method"`
-	}
-	return json.Unmarshal(body, &req) == nil && req.Method == "subscriptions/listen"
 }
 
 // Handler is the gate's HTTP handler.
