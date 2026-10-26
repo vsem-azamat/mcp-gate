@@ -205,8 +205,9 @@ func shape(t *testing.T, data []byte) string {
 
 // FuzzKeyLineRegions checks that the next-line key-value rule, matching only the regions
 // keyLineRegions returns, finds spans in order and apart, and every span it finds when it
-// matches the whole text (which misses a key line right after another). Inputs longer than the
-// key line window are skipped, since the regions bound how much of a line they hold.
+// matches the whole text (which misses a key line right after another). It also checks the key
+// line window: after a line longer than the window, the text gives the same spans. Inputs with a
+// line as long as the window are skipped, since the regions bound how much of a line they hold.
 func FuzzKeyLineRegions(f *testing.F) {
 	for _, seed := range fuzzSeeds() {
 		f.Add(seed)
@@ -220,9 +221,12 @@ func FuzzKeyLineRegions(f *testing.F) {
 	}
 	whole := *regional
 	whole.regions = nil
+	padding := strings.Repeat("x", 2*maxKeyLineWindow) + " "
 	f.Fuzz(func(t *testing.T, text string) {
-		if len(text) > maxKeyLineWindow {
-			return // the regions bound the key line and the value line
+		for line := range strings.SplitSeq(text, "\n") {
+			if len(line) >= maxKeyLineWindow {
+				return
+			}
 		}
 		masked := maskEscapedBreaks(text)
 		got := e.ruleSpans(regional, masked)
@@ -230,6 +234,14 @@ func FuzzKeyLineRegions(f *testing.F) {
 			if got[i].start < got[i-1].end {
 				t.Fatalf("spans out of order or overlapping: %+v", got)
 			}
+		}
+		padded := e.ruleSpans(regional, maskEscapedBreaks(padding+text))
+		for i := range padded {
+			padded[i].start -= len(padding)
+			padded[i].end -= len(padding)
+		}
+		if !slices.Equal(got, padded) {
+			t.Fatalf("after a long line: %+v, alone: %+v", padded, got)
 		}
 		if !containsAny(strings.ToLower(masked), keyValuePrefilter) {
 			return

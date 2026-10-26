@@ -241,6 +241,8 @@ func TestValueOnTheNextLine(t *testing.T) {
 		// Generated passwords that hold "=".
 		pw + ":\nKj8=xP2qLm":          pw + ":\n[REDACTED:password]",
 		pw + ":\nHunter=22x":          pw + ":\n[REDACTED:password]",
+		pw + ":\nabc==":               pw + ":\n[REDACTED:password]",
+		"if_password:\nAbc12345":      "if_password:\n[REDACTED:password]",
 		"TOKEN：\nabc12345":            "TOKEN：\n[REDACTED:secret]",
 		"PASSWORD=\nTOKEN：\nabc12345": "PASSWORD=\nTOKEN：\n[REDACTED:secret]",
 		// A long key line is matched near its separator.
@@ -268,6 +270,23 @@ func TestValueOnTheNextLine(t *testing.T) {
 	}
 	for _, text := range []string{
 		pw + ":\nusername: alice",
+		// Configuration lines, whatever their value.
+		"SECRET_KEY=\nDEBUG=True",
+		"API_TOKEN=\nTZ=Europe/Prague",
+		"SECRET_KEY=\nAPP_NAME=MyApp",
+		"SECRET_KEY=\ndb_host=",
+		"SECRET_KEY=\n_INTERNAL=1",
+		"SECRET_KEY=\ndebug=",
+		// Code: block headers and their bodies.
+		"case 'token':\n    break;",
+		"case \"" + pw + "\":\n  return;",
+		"if token:\n    return;",
+		"if token:\n    print(token)",
+		"if not token:\n    sys.exit(1)",
+		"if not api_key:\n    usage()",
+		"    elif secret:\n        x",
+		"for token:\n  Abc12345",
+		"API_TOKEN=\nelse",
 		// .env templates.
 		"DB_PASSWORD=\nDB_HOST=\nDB_PORT=5432",
 		"SECRET_KEY=\nDEBUG=\n",

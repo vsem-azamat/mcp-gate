@@ -47,7 +47,7 @@ func keyLineRegions(text string) []region {
 		start, lineEnd := lineStart, lineStart+i
 		lineStart = lineEnd + 1
 		keyEnd := start + len(trimRightSet(text[start:lineEnd], keyLineEndSpace+"\r"))
-		if !hasSeparatorSuffix(text[start:keyEnd]) {
+		if !hasSeparatorSuffix(text[start:keyEnd]) || opensBlock(text[start:keyEnd]) {
 			continue
 		}
 		windowStart := keyWindowStart(text, start, keyEnd)
@@ -153,45 +153,67 @@ func trimRightSet(s, set string) string {
 // nextLineUnquotedGroup is the capture group of an unquoted value in the next-line rule.
 const nextLineUnquotedGroup = 4
 
-// controlKeywords are statements that end a block header in code ("if token:\n    return"), not
-// values.
+// controlKeywords are statements that make up the body of a block in code ("if token:\n
+// return"), not values. "else" stays for shell and Ruby, where it ends no line with a colon.
 var controlKeywords = map[string]bool{
 	"return": true, "pass": true, "continue": true, "break": true, "yield": true, "raise": true,
-	"else": true, "elif": true, "try": true, "except": true, "finally": true, "then": true,
-	"do": true, "done": true, "fi": true, "end": true, "endif": true, "esac": true, "begin": true,
+	"else": true, "elif": true, "then": true, "do": true, "done": true, "fi": true, "end": true,
+	"endif": true, "esac": true, "begin": true, "ensure": true,
+}
+
+// blockHeaders are the first words of a line of code that opens a block ("if not token:",
+// "case 'password':"); its next line is the block's body, not a value.
+var blockHeaders = map[string]bool{
+	"if": true, "elif": true, "while": true, "for": true, "with": true, "case": true,
+	"match": true, "except": true, "def": true, "class": true, "switch": true,
 }
 
 // keyName matches a whole name of the shape keyValueKey takes.
 var keyName = regexp.MustCompile(`^[A-Za-z0-9_.\-]+$`)
 
-// envBareName matches an environment-style name with "=" and nothing after it, a line of a .env
-// template ("DB_HOST=").
-var envBareName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*=$`)
-
-// singleCaseName matches the name of a configuration assignment: UPPER_SNAKE or lower-case.
-var singleCaseName = regexp.MustCompile(`^(?:[A-Z][A-Z0-9_]+|[a-z][a-z0-9_.\-]*)$`)
+// upperName and lowerName match the names of configuration assignments: UPPER_SNAKE of at least
+// two characters, or lower-case.
+var (
+	upperName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]+$`)
+	lowerName = regexp.MustCompile(`^[a-z_][a-z0-9_.\-]*$`)
+)
 
 // proseKeyValueAccept is the accept function of the key-value rules: proseKeyKind classifies the
 // key, and the last of the three value groups is unquoted.
 var proseKeyValueAccept = keyValueAccept(proseKeyKind, 3)
 
 // nextLineValueAccept accepts a value alone on the line after its key as proseKeyValueAccept
-// does, unless an unquoted one is the structure of the text rather than a value (see
-// isNextLineStructure).
+// does, unless the key line opens a block of code, or an unquoted value is the structure of the
+// text rather than a value (see isNextLineStructure).
 func nextLineValueAccept(text string, match []int, start, end int) (int, int, string, bool) {
+	if opensBlock(text[strings.LastIndexByte(text[:match[2]], '\n')+1 : match[2]]) {
+		return 0, 0, "", false
+	}
 	if g := nextLineUnquotedGroup; match[2*g] >= 0 && isNextLineStructure(text[match[2*g]:match[2*g+1]]) {
 		return 0, 0, "", false
 	}
 	return proseKeyValueAccept(text, match, start, end)
 }
 
+// opensBlock reports whether a line, or its start up to the key, starts after its indentation
+// with one of blockHeaders. keyLineRegions skips such key lines before matching, and
+// nextLineValueAccept rejects them, so that both ways of matching agree.
+func opensBlock(line string) bool {
+	line = strings.TrimLeft(line, " \t")
+	n := 0
+	for n < len(line) && (line[n] >= 'a' && line[n] <= 'z') {
+		n++
+	}
+	return n < len(line) && blockHeaders[line[:n]] && !isKeyByte(line[n])
+}
+
 // isNextLineStructure reports whether an unquoted next line is the structure of the text rather
 // than a value: a Markdown code fence, a URL ("Reset your password:\nhttps://…"), a control
-// statement of code, a .env template line ("DB_HOST="), a secret key of its own whose value is
-// on the line after it ("API_KEY="), or a configuration assignment ("DEBUG=true").
+// statement of code ("return;"), a secret key of its own whose value is on the line after it
+// ("API_KEY="), or a configuration assignment ("DEBUG=True", "DB_HOST=").
 func isNextLineStructure(value string) bool {
 	if strings.HasPrefix(value, "```") || strings.HasPrefix(value, "~~~") || strings.Contains(value, "://") ||
-		controlKeywords[value] || envBareName.MatchString(value) {
+		controlKeywords[strings.TrimRight(value, ";,")] {
 		return true
 	}
 	for _, sep := range keyValueSeparators {
@@ -204,14 +226,25 @@ func isNextLineStructure(value string) bool {
 	return isConfigAssignment(value)
 }
 
-// isConfigAssignment reports whether value is NAME=rest with a single-case name and a rest that
-// does not mix upper and lower case, as configuration has ("DEBUG=true", "DB_PORT=5432",
-// "log_level=info"). Generated passwords that hold "=" ("Kj8=xP2qLm") and base64 padding
-// ("c2VjcmV0=") are values.
+// isConfigAssignment reports whether value is a configuration assignment NAME=rest: an UPPER_SNAKE
+// name ("DEBUG=True", "DB_HOST=", "TZ=Europe/Prague") or a lower-case one with "_"
+// ("db_host=") with any rest; a lower-case name with nothing after "=" ("debug="); or a
+// lower-case name with a rest that does not mix upper and lower case ("log=info"). Generated
+// passwords that hold "=" ("Kj8=xP2qLm", "Hunter=22x") and base64 padding ("c2VjcmV0=",
+// "abc==") are values.
 func isConfigAssignment(value string) bool {
 	name, rest, ok := strings.Cut(value, "=")
-	if !ok || rest == "" || rest[0] == '=' || !singleCaseName.MatchString(name) {
+	if !ok || strings.HasPrefix(rest, "=") {
 		return false
+	}
+	if upperName.MatchString(name) {
+		return true
+	}
+	if !lowerName.MatchString(name) {
+		return false
+	}
+	if rest == "" || strings.Contains(name, "_") {
+		return true
 	}
 	var upper, lower bool
 	for i := range len(rest) {
