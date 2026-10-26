@@ -68,7 +68,6 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 | Different tools for different agents | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/32) | ❌ | ❌ | ✅ | ✅ |
 | Web UI | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/39) | ❌ | ➖ | ✅ | ✅ |
 | SSO and roles | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Kubernetes deployment | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Legacy SSE transport | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/37) | ✅ | ❔ | ✅ | ✅ |
 
 <sub>🔜 planned, links to the issue; the web UI is planned as a read-only status page. ➖ partly: tools only; Docker blocks the whole call instead of hiding the secret; ContextForge and agentgateway hide secrets through plugins; agentgateway's OAuth is token exchange. ❔ not documented. Checked against each project's docs in October 2026, corrections welcome.</sub>
