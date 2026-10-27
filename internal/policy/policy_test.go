@@ -88,6 +88,23 @@ func TestNormalizeURI(t *testing.T) {
 		"test://[::1]/x":             "test:[::1]/x",
 		"":                           "",
 		"%":                          "%",
+		// Invisible characters are removed from the path, and Unicode spaces around a segment.
+		"test://echo/pri%E2%80%8Bvate":        "test:echo/private",
+		"test://echo/private\u200b":           "test:echo/private",
+		"test://ec%EF%BB%BFho/private":        "test:echo/private",
+		"test://echo/pri%CD%8Fvate%EF%B8%8F":  "test:echo/private",
+		"test://echo/%E3%85%A4private":        "test:echo/private",
+		"test://echo/%C2%A0private%E2%80%83":  "test:echo/private",
+		"test://echo/x/.%E2%80%8B./private":   "test:echo/private",
+		"test://echo/%E2%80%8B/private":       "test:echo/private",
+		"te%E2%80%8Bst://echo/private":        "test:echo/private",
+		"test://%E2%80%8B..%E2%80%8B/private": "test:private",
+		// Visible characters are kept, encoded or not.
+		"test://echo/caf%C3%A9":          "test:echo/café",
+		"test://echo/café":               "test:echo/café",
+		"test://echo/%E6%96%87%E6%A1%A3": "test:echo/文档",
+		"test://echo/a%20b":              "test:echo/a b",
+		"test://echo/%F0%9F%98%80":       "test:echo/😀",
 	} {
 		if got := NormalizeURI(in); got != want {
 			t.Errorf("NormalizeURI(%q) = %q, want %q", in, got, want)
@@ -128,9 +145,18 @@ func TestReadAllowed(t *testing.T) {
 		t.Error("an empty allow list lets a read through")
 	}
 	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"fake://a", "any"}}})
-	allow.SetCatalog([]Entry{{"fake://a", "a"}, {"fake://b", "b"}}, []Entry{{"fake://{+path}", "any"}, {"other://{id}", "other"}})
+	allow.SetCatalog([]Entry{{"fake://a", "a"}, {"fake://b", "b"}, {"fake://docs/secret", "secret"}}, []Entry{{"fake://{+path}", "any"}, {"other://{id}", "other"}})
 	for uri, want := range map[string]bool{
 		"fake://a": true, "fake://b": false, "FAKE://%62": false, "fake://c": true, "other://1": false, "none://x": false,
+		// Invisible characters in the path of a hidden resource do not reach it.
+		"fake://%E2%80%8Bb": false, "fake://b%E2%80%8B": false, "fake://b%EF%BB%BF": false,
+		"fake://b%E2%81%A0": false, "fake://b%CD%8F": false, "fake://b%EF%B8%8F": false, "fake://b%C2%A0": false,
+		"fake://docs/se%E2%80%8Ccret": false, "fake://docs%E2%80%8B/secret": false, "fake://docs/%E2%80%8B/secret": false,
+		"fake://x/.%E2%80%8B./docs/secret": false, "fake://docs/secret%E2%80%8B?a=1": false,
+		// Visible characters, encoded or not, name other resources.
+		"fake://caf%C3%A9": true, "fake://b%C3%A9": true, "fake://%E6%96%87%E6%A1%A3": true,
+		"fake://docs/secret2": true, "fake://docs/se%20cret": true, "fake://%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9": true,
+		"fake://b%E2%80%8Bc": true,
 	} {
 		if got := allow.ReadAllowed(uri); got != want {
 			t.Errorf("allow list: ReadAllowed(%q) = %v, want %v", uri, got, want)
@@ -301,4 +327,31 @@ func TestTokenReads(t *testing.T) {
 			t.Errorf("%s: Allowed(%s) = %v, want %v", c.name, c.uri, got, c.want)
 		}
 	}
+}
+
+// FuzzNormalizeURIOnlyMerges checks that the removal of invisible characters only merges keys:
+// the key of a URI depends only on its key before the removal (the decoded URI without query,
+// normalizeDecoded), so URIs that shared a key still share one and no read refused by its key
+// before is passed. A key before the removal is itself a URI with that same key, which gives a
+// second URI to compare with.
+func FuzzNormalizeURIOnlyMerges(f *testing.F) {
+	for _, seed := range []string{
+		"fake://x/%E2%80%8B/../b", "fake://hid%E2%80%8Bden", "fake://a/.%E2%80%8B./b", "/a:b",
+		"te%E2%80%8Bst://x", "/te%E2%80%8Bst:x", "fake://%C2%A0/../x", "test://user@Host:80/x;v=1?q#f",
+	} {
+		f.Add(seed)
+	}
+	before := func(raw string) string {
+		raw, _, _ = strings.Cut(decodeAll(raw), "?")
+		return normalizeDecoded(raw)
+	}
+	f.Fuzz(func(t *testing.T, uri string) {
+		key := before(uri)
+		if before(key) != key {
+			return // the key does not read back as itself; nothing to compare with
+		}
+		if got, want := NormalizeURI(uri), NormalizeURI(key); got != want {
+			t.Errorf("%q and %q share the key %q before invisible characters are removed, but not after: %q, %q", uri, key, key, got, want)
+		}
+	})
 }

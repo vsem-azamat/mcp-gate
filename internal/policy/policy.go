@@ -355,16 +355,21 @@ func parseParams(query string) map[string][]string {
 	return params
 }
 
-// queryText removes format characters (such as a zero-width space) and control characters from
-// s, trims it of spaces and "=", and lower-cases it.
+// queryText removes invisible characters from s, trims it of spaces and "=", and lower-cases it.
 func queryText(s string) string {
-	s = strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) || unicode.IsControl(r) {
+	return strings.ToLower(strings.TrimFunc(dropInvisible(s), func(r rune) bool { return unicode.IsSpace(r) || r == '=' }))
+}
+
+// dropInvisible removes from s the characters that print nothing: format characters (such as a
+// zero-width space or a byte order mark), control characters, variation selectors and the other
+// default ignorable code points (such as the combining grapheme joiner and the Hangul fillers).
+func dropInvisible(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) || unicode.IsControl(r) || unicode.In(r, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point) {
 			return -1
 		}
 		return r
 	}, s)
-	return strings.ToLower(strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '=' }))
 }
 
 // numberPrec is the precision, in bits, at which canonicalNumber compares numbers: integers up
@@ -456,11 +461,27 @@ func containsParams(params, hidden map[string][]string) bool {
 // is a "localhost" authority, and the authority and path are taken as
 // one path in which ";" parameters, surrounding spaces and NULs, and empty and "." segments are
 // dropped and ".." segments resolved. The key is "<scheme>:<path>", so "fake://hidden",
-// "fake:///hidden" and "fake:hidden" share it. It keeps the case of the path and errs towards
-// treating different URIs as one, which under a deny list refuses more, never less.
+// "fake:///hidden" and "fake:hidden" share it. Then invisible characters (see dropInvisible) are
+// removed from the key, surrounding Unicode spaces trimmed from each segment of its path, and the
+// path cleaned again, so that "fake://hid%E2%80%8Bden" shares the key too. It keeps the case of
+// the path and errs towards treating different URIs as one, which refuses more, never less.
 func NormalizeURI(raw string) string {
 	raw, _, _ = strings.Cut(decodeAll(raw), "?")
-	return normalizeDecoded(raw)
+	return visibleKey(normalizeDecoded(raw))
+}
+
+// visibleKey removes invisible characters from a comparison key, trims surrounding Unicode
+// spaces from each segment of its path and cleans the path again. It reads only the key, so
+// URIs that shared a key still share one: the keys only become coarser. The scheme ends at the
+// first ":" before any "/", so that a ".." the removal forms cannot remove it.
+func visibleKey(key string) string {
+	prefix, path := "", key
+	if i := strings.IndexAny(key, ":/"); i >= 0 && key[i] == ':' {
+		prefix, path = key[:i+1], key[i+1:]
+	}
+	return dropInvisible(prefix) + cleanSegments(dropInvisible(path), func(seg string) string {
+		return strings.TrimFunc(seg, unicode.IsSpace)
+	})
 }
 
 // decodeAll decodes every percent-encoding until none is left and drops the fragment.
@@ -514,10 +535,18 @@ func hostOf(authority string) string {
 // cleanPath joins the segments of path with "/" after dropping ";" parameters, surrounding
 // spaces and NULs, and empty and "." segments, and resolving ".." segments.
 func cleanPath(path string) string {
+	return cleanSegments(path, func(seg string) string {
+		seg, _, _ = strings.Cut(seg, ";")
+		return strings.Trim(seg, " \t\r\n\x00")
+	})
+}
+
+// cleanSegments joins the segments of path with "/" after cleaning each with clean, dropping
+// empty and "." segments, and resolving ".." segments.
+func cleanSegments(path string, clean func(string) string) string {
 	var out []string
 	for seg := range strings.SplitSeq(path, "/") {
-		seg, _, _ = strings.Cut(seg, ";")
-		seg = strings.Trim(seg, " \t\r\n\x00")
+		seg = clean(seg)
 		switch seg {
 		case "", ".":
 		case "..":
