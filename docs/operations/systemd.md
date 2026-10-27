@@ -182,15 +182,17 @@ Every sandboxing setting of the unit also applies to the stdio children, which m
 | `SystemCallFilter=` | Children run arbitrary programs |
 | `ProtectHome=yes`, `ProtectSystem=strict` (user unit) | Children of a user service keep state under `$HOME` |
 | `PrivateDevices`, `ProtectClock`, `ProtectKernelLogs`, `CapabilityBoundingSet` (user unit) | Need privileges a user manager may not have |
+| `ProtectKernelModules` (user unit) | An unprivileged user cannot load modules anyway; it fails with 218/CAPABILITIES under AppArmor-restricted user namespaces |
 
-In a user manager, `PrivateTmp`, `ProtectSystem`, `ProtectKernelTunables`, `ProtectKernelModules` and `ProtectControlGroups` are implemented with a user namespace, so the user unit runs with an implicit `PrivateUsers=yes`: files and groups of other users show up as owned by `nobody` to the gate and its children (access itself is unchanged). The unit therefore depends on what the host allows in an unprivileged user namespace. Where AppArmor restricts them (`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu default since 24.04), the namespace gets no capabilities, and the unit fails before the gate starts: on Ubuntu 26.04 with systemd 259 it exits with status 218/CAPABILITIES (`Failed at step CAPABILITIES`), because `ProtectKernelModules=yes` cannot drop its capability there. Where unprivileged user namespaces are turned off, systemd cannot create the namespace at all. There, or for a child that must see real owners, turn them off in a drop-in, which lets the unit start on that Ubuntu host:
+The user unit leaves out `ProtectKernelModules`: an unprivileged user cannot load kernel modules anyway, and where AppArmor restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu default since 24.04) the namespace gets no capabilities, so the setting cannot drop its capability and the unit fails with status 218/CAPABILITIES. Without it, the shipped user unit starts on such a host (checked on Ubuntu 26.04 with systemd 259).
+
+In a user manager, `PrivateTmp`, `ProtectSystem`, `ProtectKernelTunables` and `ProtectControlGroups` are implemented with a user namespace, so the user unit runs with an implicit `PrivateUsers=yes`: files and groups of other users show up as owned by `nobody` to the gate and its children (access itself is unchanged). Where unprivileged user namespaces are turned off, systemd cannot create the namespace at all. There, or for a child that must see real owners, turn them off in a drop-in:
 
 ```ini
 [Service]
 PrivateTmp=no
 ProtectSystem=no
 ProtectKernelTunables=no
-ProtectKernelModules=no
 ProtectControlGroups=no
 ```
 
