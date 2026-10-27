@@ -340,7 +340,10 @@ servers:
 	r := startGate(t, doc, gateOpts{})
 	r.waitReady(t, "cat")
 	phone := r.connect(t, "cat", clientOpts{header: "Bearer " + phoneToken})
-	for uri, ok := range map[string]bool{"fake://hidden?a=b": false, "fake://hidden": false, "FAKE://%68idden?x": false, "fake://other?a=b": true} {
+	for uri, ok := range map[string]bool{
+		"fake://hidden?a=b": false, "fake://hidden": false, "FAKE://%68idden?x": false, "fake://other?a=b": true,
+		"fake://hid%E2%80%8Bden": false, "fake://%C3%A9t%C3%A9": true,
+	} {
 		if _, err := phone.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: uri}); (err == nil) != ok {
 			t.Errorf("phone reads %s: %v", uri, err)
 		}

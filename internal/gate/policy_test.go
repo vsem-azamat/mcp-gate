@@ -299,6 +299,9 @@ func TestFilteredReadsThroughTemplates(t *testing.T) {
 		{"allow", "fake://hidden", false},
 		{"allow", "FAKE://%68idden", false},
 		{"allow", "fake://hidden?a=b", false},
+		{"allow", "fake://hid%E2%80%8Bden", false},
+		{"allow", "fake://hidden%EF%BB%BF", false},
+		{"allow", "fake://caf%C3%A9", true},
 	} {
 		if err := read(c.server, c.uri); (err == nil) != c.ok {
 			t.Errorf("%s reads %s: %v", c.server, c.uri, err)
