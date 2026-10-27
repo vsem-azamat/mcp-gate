@@ -86,12 +86,17 @@ Stopping a child SHALL close its stdin, send SIGTERM to its process group, wait 
 
 ### Requirement: Message size
 
-A stdio frame, an HTTP response body and an event of an HTTP event stream SHALL each be limited to `maxMessageBytes`. A message over the limit SHALL be dropped without holding more than the limit in memory; when it is a response (a top-level `result` or `error` before any `method`) whose id names a pending request, that request SHALL fail with a JSON-RPC error saying the response exceeded `maxMessageBytes`, and the session and every other request SHALL go on. On stdio, a line that is not a JSON-RPC message SHALL be skipped. Redirects SHALL NOT be followed, and gzip-encoded responses SHALL be decoded before the limit applies.
+A stdio frame (a line without its line ending, `\n` or `\r\n`), an HTTP response body and an event of an HTTP event stream SHALL each be limited to `maxMessageBytes`. A message over the limit SHALL be dropped without holding more than the limit in memory; when it is a response (a top-level `result` or `error` before any `method`) whose id names a pending request, that request SHALL fail with a JSON-RPC error saying the response exceeded `maxMessageBytes`, and the session and every other request SHALL go on. On stdio, a line that is not a JSON-RPC message SHALL be skipped. Redirects SHALL NOT be followed, and gzip-encoded responses SHALL be decoded before the limit applies.
 
 #### Scenario: Oversized stdio response
 
 - **WHEN** a stdio server answers one call with 1 MiB while `maxMessageBytes` is 64 KiB and another call is running
 - **THEN** that call fails with the size error, the other call succeeds, and the same child keeps serving
+
+#### Scenario: Stdio frame of exactly the limit
+
+- **WHEN** a stdio server writes a frame of exactly `maxMessageBytes` bytes followed by its newline
+- **THEN** the frame is delivered; a frame one byte longer is dropped
 
 #### Scenario: Oversized HTTP response
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -317,6 +318,30 @@ func TestLineLogLimits(t *testing.T) {
 	}
 	if n := strings.Count(logs.String(), "child stderr\""); n == 0 || n > lineBurst+5 {
 		t.Errorf("%d lines logged, want at most about %d", n, lineBurst)
+	}
+}
+
+// TestLineLogCutAfterShrinkingFilter checks that a secret across the edge of what is scanned is
+// not half kept when the filter shrinks the line so much that the edge falls inside the kept
+// part. The filter drops every "~" and redacts a 46-byte secret, which here begins 36 bytes
+// before the margin at the cut and ends past it.
+func TestLineLogCutAfterShrinkingFilter(t *testing.T) {
+	t.Parallel()
+	secret := regexp.MustCompile(`SECRET[0-9]{40}`)
+	filter := func(s string) string {
+		return secret.ReplaceAllString(strings.ReplaceAll(s, "~", ""), "[R]")
+	}
+	ll := NewLineLog(slog.New(slog.DiscardHandler), filter, 0, nil)
+	edge := readBytes - cutMargin
+	line := "start " + strings.Repeat("~", edge-36-len("start ")) + "SECRET" + strings.Repeat("0123456789", 4)
+	line += strings.Repeat("y", readBytes+1000-len(line)) + "\nnext\n"
+	ll.Consume(strings.NewReader(line))
+	tail := ll.Tail()
+	if len(tail) != 2 || !strings.HasPrefix(tail[0], "start ") || !strings.HasSuffix(tail[0], " [truncated]") || tail[1] != "next" {
+		t.Fatalf("tail = %.80q", tail)
+	}
+	if strings.Contains(tail[0], "SECRET") || strings.Contains(tail[0], "0123") {
+		t.Errorf("part of the secret was kept: %.80q", tail[0])
 	}
 }
 

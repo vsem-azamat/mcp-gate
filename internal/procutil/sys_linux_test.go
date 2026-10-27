@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -65,5 +67,40 @@ func TestOOMScoreAdjRetriesDeniedOpen(t *testing.T) {
 	err := setOOMScoreAdj(p.PID(), ChildOOMScoreAdj)
 	if took := time.Since(start); !errors.Is(err, fs.ErrPermission) || took < oomRetryFor/2 {
 		t.Errorf("setOOMScoreAdj = %v after %v, want a permission error after retrying for about %v", err, took, oomRetryFor)
+	}
+}
+
+func TestParseChildren(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		in   string
+		want []int
+	}{
+		{"", nil},
+		{"\n", nil},
+		{"42 ", []int{42}},
+		{"42 7 1003 ", []int{42, 7, 1003}},
+		{"42 7\n", []int{42, 7}},
+		{"42 x 7 -1 0 ", []int{42, 7}}, // what is not a PID is skipped
+	} {
+		if got := parseChildren([]byte(c.in)); !slices.Equal(got, c.want) {
+			t.Errorf("parseChildren(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestChildPIDs checks that both ways of listing the gate's children find a child.
+func TestChildPIDs(t *testing.T) {
+	t.Parallel()
+	p := startHelper(t, "sleep", Spec{})
+	if pids := scanChildren(os.Getpid()); !slices.Contains(pids, p.PID()) {
+		t.Errorf("the /proc scan found %v, not the child %d", pids, p.PID())
+	}
+	if _, err := os.Stat("/proc/self/task/" + strconv.Itoa(os.Getpid()) + "/children"); err != nil {
+		t.Skip("the kernel has no /proc/<pid>/task/<tid>/children")
+	}
+	pids, ok := threadChildren()
+	if !ok || !slices.Contains(pids, p.PID()) {
+		t.Errorf("the children files list %v (%v), not the child %d", pids, ok, p.PID())
 	}
 }
