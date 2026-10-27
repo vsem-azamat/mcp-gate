@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,10 +142,10 @@ func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
 			case "deny":
 				list = &f.Deny
 			default:
-				return fmt.Errorf("line %d: field %s not found in a policy filter", k.Line, k.Value)
+				return decodeError("line %d: field %s not found in a policy filter", k.Line, k.Value)
 			}
 			if seen[k.Value] {
-				return fmt.Errorf("line %d: %s is set twice", k.Line, k.Value)
+				return decodeError("line %d: %s is set twice in a policy filter", k.Line, k.Value)
 			}
 			seen[k.Value] = true
 			if err := v.Decode(list); err != nil {
@@ -157,7 +158,7 @@ func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	case yaml.DocumentNode, yaml.SequenceNode, yaml.AliasNode:
 	}
-	return fmt.Errorf("line %d: a policy filter is %q or a mapping with allow or deny", n.Line, PolicyNone)
+	return decodeError("line %d: a policy filter is %q or a mapping with allow or deny", n.Line, PolicyNone)
 }
 
 // ServerPolicy returns the policy of the token named token on server; nil when it has none.
@@ -438,26 +439,40 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	if err := rejectPartial(data); err != nil {
 		return nil, err
 	}
+	var errs []error
 	if err := rejectNullAggregate(data); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
-	if err := checkPolicyFilters(data); err != nil {
-		return nil, err
-	}
+	policyErrs, policyLines := checkPolicyFilters(data)
+	errs = append(errs, policyErrs...)
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var c Config
-	if err := dec.Decode(&c); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, errors.New("config is empty")
+	var typeErr *yaml.TypeError
+	switch err := dec.Decode(&c); {
+	case errors.Is(err, io.EOF):
+		return nil, errors.New("config is empty")
+	case errors.As(err, &typeErr):
+		// The decoder went on past these values; report them with what follows, unless a
+		// mapping has a duplicate key, which makes the decoder drop the whole mapping, so that
+		// what follows would report what is missing from it.
+		dropped := false
+		for _, e := range typeErr.Errors {
+			dropped = dropped || strings.Contains(e, "already defined at line")
+			if !policyLines[errorLine(e)] { // a policy filter already reported by its field
+				errs = append(errs, fmt.Errorf("config: %s", quotedRE.ReplaceAllString(e, "(value not shown)")))
+			}
 		}
-		return nil, fmt.Errorf("config: %s", withoutValues(err))
+		if dropped {
+			return nil, errors.Join(errs...)
+		}
+	case err != nil:
+		return nil, errors.Join(append(errs, fmt.Errorf("config: %s", withoutValues(err)))...)
 	}
 	var extra yaml.Node
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, errors.New("config: holds more than one YAML document")
+		return nil, errors.Join(append(errs, errors.New("config: holds more than one YAML document"))...)
 	}
-	var errs []error
 	skip := map[string]bool{}
 	keyHashVars := varNames(c.Escrow.KeyHash)
 	expandAll(&c, lookup, &errs, skip)
@@ -469,6 +484,19 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	}
 	c.applyDefaults()
 	return &c, nil
+}
+
+// lineRE finds the line number at the start of a decoder error.
+var lineRE = regexp.MustCompile(`^line (\d+): `)
+
+// errorLine returns the line a decoder error names, or 0.
+func errorLine(msg string) int {
+	m := lineRE.FindStringSubmatch(msg)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
 }
 
 // rejectPartial fails when a comment carries PartialMarker.
@@ -501,18 +529,24 @@ func rejectPartial(data []byte) error {
 var policyKinds = map[string]string{"tools": "tool", "prompts": "prompt", "resources": "resource"}
 
 // checkPolicyFilters checks the form of every token policy filter before the file is decoded,
-// so that each problem names its field: a filter written without a value, which would decode
+// so that each problem names its field; lines are those of the filters it reports, whose own
+// decoder errors Parse leaves out: a filter written without a value, which would decode
 // to no filter and narrow nothing, a value other than PolicyNone or a mapping, and a mapping
 // with keys other than allow and deny, or one of them twice. Anything else malformed is left to
 // the decoder.
-func checkPolicyFilters(data []byte) error {
+func checkPolicyFilters(data []byte) (errs []error, lines map[int]bool) {
+	lines = map[int]bool{}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil || len(doc.Content) == 0 {
-		return nil //nolint:nilerr // the decoder reports a malformed file with its own error
+		return nil, lines // the decoder reports a malformed file with its own error
 	}
-	var errs []error
+	var at *yaml.Node // the filter being checked
 	add := func(path, format string, args ...any) {
 		errs = append(errs, fmt.Errorf("%s: %s", path, fmt.Sprintf(format, args...)))
+		lines[at.Line] = true
+		for _, k := range at.Content {
+			lines[k.Line] = true
+		}
 	}
 	policies := mappingValue(doc.Content[0], "policies")
 	for token, p := range mappingEntries(policies) {
@@ -524,6 +558,7 @@ func checkPolicyFilters(data []byte) error {
 				}
 				path := "policies." + token + ".servers." + server + "." + kind
 				f = resolveAlias(f)
+				at = f
 				switch {
 				case f.Tag == "!!null":
 					add(path, "has no value; write `%s: %s` to hide every %s, or remove the key", kind, PolicyNone, noun)
@@ -547,7 +582,7 @@ func checkPolicyFilters(data []byte) error {
 			}
 		}
 	}
-	return errors.Join(errs...)
+	return errs, lines
 }
 
 // resolveAlias returns the node an alias names, or n itself.

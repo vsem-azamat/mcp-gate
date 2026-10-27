@@ -8,7 +8,12 @@ The mcp-gate configuration file describes the downstream MCP servers the gate co
 
 ### Requirement: Strict YAML
 
-The config SHALL be one YAML document decoded strictly: an unknown key, a duplicate key, a second document and an empty file SHALL be errors. `version` SHALL be required and SHALL be `1`. Durations SHALL be strings with a unit (`30s`, `2m`) and sizes strings with a binary unit (`B`, `KiB`, `MiB`, `GiB`); a bare number SHALL be an error for both.
+The config SHALL be one YAML document decoded strictly: an unknown key, a duplicate key, a second document and an empty file SHALL be errors. `version` SHALL be required and SHALL be `1`. Durations SHALL be strings with a unit (`30s`, `2m`) and sizes strings with a binary unit (`B`, `KiB`, `MiB`, `GiB`); a bare number SHALL be an error for both. Keys and values that do not decode SHALL be reported, by line, together with the problems of expansion and validation, except after a duplicate key, when only the decoding problems SHALL be reported, since the mapping that holds it is not read.
+
+#### Scenario: Problems reported together
+
+- **WHEN** a server has an unknown key, a bare-number `callTimeout` and a command naming an unset variable, and `logLevel` is invalid
+- **THEN** loading fails naming all four
 
 #### Scenario: Unknown key
 

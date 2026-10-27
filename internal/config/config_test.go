@@ -783,3 +783,36 @@ func TestLoopbackAddr(t *testing.T) {
 		}
 	}
 }
+
+// TestDecodeErrorsWithTheRest checks that problems the YAML decoder finds are reported together
+// with those of expansion and validation.
+func TestDecodeErrorsWithTheRest(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nlogLevel: loud\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: '${NOPE}'}\n" +
+		"    escrow: {ttl: 1h}\n    callTimeout: 30\n    maxMessageBytes: 1024\n" +
+		"policies: {t: {servers: {a: {tools: allow}}}}\n"
+	_, err := Parse([]byte(doc), noEnv)
+	if err == nil {
+		t.Fatal("no error")
+	}
+	for _, want := range []string{
+		"field escrow not found", "a duration is a string with a unit", "a size is a string",
+		"stdio.command: environment variable NOPE is unset", "logLevel: must be one of",
+		"policies.t.servers.a.tools: must be none or a mapping",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v\nwant it to contain %q", err, want)
+		}
+	}
+	if n := strings.Count(err.Error(), "policy filter"); n != 0 {
+		t.Errorf("the policy filter is reported twice: %v", err)
+	}
+
+	// A duplicate key drops its whole mapping, so only the decoder's errors are reported.
+	doc = "version: 1\nlogLevel: loud\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x}\n" +
+		"    disabled: true\n    disabled: false\n    callTimeout: 30\n"
+	_, err = Parse([]byte(doc), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "already defined") || strings.Contains(err.Error(), "at least one server") {
+		t.Errorf("duplicate key: %v", err)
+	}
+}

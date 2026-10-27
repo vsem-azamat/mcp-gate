@@ -12,7 +12,7 @@ escrow: on, key hash from MCP_GATE_ESCROW_KEY_SHA256
 
 The second line says whether the [escrow](serve.md#escrow) would be on and where its key hash comes from (`escrow.keyHash`, `escrow.keyHashFile`, `MCP_GATE_ESCROW_KEY_SHA256`, or the deprecated `MCP_HUB_ESCROW_KEY_SHA256`), never the hash itself. A key hash file is read as `serve` reads it, with the same checks on its owner, so run `check` as the gate's user or as root (see [systemd](../operations/systemd.md#commands-in-the-services-environment)); a hash that is invalid or that disagrees with another source fails the check.
 
-Every problem is listed with its field path; values are never printed:
+Every problem is listed with its field path, or with its line for a key or value that does not decode; values are never printed:
 
 ```console
 $ mcp-gate check gate.yaml
