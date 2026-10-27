@@ -14,8 +14,8 @@ listen:
 startupGracePeriod: 1m30s
 auth:
   tokens:
-    hub_token_laptop: ${HUB_TOKEN_LAPTOP}
-    hub_token_phone: ${HUB_TOKEN_PHONE}
+    laptop: ${HUB_TOKEN_LAPTOP}
+    phone: ${HUB_TOKEN_PHONE}
 escrow:
   ttl: 24h # mcp-proxy mcpProxy.options.redact.escrowTTL
   maxEntries: 1000

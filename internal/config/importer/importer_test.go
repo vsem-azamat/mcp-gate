@@ -135,6 +135,42 @@ func TestNameTokens(t *testing.T) {
 	}
 }
 
+// TestNameTokensServerPrefix checks that the prefix comes from the global tokens, so that a
+// server's own token without it does not keep the others from losing theirs.
+func TestNameTokensServerPrefix(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		global, own []string
+		want        map[string]string
+	}{
+		{
+			[]string{"${HUB_TOKEN_LAPTOP}", "${HUB_TOKEN_PHONE}"},
+			[]string{"${MAIL_TOKEN}"},
+			map[string]string{"${HUB_TOKEN_LAPTOP}": "laptop", "${HUB_TOKEN_PHONE}": "phone", "${MAIL_TOKEN}": "mail_token"},
+		},
+		{
+			[]string{"${HUB_TOKEN_LAPTOP}", "${HUB_TOKEN_PHONE}"},
+			[]string{"${HUB_TOKEN_MAIL}"},
+			map[string]string{"${HUB_TOKEN_LAPTOP}": "laptop", "${HUB_TOKEN_PHONE}": "phone", "${HUB_TOKEN_MAIL}": "mail"},
+		},
+		// With fewer than two global tokens, every token variable gives the prefix.
+		{
+			[]string{"${HUB_TOKEN_LAPTOP}"},
+			[]string{"${HUB_TOKEN_MAIL}"},
+			map[string]string{"${HUB_TOKEN_LAPTOP}": "laptop", "${HUB_TOKEN_MAIL}": "mail"},
+		},
+	} {
+		im := &importer{}
+		doc := &document{tokens: c.global, servers: []*server{{tokens: c.own}}}
+		im.nameTokens(doc)
+		for v, want := range c.want {
+			if doc.names[v] != want {
+				t.Errorf("%v + %v: %s is named %q, want %q", c.global, c.own, v, doc.names[v], want)
+			}
+		}
+	}
+}
+
 // unimplementedDoc holds keys this build does not implement.
 const unimplementedDoc = `{
   "mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${HUB_TOKEN_A}"]}},
@@ -380,5 +416,27 @@ func TestImportLowersReconnectInterval(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(res.Warnings, "\n"), "mcpServers.a: the reconnect interval is lowered to the maximum of 5m") {
 		t.Errorf("warnings = %v", res.Warnings)
+	}
+}
+
+// TestImportUnsetNamesInComments checks that a variable name from env -u that is not a valid
+// name is quoted in the comments, so that it cannot add keys to the YAML.
+func TestImportUnsetNamesInComments(t *testing.T) {
+	t.Parallel()
+	doc := `{"mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${HUB_TOKEN}"]}}, "mcpServers": {"a": {"command": "/usr/bin/env",
+	  "args": ["-u", "SECRET\ndisabled: true", "-u", "HOME\n#x", "server"]}}}`
+	res, err := Import([]byte(doc), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Parse(res.YAML, anyValue)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, res.YAML)
+	}
+	if c.Servers["a"].Disabled {
+		t.Errorf("a name in a comment added a key:\n%s", res.YAML)
+	}
+	if !strings.Contains(string(res.YAML), `"SECRET\ndisabled: true"`) {
+		t.Errorf("the name is not quoted:\n%s", res.YAML)
 	}
 }
