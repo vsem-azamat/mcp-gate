@@ -204,9 +204,17 @@ func (e *Engine) Find(text string) []Span {
 		return lowered
 	}
 	var kept []span
+	// Rules that share a prefilter (the Russian label rules) check it once.
+	var lastPrefilter *string
+	lastFound := false
 	for _, r := range e.rules {
-		if len(r.prefilter) > 0 && !containsAny(lower(), r.prefilter) {
-			continue
+		if len(r.prefilter) > 0 {
+			if &r.prefilter[0] != lastPrefilter {
+				lastPrefilter, lastFound = &r.prefilter[0], containsAny(lower(), r.prefilter)
+			}
+			if !lastFound {
+				continue
+			}
 		}
 		if r.precheck != nil && !r.precheck(masked) {
 			continue
@@ -234,6 +242,9 @@ func containsAny(text string, needles []string) bool {
 
 // ruleSpans returns the accepted matches of one rule, in order.
 func (e *Engine) ruleSpans(r *rule, text string) []span {
+	if r.rescan {
+		return e.rescanSpans(r, text)
+	}
 	if r.regions == nil {
 		return e.matchSpans(r, text, r.re.FindAllStringSubmatchIndex(text, -1), nil)
 	}
@@ -249,6 +260,58 @@ func (e *Engine) ruleSpans(r *rule, text string) []span {
 			}
 		}
 		spans = e.matchSpans(r, text, [][]int{match}, spans)
+	}
+	return spans
+}
+
+// rescanBudget bounds the bytes rescanSpans reads again in one text: rescanFactor times its
+// size, plus rescanSlack.
+const (
+	rescanFactor = 4
+	rescanSlack  = 64 << 10
+)
+
+// rescanSpans returns the accepted matches of a rule with rescan: after each match the search goes
+// on from the end of its first group (the label), so that a label inside the rest of the match (a
+// qualifier or a value, rejected or not) is matched with its own value. Accepted spans that overlap
+// are merged. The values read again share a budget, since a text made of labels would make that
+// quadratic; past it, the search goes on after each match.
+func (e *Engine) rescanSpans(r *rule, text string) []span {
+	var spans []span
+	budget := rescanFactor*len(text) + rescanSlack
+	for pos := 0; pos < len(text); {
+		// The search starts at the character before pos, so that the expression sees the left
+		// boundary of a label at pos as it does in the whole text.
+		from := pos
+		if from > 0 {
+			from--
+			for from > 0 && !utf8.RuneStart(text[from]) {
+				from--
+			}
+		}
+		match := r.re.FindStringSubmatchIndex(text[from:])
+		if match == nil {
+			break
+		}
+		for k := range match {
+			if match[k] >= 0 {
+				match[k] += from
+			}
+		}
+		next := match[1]
+		if g := match[3]; g > match[0] && budget >= match[1]-g {
+			budget -= match[1] - g
+			next = g
+		}
+		for _, s := range e.matchSpans(r, text, [][]int{match}, nil) {
+			if n := len(spans); n > 0 && s.start < spans[n-1].end {
+				spans[n-1].end = max(spans[n-1].end, s.end)
+				spans[n-1].jsonEscaped = false
+				continue
+			}
+			spans = append(spans, s)
+		}
+		pos = max(next, pos+1)
 	}
 	return spans
 }

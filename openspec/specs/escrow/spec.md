@@ -43,12 +43,17 @@ A server SHALL use the escrow only when its `redact.escrow` is true, the default
 
 ### Requirement: Markers
 
-With the escrow on, each finding in a result or a JSON-RPC error of a server with redaction and `redact.escrow` SHALL be kept and replaced by `[REDACTED:<kind> #<handle>]`, where the handle is `k` followed by ten characters of lower-case RFC 4648 base32 from a cryptographic random source. A finding whose value is over 64 KiB, or one the store cannot take, SHALL be replaced by `[REDACTED:<kind>]` and not kept. The same value from the same server under the same kind SHALL get the handle it already has while that entry lives, and seeing it again SHALL extend the entry to a full TTL from then. Texts outside results (progress messages, logged texts) SHALL get `[REDACTED:<kind>]` and SHALL NOT be kept.
+With the escrow on, each finding in a result or a JSON-RPC error of a server with redaction and `redact.escrow` SHALL be kept and replaced by `[REDACTED:<kind> #<handle>]`, where the handle is `k` followed by ten characters of lower-case RFC 4648 base32 from a cryptographic random source. A finding whose value is over 64 KiB, or one the store cannot take, SHALL be replaced by `[REDACTED:<kind>]` and not kept. The same value from the same server under the same kind SHALL get the handle it already has while that entry lives, and seeing it again SHALL extend the entry to a full TTL from then. Texts outside results (progress messages, logged texts) SHALL get `[REDACTED:<kind>]` and SHALL NOT be kept. A token split across two JSON strings (see the redaction spec) SHALL be kept once, whole, under the handle of the marker that replaces its first part, unless its second string is a secret member's value, which keeps its own handle; its second part carries `[REDACTED:continued]`, which has no handle. A text SHALL be restored by replacing each marker with its handle's value and removing each `[REDACTED:continued]`, so the token is restored in full where it started, and what the second string loses is in the string before it. A marker whose handle is not known stays.
 
 #### Scenario: Marker in a result
 
 - **WHEN** a tool returns `the password: Summer-Blue-77! ok`
 - **THEN** the client gets `the password: [REDACTED:password #<handle>] ok`, and the API returns `Summer-Blue-77!` for the handle
+
+#### Scenario: Split token
+
+- **WHEN** a tool returns the JSON list `["use <first part of a GitHub token>", "<its rest> now"]`
+- **THEN** the client gets `["use [REDACTED:github_token #<handle>]", "[REDACTED:continued] now"]`, the API returns the whole token for the handle, and restoring the two strings gives `use <the token>` and ` now`
 
 #### Scenario: Same secret twice
 

@@ -38,6 +38,27 @@ func TestRussianLabels(t *testing.T) {
 		"пароль -- dash-Pw-2":                                       "dash-Pw-2",
 		"пароль: `tick-Pw-3`":                                       "tick-Pw-3",
 		"логин/пароль: admin / Qwerty123, ключ " + fake("AKIA", 16): "Qwerty123",
+		// A label line after a label is matched with its own value.
+		"пароль:\nтокен: Abc12345xyz":     "Abc12345xyz",
+		"пароль:\nтокен:\nAbc12345xyz":    "Abc12345xyz",
+		"Пароль:\r\nCrlf-Pw-77\r\nдальше": "Crlf-Pw-77",
+		"пароль:\nQwerty-123 и ещё текст": "Qwerty-123",
+		"пароль: \n  «spaced pw 1»":       "spaced pw 1",
+		// A value does not hide a label inside it.
+		"пароль от почты:\tтокен: Abc12345xyz":                       "Abc12345xyz",
+		"токен:\nистёк,пароль от почты:\tтокен: Abc12345xyz":         "Abc12345xyz",
+		"пароль" + strings.Repeat(" ", 600) + ":\nHunter22x":         "Hunter22x",
+		"пароль от" + strings.Repeat(" ", 600) + "почты:\nHunter22x": "Hunter22x",
+		// A next line that starts with a password, not a key, before a separator.
+		"пароль:\nP@ssw0rd = old":                         "P@ssw0rd",
+		"пароль:\nQwerty123: да":                          "Qwerty123",
+		"секрет:\n  admin/qwerty: x":                      "admin/qwerty",
+		"Пароль:\nSummer-Sale: проверь":                   "Summer-Sale",
+		"пароль:\nдоступа, токен:\nHunter22x":             "Hunter22x",
+		"пароль:\nдоступа к токен:\nHunter22x":            "Hunter22x",
+		"код\nдоступа:\nHunter22x":                        "Hunter22x",
+		"пароль от почты\tистёк,пароль от почты:hunter22": "hunter22",
+		"токен: \tERC-20,токен: hunter22":                 "hunter22",
 	}
 	negatives := []string{
 		"пароль был изменён",
@@ -59,6 +80,11 @@ func TestRussianLabels(t *testing.T) {
 		"токен — Telegram выдаёт",
 		"логин/пароль - пришлю позже в личку",
 		"пароль от почты сменили",
+		// A next line that is a key-value pair of its own.
+		"пароль:\nusername: alice",
+		`пароль:\nusername: alice`,
+		"пароль:\nlogin = alice",
+		"токен —\nимя: бот",
 	}
 	for _, highEntropy := range []bool{false, true} {
 		e := newEngine(t, Options{Russian: true, HighEntropy: highEntropy})
@@ -116,6 +142,7 @@ func TestRuleOrder(t *testing.T) {
 		{"secret", setCore}, // "key": "value" fragment
 		{"high_entropy", setHighEntropy},
 		{"password", setRussian}, // the Russian label
+		{"password", setRussian}, // the Russian label and the value on the next line
 	}
 	e := newEngine(t, Options{Russian: true, HighEntropy: true})
 	if len(e.rules) != len(want) {
@@ -304,6 +331,10 @@ func TestLargeInputsStayFast(t *testing.T) {
 	inputs := []string{
 		strings.Repeat("password: hunter2secret\nAKIAABCDEFGHIJKLMNOP\n", repeat),
 		strings.Repeat("Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0,", repeat),
+		// Labels whose values hold the next label, taken or rejected.
+		strings.Repeat("пароль:", repeat),
+		strings.Repeat("пароль-", repeat),
+		strings.Repeat("токен: истёк,", repeat),
 	}
 	e := newEngine(t, Options{Russian: true, HighEntropy: true})
 	for _, text := range inputs {
