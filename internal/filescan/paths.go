@@ -1,6 +1,7 @@
 package filescan
 
 import (
+	"cmp"
 	"encoding/json"
 	"net/url"
 	"path/filepath"
@@ -234,27 +235,43 @@ func contentMeta(c mcp.Content) []map[string]any {
 	return nil
 }
 
-// withhold returns res with every mention of a file removed: a content block whose text, URI
-// or _meta names one of paths becomes notice, and a string in structured content or in the
-// result's _meta that names one becomes marker (a string, so that an output schema requiring
-// the member still validates). res is not modified.
-func withhold(res *mcp.CallToolResult, paths []string, marker, notice string) *mcp.CallToolResult {
-	mentions := func(text string) bool {
-		for _, p := range paths {
-			if p != "" && strings.Contains(text, p) {
-				return true
+// mention is a withheld file: the forms of its path that mark a mention of it, and what
+// replaces one.
+type mention struct {
+	paths          []string
+	marker, notice string
+}
+
+// withhold returns redacted with every mention of a file in files removed: a content block whose
+// text, URI or _meta names one of its paths, or whose block in downstream (the result redacted
+// was made from, block for block) does, becomes its notice, and a string in structured content
+// or in the result's _meta that names one becomes its marker (a string, so that an output schema
+// requiring the member still validates). Where a block or string names several files, it gets
+// the notice or marker of one of them. Neither result is modified.
+func withhold(downstream, redacted *mcp.CallToolResult, files []mention) *mcp.CallToolResult {
+	// mentioned returns the file text names, or nil.
+	mentioned := func(text string) *mention {
+		if text == "" {
+			return nil
+		}
+		for i := range files {
+			for _, p := range files[i].paths {
+				if p != "" && strings.Contains(text, p) {
+					return &files[i]
+				}
 			}
 		}
-		return false
+		return nil
 	}
 	// Unlike the search for paths, this walk has no depth limit: a mention anywhere is removed.
-	var replace func(value any) (any, bool)
-	replace = func(value any) (any, bool) {
+	var replace func(value any) (any, *mention)
+	replace = func(value any) (any, *mention) {
+		var first *mention
 		switch v := value.(type) {
 		case map[string]any:
 			var copied map[string]any
 			for k, item := range v {
-				if updated, changed := replace(item); changed {
+				if updated, m := replace(item); m != nil {
 					if copied == nil {
 						copied = make(map[string]any, len(v))
 						for kk, vv := range v {
@@ -262,59 +279,67 @@ func withhold(res *mcp.CallToolResult, paths []string, marker, notice string) *m
 						}
 					}
 					copied[k] = updated
+					first = cmp.Or(first, m)
 				}
 			}
 			if copied == nil {
-				return v, false
+				return v, nil
 			}
-			return copied, true
+			return copied, first
 		case []any:
 			var copied []any
 			for i, item := range v {
-				if updated, changed := replace(item); changed {
+				if updated, m := replace(item); m != nil {
 					if copied == nil {
 						copied = slices.Clone(v)
 					}
 					copied[i] = updated
+					first = cmp.Or(first, m)
 				}
 			}
 			if copied == nil {
-				return v, false
+				return v, nil
 			}
-			return copied, true
+			return copied, first
 		case string:
-			if mentions(v) {
-				return marker, true
+			if m := mentioned(v); m != nil {
+				return m.marker, m
 			}
 		}
-		return value, false
+		return value, nil
 	}
-	metaMentions := func(c mcp.Content) bool {
-		for _, m := range contentMeta(c) {
-			if _, changed := replace(m); changed {
-				return true
-			}
-		}
-		return false
-	}
-	out := *res
-	out.Content = slices.Clone(res.Content)
-	for i, c := range out.Content {
+	blockMentions := func(c mcp.Content) *mention {
 		embedded := ""
 		if e, ok := c.(*mcp.EmbeddedResource); ok && e != nil && e.Resource != nil {
 			embedded = e.Resource.Text
 		}
-		if mentions(contentText(c)) || mentions(contentURI(c)) || mentions(embedded) || metaMentions(c) {
-			out.Content[i] = &mcp.TextContent{Text: notice}
+		m := cmp.Or(mentioned(contentText(c)), mentioned(contentURI(c)), mentioned(embedded))
+		for _, meta := range contentMeta(c) {
+			if _, mm := replace(meta); mm != nil {
+				m = cmp.Or(m, mm)
+			}
+		}
+		return m
+	}
+	out := *redacted
+	out.Content = slices.Clone(redacted.Content)
+	aligned := len(downstream.Content) == len(redacted.Content)
+	for i, c := range out.Content {
+		m := blockMentions(c)
+		if aligned {
+			m = cmp.Or(m, blockMentions(downstream.Content[i]))
+		}
+		if m != nil {
+			out.Content[i] = &mcp.TextContent{Text: m.notice}
 		}
 	}
-	if res.StructuredContent != nil {
-		if updated, changed := replace(res.StructuredContent); changed {
+	if redacted.StructuredContent != nil {
+		if updated, m := replace(redacted.StructuredContent); m != nil {
 			out.StructuredContent = updated
 		}
 	}
-	if res.Meta != nil {
-		if updated, changed := replace(map[string]any(res.Meta)); changed {
+	if redacted.Meta != nil {
+		if updated, m := replace(map[string]any(redacted.Meta)); m != nil {
 			out.Meta = updated.(map[string]any) //nolint:forcetypeassert // replace returns a map for a map
 		}
 	}

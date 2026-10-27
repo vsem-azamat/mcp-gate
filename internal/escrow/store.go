@@ -25,7 +25,14 @@ type entry struct {
 	value    []byte // a text secret
 	dedupKey string
 	file     *fileRef
+	// batch is the replacer whose result the entry was kept for, or nil once another result
+	// has used it too (see Replacer.Discard).
+	batch *batch
 }
+
+// batch is the set of entries one replacer kept: the findings of one result. It is compared by
+// address, so it must not be zero-sized: distinct pointers to zero-sized values may be equal.
+type batch struct{ _ byte }
 
 // fileRef is where a kept file is and what it held when it was scanned.
 type fileRef struct {
@@ -120,6 +127,9 @@ func (s *store) insert(e *entry, ttl time.Duration) (string, error) {
 				if expires.After(existing.expires) {
 					existing.expires = expires
 				}
+				if existing.batch != e.batch {
+					existing.batch = nil // another result shows this handle too
+				}
 				e.wipe()
 				return handle, nil
 			}
@@ -195,6 +205,20 @@ func (s *store) remove(handle string) bool {
 	live := now.Before(e.expires)
 	s.removeLocked(e)
 	return live
+}
+
+// discard drops the entries among handles that only b's result has used.
+func (s *store) discard(b *batch, handles []string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, h := range handles {
+		if e, ok := s.entries[h]; ok && e.batch == b {
+			s.removeLocked(e)
+			n++
+		}
+	}
+	return n
 }
 
 // errFileChanged is returned when a kept file is not the file that was scanned any more.

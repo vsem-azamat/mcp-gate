@@ -175,8 +175,15 @@ type Request struct {
 	Arguments func() map[string]any
 }
 
-// ReplacerFunc returns the replacer for the findings in one call's result.
+// ReplacerFunc returns the replacer for the findings in one call's result. A replacer that is
+// also a Discarder is told when that result is withheld.
 type ReplacerFunc func(Request) redact.Replacer
+
+// Discarder is a replacer that keeps what it replaces, such as the escrow's.
+type Discarder interface {
+	// Discard drops what the replacer kept for a result that is withheld.
+	Discard()
+}
 
 // Redaction is the result pipeline of one server.
 type Redaction struct {
@@ -198,9 +205,11 @@ func NewRedaction(engine *redact.Engine, replacer ReplacerFunc, maxTextBytes int
 
 // FileScanner checks the files a tool call wrote; see package filescan.
 type FileScanner interface {
-	// Scan returns res with the files that hold secrets withheld, and how many were. An error
-	// means a file could not be scanned, and the result is withheld.
-	Scan(ctx context.Context, tool string, args func() map[string]any, res *mcp.CallToolResult, start time.Time) (*mcp.CallToolResult, int, error)
+	// Scan looks for the paths of files in downstream, the result the server returned, and
+	// returns redacted, the result redaction made of it with rep, with the files that hold
+	// secrets withheld, and how many were. An error means a file could not be scanned, and the
+	// result is withheld.
+	Scan(ctx context.Context, tool string, args func() map[string]any, downstream, redacted *mcp.CallToolResult, start time.Time, rep redact.Replacer) (*mcp.CallToolResult, int, error)
 }
 
 // counter counts the findings of one call.

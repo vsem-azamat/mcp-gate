@@ -37,6 +37,9 @@ type call struct {
 	outcome audit.Outcome
 	count   *counter
 	req     Request
+	// rep replaces the findings of the call's result; set on first use, so that what it kept
+	// can be discarded when the result is withheld.
+	rep redact.Replacer
 }
 
 // begin starts the audit record of a request for the entry of the given kind and name (a tool or
@@ -106,8 +109,17 @@ func (c *call) downstreamError(ctx context.Context, err error) error {
 	return r.results.Error(fresh, c.replacer())
 }
 
+// replacer returns the call's replacer, counting the findings it replaces.
 func (c *call) replacer() *countingReplacer {
-	return &countingReplacer{next: c.m.opts.Redaction.replacer(c.req), n: c.count}
+	return &countingReplacer{next: c.resultReplacer(), n: c.count}
+}
+
+// resultReplacer returns the call's replacer, which does not count.
+func (c *call) resultReplacer() redact.Replacer {
+	if c.rep == nil {
+		c.rep = c.m.opts.Redaction.replacer(c.req)
+	}
+	return c.rep
 }
 
 // toolArguments decodes a tool call's arguments once, when first asked for.
@@ -136,8 +148,12 @@ func promptArguments(in map[string]string) func() map[string]any {
 }
 
 // withheld reports a result that could not be redacted.
+// What the call's replacer kept is discarded: its markers never reach the client.
 func (c *call) withheld(err error) error {
 	c.outcome = audit.Withheld
+	if d, ok := c.rep.(Discarder); ok {
+		d.Discard()
+	}
 	c.m.logger.Warn("result withheld: it could not be redacted", "method", c.kind.Method(), "error", err.Error())
 	return fmt.Errorf("server %s: %w", c.m.opts.Name, err)
 }

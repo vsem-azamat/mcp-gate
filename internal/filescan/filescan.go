@@ -113,13 +113,16 @@ func New(o Options) *Scanner {
 	return s
 }
 
-// Scan checks the files a call of tool wrote, given its arguments (which may be nil), its result,
-// already redacted, and the time the call was forwarded. It returns the result with every file that
+// Scan checks the files a call of tool wrote, given its arguments (which may be nil), the result
+// the server returned (downstream), the result redaction made of it with rep (redacted), and the
+// time the call was forwarded. The paths are looked for in downstream and its arguments, since
+// redaction can turn part of a path into a marker. It returns redacted with every file that
 // holds secrets withheld, and how many were. An error wrapping ErrUnscannable means a file could
-// not be scanned; the result must then be withheld as a whole. res is not modified.
-func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]any, res *mcp.CallToolResult, start time.Time) (out *mcp.CallToolResult, withheld int, err error) {
-	if res == nil || res.IsError || !s.tools[tool] {
-		return res, 0, nil
+// not be scanned; the result must then be withheld as a whole. Neither result is modified, and
+// no file is kept unless every file was scanned.
+func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]any, downstream, redacted *mcp.CallToolResult, start time.Time, rep redact.Replacer) (out *mcp.CallToolResult, withheld int, err error) {
+	if downstream == nil || redacted == nil || downstream.IsError || !s.tools[tool] {
+		return redacted, 0, nil
 	}
 	defer func() {
 		if v := recover(); v != nil {
@@ -131,15 +134,20 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 	if args != nil {
 		arguments = args()
 	}
-	out = res
 	roots := s.rootForms()
-	cands, overflow := candidates(arguments, res, func(path string) bool {
+	cands, overflow := candidates(arguments, downstream, func(path string) bool {
 		return underAny(path, roots) && regularFile(path)
 	})
 	if overflow {
 		s.o.Logger.Warn("file not scanned; withholding the result", "tool", tool, "reason", "too many paths")
 		return nil, 0, fmt.Errorf("%w (the call names too many paths)", ErrUnscannable)
 	}
+	type hit struct {
+		c     candidate
+		f     *opened
+		kinds []string
+	}
+	var hits []hit
 	for _, c := range cands {
 		// A path only the caller named must have changed after the call was forwarded, less the
 		// clock slack, or a client could have any file under a root read. Without the slack a file
@@ -164,9 +172,19 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 			s.o.Logger.Warn("file not scanned; withholding the result", "tool", tool, "size", f.size, "reason", err.Error())
 			return nil, 0, fmt.Errorf("%w (%s)", ErrUnscannable, err.Error())
 		}
-		if len(kinds) == 0 {
-			continue
+		if len(kinds) > 0 {
+			hits = append(hits, hit{c, f, kinds})
 		}
+	}
+	if len(hits) == 0 {
+		return redacted, 0, nil
+	}
+	if rep == nil {
+		rep = redact.Marker{}
+	}
+	files := make([]mention, 0, len(hits))
+	for _, h := range hits {
+		c, f := h.c, h.f
 		marker := redact.MarkerText("file")
 		release := ""
 		// Only a file changed since the gate started is kept: an older one is withheld all the
@@ -174,7 +192,7 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 		if s.o.Keep != nil && !f.changed.Before(s.started.Add(-clockSlack)) {
 			handle, err := s.o.Keep(escrow.File{
 				Source: escrow.Source{Server: s.o.Server, Tool: tool, TTL: s.o.TTL, Arguments: func() map[string]any { return arguments }},
-				Root:   f.root, Rel: f.rel, Name: f.name, Size: f.size, Hash: f.hash, Kinds: kinds,
+				Root:   f.root, Rel: f.rel, Name: f.name, Size: f.size, Hash: f.hash, Kinds: h.kinds,
 			})
 			if err == nil {
 				marker = escrow.Marker("file", handle)
@@ -183,12 +201,24 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 		}
 		name := s.o.Engine.RedactText(f.name, redact.Marker{})
 		notice := fmt.Sprintf("%s file_name=%s size=%d bytes; contains: %s. The file is withheld from this conversation%s.",
-			marker, name, f.size, strings.Join(kinds, ", "), release)
-		out = withhold(out, []string{c.path, f.resolved, c.raw}, marker, notice)
-		withheld++
-		s.o.Logger.Info("downloaded file withheld", "tool", tool, "kinds", kinds, "size", f.size)
+			marker, name, f.size, strings.Join(h.kinds, ", "), release)
+		files = append(files, mention{paths: s.forms([]string{c.path, f.resolved, c.raw}, rep), marker: marker, notice: notice})
+		s.o.Logger.Info("downloaded file withheld", "tool", tool, "kinds", h.kinds, "size", f.size)
 	}
-	return out, withheld, nil
+	return withhold(downstream, redacted, files), len(hits), nil
+}
+
+// forms returns paths and, where redaction changes them, their redacted forms: what a mention
+// of each looks like in the redacted result. rep is the call's replacer, so a finding gets the
+// marker it got there.
+func (s *Scanner) forms(paths []string, rep redact.Replacer) []string {
+	out := slices.Clone(paths)
+	for _, p := range paths {
+		if r := s.o.Engine.RedactText(p, rep); r != p {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // opened is a file to scan, opened under its root.

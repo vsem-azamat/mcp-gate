@@ -44,6 +44,8 @@ type exchange struct {
 	meta    mcp.Meta
 	// forwarded is when the request was sent downstream, zero before.
 	forwarded time.Time
+	// downstream is the result the server returned, before the after stages changed it.
+	downstream any
 }
 
 // result is the result of a tool call, prompt get or resource read.
@@ -88,6 +90,7 @@ func (pl *pipeline[P, R]) run(ctx context.Context, x *exchange, p P) (R, error) 
 	if done {
 		return res, err
 	}
+	x.downstream = res
 	for _, stage := range pl.after {
 		if res, err = stage(ctx, x, res); err != nil {
 			return none, err
@@ -189,13 +192,18 @@ func redactWith[R result](fn func(*mcpredact.Redactor, R, *countingReplacer) (R,
 }
 
 // scanFiles withholds the files a tool call wrote that hold secrets, with the server's file
-// scanner, on a redacted result; a file that cannot be scanned withholds the result.
+// scanner, from a redacted result; their paths are looked for in the server's result, which
+// redaction may have changed. A file that cannot be scanned withholds the result.
 func scanFiles(ctx context.Context, x *exchange, res *mcp.CallToolResult) (*mcp.CallToolResult, error) {
 	f := x.m.opts.Files
 	if f == nil || x.m.opts.Redaction == nil {
 		return res, nil
 	}
-	out, n, err := f.Scan(ctx, x.entry, x.req.Arguments, res, x.forwarded)
+	downstream, ok := x.downstream.(*mcp.CallToolResult)
+	if !ok {
+		downstream = res
+	}
+	out, n, err := f.Scan(ctx, x.entry, x.req.Arguments, downstream, res, x.forwarded, x.resultReplacer())
 	if err != nil {
 		return nil, x.withheld(err)
 	}
