@@ -5,8 +5,8 @@
 // a call, the paths its result or its arguments name are looked up. A file is considered only
 // when it lies under one of the server's roots, so that neither a client (through arguments)
 // nor a server (through its result) can make the gate read a file outside them. A path only the
-// arguments name must also have changed during the call, so that a client cannot have an older
-// file read. A file with secrets is kept in the escrow when there is one and the file changed
+// arguments name must also have changed during the call (allowing clockSlack before it), so that
+// a client cannot have an older file read. A file with secrets is kept in the escrow when there is one and the file changed
 // since the gate started, and every mention of it is replaced by a marker. A file that should be
 // scanned but cannot be is a failure: the caller withholds the whole result.
 package filescan
@@ -44,8 +44,11 @@ const (
 	// scanSlots bounds concurrent scans, so that parallel downloads cannot pull many large
 	// files into memory at once.
 	scanSlots = 2
-	// clockSlack allows for the coarse clock of inode change times against the gate's start.
-	clockSlack = 2 * time.Second
+	// clockSlack allows for the coarse clock of inode change times against the fine clock of
+	// time.Now: a file changed at or after a moment can have an inode change time earlier by up
+	// to the filesystem's timestamp granularity (2 seconds on FAT) plus one tick of the kernel's
+	// coarse clock. It is applied to the gate's start and to the forward time of a call.
+	clockSlack = 3 * time.Second
 	// maxCandidates bounds the paths one call may name; a result naming more is withheld.
 	maxCandidates = 64
 	openFlags     = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
@@ -111,7 +114,7 @@ func New(o Options) *Scanner {
 }
 
 // Scan checks the files a call of tool wrote, given its arguments (which may be nil), its result,
-// already redacted, and the time the call started. It returns the result with every file that
+// already redacted, and the time the call was forwarded. It returns the result with every file that
 // holds secrets withheld, and how many were. An error wrapping ErrUnscannable means a file could
 // not be scanned; the result must then be withheld as a whole. res is not modified.
 func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]any, res *mcp.CallToolResult, start time.Time) (out *mcp.CallToolResult, withheld int, err error) {
@@ -138,13 +141,14 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 		return nil, 0, fmt.Errorf("%w (the call names too many paths)", ErrUnscannable)
 	}
 	for _, c := range cands {
-		// A path only the caller named must have changed after the call started, or a client
-		// could have any file under a root read. One the result names may be older, since a tool
-		// that caches its downloads reports the same file again (also across a restart of the
-		// gate), so it is scanned whatever its age.
+		// A path only the caller named must have changed after the call was forwarded, less the
+		// clock slack, or a client could have any file under a root read. Without the slack a file
+		// the tool wrote just after the forward could look older and pass unscanned. One
+		// the result names may be older, since a tool that caches its downloads reports the same
+		// file again (also across a restart of the gate), so it is scanned whatever its age.
 		var since time.Time
 		if c.fromArguments {
-			since = start
+			since = start.Add(-clockSlack)
 		}
 		f, err := s.open(c.path, since)
 		if err != nil {

@@ -183,15 +183,57 @@ func TestOnlyFilesTheToolWroteAreRead(t *testing.T) {
 			t.Errorf("%s was scanned: %q, %d, %v", path, text(t, res), n, err)
 		}
 	}
-	// A path only the arguments name must have changed after the call started, without slack.
+	// A path only the arguments name must have changed after the call started, less the slack.
 	argOnly := filepath.Join(f.dir, "arg.env")
 	writeFile(t, argOnly, "ARG_PASS"+"WORD="+"arg-pass-1\n")
 	in := textResult("done")
-	if _, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"output_path": argOnly} }, in, time.Now().Add(time.Second)); err != nil || n != 0 {
+	if _, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"output_path": argOnly} }, in, time.Now().Add(clockSlack+time.Second)); err != nil || n != 0 {
 		t.Errorf("an argument path written before the call = %d, %v", n, err)
 	}
 	if _, n, err := f.scan(t, "download_media", map[string]any{"output_path": argOnly}, in); err != nil || n != 1 {
 		t.Errorf("an argument path written during the call = %d, %v", n, err)
+	}
+}
+
+// TestArgumentPathWrittenWithinAClockTick checks that a file only the arguments name is scanned
+// when its inode change time is earlier than the call's forward time by at most 3 seconds: the
+// kernel keeps change times on a coarse clock, and some filesystems truncate them (FAT to 2
+// seconds), while the forward time is read from the fine clock, so a file the tool wrote just
+// after the forward can carry an earlier change time.
+func TestArgumentPathWrittenWithinAClockTick(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, true)
+	path := filepath.Join(f.dir, "tick.env")
+	writeFile(t, path, "TICK_PASS"+"WORD="+"tick-pass-1\n")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, changed, ok := inode(info)
+	if !ok {
+		t.Skip("inode change times are not available on this platform")
+	}
+	const tick = 4 * time.Millisecond // a tick of the kernel's coarse clock at 250 Hz
+	args := func() map[string]any { return map[string]any{"output_path": path} }
+	for _, c := range []struct {
+		name    string
+		forward time.Time
+		scan    bool
+	}{
+		{"forwarded one nanosecond after the change", changed.Add(time.Nanosecond), true},
+		{"forwarded one tick after", changed.Add(tick), true},
+		{"change time truncated to the second", changed.Add(time.Second - time.Nanosecond + tick), true},
+		{"change time truncated to 2 seconds, as on FAT", changed.Add(2*time.Second - time.Nanosecond + tick), true},
+		{"forwarded 3 seconds after", changed.Add(3 * time.Second), true},
+		{"forwarded more than 3 seconds after", changed.Add(3*time.Second + time.Nanosecond), false},
+	} {
+		want := 0
+		if c.scan {
+			want = 1
+		}
+		if _, n, err := f.scanner.Scan(t.Context(), "download_media", args, textResult("done"), c.forward); err != nil || n != want {
+			t.Errorf("%s: scan = %d, %v; want %d", c.name, n, err, want)
+		}
 	}
 }
 
