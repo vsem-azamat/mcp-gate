@@ -356,7 +356,9 @@ func parseParams(query string) map[string][]string {
 				v = n
 			}
 		}
-		k = visibleParam(k)
+		if k = visibleParam(k); k == "" && v == "" {
+			continue
+		}
 		params[k] = append(params[k], v)
 	}
 	return params
@@ -495,8 +497,8 @@ func NormalizeURI(raw string) string {
 
 // visibleKey removes invisible characters from a comparison key, trims surrounding Unicode
 // spaces from each segment of its path, cleans the path again, and applies the authority rules
-// again to its first segment: a trailing dot is dropped, and so is the segment when it is
-// "localhost". It reads only the key, so URIs that shared a key still share one: the keys only
+// again to its first segment: a trailing dot and the spaces it leaves are dropped, and so is the
+// segment when it is "localhost". It reads only the key, so URIs that shared a key still share one: the keys only
 // become coarser. The scheme ends at the first ":" before any "/", so that a ".." the removal
 // forms cannot remove it.
 func visibleKey(key string) string {
@@ -508,7 +510,7 @@ func visibleKey(key string) string {
 		return strings.TrimFunc(seg, unicode.IsSpace)
 	})
 	first, rest, _ := strings.Cut(path, "/")
-	if first = strings.TrimSuffix(first, "."); first == "localhost" {
+	if first = strings.TrimFunc(strings.TrimSuffix(first, "."), unicode.IsSpace); first == "localhost" {
 		first = ""
 	}
 	return dropInvisible(prefix) + cleanSegments(first+"/"+rest, func(seg string) string { return seg })

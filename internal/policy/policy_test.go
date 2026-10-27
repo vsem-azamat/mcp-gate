@@ -158,7 +158,7 @@ func TestReadAllowed(t *testing.T) {
 		"fake://docs/secret2": true, "fake://docs/se%20cret": true, "fake://%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9": true,
 		"fake://b%E2%80%8Bc": true,
 		// The authority rules apply again once invisible characters are gone.
-		"fake://b.%E2%80%8B": false, "fake://b.%C2%A0": false, "fake://localhost%E2%80%8B/docs/secret": false,
+		"fake://b.%E2%80%8B": false, "fake://b%20.%E2%80%8B": false, "fake://b%C2%A0.%E2%80%8B": false, "fake://b.%C2%A0": false, "fake://localhost%E2%80%8B/docs/secret": false,
 		"fake://localhost%E2%80%8B/c": true,
 	} {
 		if got := allow.ReadAllowed(uri); got != want {
@@ -171,7 +171,7 @@ func TestReadAllowed(t *testing.T) {
 // of its parameters, however written, and passes other queries; one without a query refuses
 // every query. Under a deny list every query of a hidden URI is refused.
 func TestReadQueries(t *testing.T) {
-	resources := []Entry{{"db://t?id=1", "one"}, {"db://f?flag", "flag"}, {"fake://hidden", "hidden"}}
+	resources := []Entry{{"db://t?id=1", "one"}, {"db://f?flag", "flag"}, {"fake://hidden", "hidden"}, {"db://v?%EF%B8%8F", "v"}, {"db://w?%E2%80%8B", "w"}}
 	templates := []Entry{{"db://t{?id}", "rows"}, {"db://{+path}", "db"}, {"fake://{+path}", "any"}}
 	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"rows", "db", "any"}}})
 	allow.SetCatalog(resources, templates)
@@ -198,6 +198,8 @@ func TestReadQueries(t *testing.T) {
 		"db://t?i%CD%8Fd=1%EF%B8%8F", "db://t?id=%E3%85%A41", "db://t?id=0x%EF%B8%801",
 		// A hidden parameter without a value is held by the key with any value.
 		"db://f?flag", "db://f?flag=", "db://f?flag=1", "db://f?FLAG=yes", "db://f;flag=1", "db://f?flag[]=1", "db://f?x=1&flag",
+		// A hidden query of invisible characters only is no query: every query is refused.
+		"db://v", "db://v?x=1", "db://w", "db://w?x=1",
 	}
 	for _, uri := range refused {
 		if allow.ReadAllowed(uri) {
