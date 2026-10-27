@@ -9,7 +9,7 @@ mcp-gate check gate.yaml        # validate first
 mcp-gate serve -state-dir /var/lib/mcp-gate gate.yaml
 ```
 
-The config is validated as `check` does; an invalid one exits with status 2 before anything starts. Logs are JSON lines on stderr, at `logLevel` and above. SIGINT and SIGTERM shut the gate down: it stops accepting connections, gives calls in flight 10 seconds, and stops the servers. SIGHUP reloads the config (see [Reload](#reload)). Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate cannot listen.
+The config is validated as `check` does; an invalid one exits with status 2 before anything starts. Logs are JSON lines on stderr, at `logLevel` and above. SIGINT and SIGTERM shut the gate down: it stops accepting connections, gives calls in flight 10 seconds, and stops the servers. A second SIGINT or SIGTERM during that ends the gate at once, without waiting. SIGHUP reloads the config (see [Reload](#reload)). Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate cannot listen.
 
 Under systemd the gate serves the listening socket that a socket unit passes it (`LISTEN_FDS`), instead of opening `listen.addr`, and reports `READY=1` once startup is over and `STOPPING=1` at shutdown (`NOTIFY_SOCKET`). With the socket held by systemd, a restart refuses no connection and fails no call; see [systemd](../operations/systemd.md#restarts) for the units and what a restart keeps.
 

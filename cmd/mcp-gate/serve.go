@@ -30,7 +30,7 @@ Serves the servers of an mcp-gate config: each at /<name>/mcp on listen.addr, be
 with /_healthz, /_readyz and, with admin tokens, /_status. With the hex SHA-256 of an API key in
 escrow.keyHash, escrow.keyHashFile or MCP_GATE_ESCROW_KEY_SHA256, redacted secrets are kept in
 memory and served at /_escrow/ to that key. Logs are JSON lines on stderr. SIGINT and SIGTERM
-shut it down; SIGHUP reloads the config file. Under systemd it serves the socket a socket unit
+shut it down, and a second one ends it at once; SIGHUP reloads the config file. Under systemd it serves the socket a socket unit
 passes (LISTEN_FDS) in place of listen.addr, and reports readiness on NOTIFY_SOCKET.
 
 Exit status: 0 after a clean shutdown, 2 when the config is invalid or the gate fails.

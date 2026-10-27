@@ -40,6 +40,12 @@ type lookupEnv func(string) (string, bool)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		// The first signal begins the shutdown; a second one ends the process at once, by the
+		// signal's default action, without waiting for the shutdown.
+		<-ctx.Done()
+		stop()
+	}()
 	code := run(ctx, os.Args[1:], os.LookupEnv, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
