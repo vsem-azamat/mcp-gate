@@ -122,6 +122,7 @@ func (g *Gate) apply(ctx context.Context, cfg *config.Config) error {
 	}
 
 	g.snap.Store(sn)
+	g.prunePins(cfg)
 	for _, rt := range replaced {
 		rt.retire()
 	}

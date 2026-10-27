@@ -86,22 +86,47 @@ func TestLearnedPinIsKept(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 	first.stop()
-	data, err := os.ReadFile(filepath.Join(dir, gate.PinsFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var doc2 struct {
-		Version int
-		Pins    map[string]string
-	}
-	if err := json.Unmarshal(data, &doc2); err != nil || doc2.Pins["legacy"] != "2025-11-25" {
-		t.Fatalf("pins file %s: %v", data, err)
+	pins := readPins(t, dir)
+	if pins["legacy"].Version != "2025-11-25" || len(pins["legacy"].Transport) != 64 {
+		t.Fatalf("pins file %+v", pins)
 	}
 	r := startGate(t, doc, gateOpts{stateDir: dir, tune: func(o *downstream.Options) { o.DiscoverTimeout = time.Hour }})
 	r.waitReady(t, "legacy")
 	if st := r.g.Status().Servers["legacy"]; st.ProtocolVersion != "2025-11-25" || !st.AutoPinned {
 		t.Errorf("after a restart: %+v", st)
 	}
+	r.stop()
+
+	// Another command (here, other arguments) is another server: the pin is dropped, and the
+	// server, which now answers discover, is not pinned.
+	doc = configDoc("", map[string]string{"legacy": stdioServer(t, testkit.Fake{ProtocolVersions: []string{"2025-11-25"}}, "")})
+	r = startGate(t, doc, gateOpts{stateDir: dir, tune: func(o *downstream.Options) { o.DiscoverTimeout = time.Hour }})
+	r.waitReady(t, "legacy")
+	if st := r.g.Status().Servers["legacy"]; st.AutoPinned || st.LearnedPin != "" {
+		t.Errorf("after the command changed: %+v", st)
+	}
+	if pins := readPins(t, dir); len(pins) != 0 {
+		t.Errorf("pins after the command changed: %+v", pins)
+	}
+}
+
+type pinEntry struct{ Version, Transport string }
+
+// readPins reads the pins file in dir.
+func readPins(t *testing.T, dir string) map[string]pinEntry {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, gate.PinsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Version int
+		Pins    map[string]pinEntry
+	}
+	if err := json.Unmarshal(data, &doc); err != nil || doc.Version != 2 {
+		t.Fatalf("pins file %s: %v", data, err)
+	}
+	return doc.Pins
 }
 
 // TestCompareWithHub puts the gate in front of a fake hub, the way it replaces an mcp-proxy, and

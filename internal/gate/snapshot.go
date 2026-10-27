@@ -323,9 +323,10 @@ func (g *Gate) newRuntime(cfg *config.Config, name string, s *config.Server, key
 	o.Notifications = src.Notifications()
 	o.OnSession = src.OnSession
 	o.OnRestart = func() { g.metrics.Restarted(name) }
-	o.LearnedPin = g.pins.get(name)
+	transport := transportHash(s)
+	o.LearnedPin = g.pins.get(name, transport)
 	o.OnPinLearned = func(v string) {
-		if err := g.pins.set(name, v); err != nil {
+		if err := g.pins.set(name, v, transport); err != nil {
 			g.logger.Warn("cannot store the learned protocol pin", "server", name, "error", err.Error())
 		}
 	}

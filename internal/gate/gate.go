@@ -191,6 +191,7 @@ func New(opts Options) (*Gate, error) {
 		return nil, err
 	}
 	g.snap.Store(sn)
+	g.prunePins(cfg)
 	if cfg.Metrics.Addr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("GET "+metricsRoute, g.metricsHandler())
@@ -201,6 +202,13 @@ func New(opts Options) (*Gate, error) {
 	g.srv = upstream.NewServer(cfg.Listen.Addr, http.HandlerFunc(g.serveHTTP), g.logger)
 	g.srv.RegisterOnShutdown(func() { g.drainOnce.Do(func() { close(g.drain) }) })
 	return g, nil
+}
+
+// prunePins drops the learned pins that no longer apply under cfg.
+func (g *Gate) prunePins(cfg *config.Config) {
+	if err := g.pins.prune(cfg); err != nil {
+		g.logger.Warn("cannot store the learned protocol pins", "error", err.Error())
+	}
 }
 
 // remoteOf returns how the client address of a request is read under a listen config.

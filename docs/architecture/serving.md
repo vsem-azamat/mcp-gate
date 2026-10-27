@@ -139,4 +139,4 @@ The gate owns one [`metrics.Registry`](../../internal/metrics/metrics.go) for th
 
 ## Learned pins
 
-The supervisor reports an automatic protocol pin through `OnPinLearned`. The gate writes all pins to `pins.json` in the state directory (temporary file, sync, rename) and passes each to its supervisor as `LearnedPin` at the next start.
+The supervisor reports an automatic protocol pin through `OnPinLearned`. The gate writes all pins to `pins.json` in the state directory (temporary file, sync, rename, sync of the directory), each with `transportHash` of the server (SHA-256 of the stdio command, arguments and working directory, or of the HTTP URL; the environment and headers are left out, so the file holds nothing derived from secrets kept there), and passes a pin to its supervisor as `LearnedPin` only when the server's hash is the same. `prunePins` drops the pins of removed servers and of changed transports at the start and after every reload. A file of version 1, which has no hashes, is read as empty.
