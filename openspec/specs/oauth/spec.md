@@ -103,12 +103,17 @@ A server with an `oauth` block SHALL send every request with `Authorization: Bea
 
 ### Requirement: Fail closed
 
-A server SHALL need a login when it has no grant file, when its grant file cannot be used, when the grant is for another URL or client, when the access token has expired without a refresh token, when the token endpoint answers a refresh with `invalid_grant`, `invalid_client` or `unauthorized_client`, and when the server answers 401 for the third time in a row, each to the token that the refresh after the previous 401 obtained, within 10 minutes of the previous 401; `restart.maxBackoff` is at most 5 minutes, so connect attempts always fall within that window. Such a server SHALL send no request to its endpoint, and a rejected grant SHALL not be tried again, until its grant file changes: a new login SHALL be used at the next connect attempt without a restart, and a deleted grant SHALL stop being used at the next request. Without a state directory every OAuth server SHALL need a login. Other refresh failures, such as a timeout, SHALL fail only the request.
+A server SHALL need a login when it has no grant file, when its grant file cannot be used, when the grant is for another URL or client, when the access token has expired without a refresh token, when the token endpoint answers a refresh with `invalid_grant`, `invalid_client` or `unauthorized_client`, and when the server answers 401 for the third time in a row, each to the token that the refresh after the previous 401 obtained, before any request with that token succeeded; a successful (2xx) answer to a request with such a token SHALL start the count again, however far apart the requests are. Such a server SHALL send no request to its endpoint, and a rejected grant SHALL not be tried again, until its grant file changes: a new login SHALL be used at the next connect attempt without a restart, and a deleted grant SHALL stop being used at the next request. Without a state directory every OAuth server SHALL need a login. Other refresh failures, such as a timeout, SHALL fail only the request.
 
 #### Scenario: Revoked refresh token
 
 - **WHEN** the authorization server revokes the grant and the server is used
 - **THEN** the server needs a login, the reason names `invalid_grant`, no token appears in the reason, the error or the log, and the refresh token is not sent again
+
+#### Scenario: Server that drops its tokens repeatedly
+
+- **WHEN** a server drops every access token five times in a row, as one that restarts does, and accepts each refreshed token
+- **THEN** every call succeeds after one refresh and the grant stays usable
 
 #### Scenario: Login while the gate runs
 
@@ -126,9 +131,19 @@ Access tokens, refresh tokens, client secrets, codes and code verifiers SHALL ap
 
 ### Requirement: auth commands
 
-`mcp-gate auth login [-state-dir DIR] <config.yaml> <server>`, `mcp-gate auth status [-state-dir DIR] <config.yaml>` and `mcp-gate auth logout [-state-dir DIR] <config.yaml> <server>` SHALL load the config as `check` does and exit with status 2 when it is invalid, when no state directory is given, or, for `login` and `logout`, when the server is not an HTTP server with an `oauth` block. `login` SHALL print the authorization URL, read the address, save the grant and print the access token's lifetime and whether there is a refresh token; it SHALL exit with status 2 when the login fails, and give up after 15 minutes or on SIGINT. `status` SHALL print, per server with an `oauth` block, sorted, whether it is logged in or needs a login and why, whether the client was registered or configured, the time of login and the access token's lifetime, using no network, and exit with status 0 only when every enabled one is logged in. `logout` SHALL delete the grant file and exit with status 0, saying so when there was none.
+`mcp-gate auth login [-state-dir DIR] <config.yaml> <server>`, `mcp-gate auth status [-state-dir DIR] <config.yaml>` and `mcp-gate auth logout [-state-dir DIR] <config.yaml> <server>` SHALL load the config as `check` does and exit with status 2 when it is invalid, when no state directory is given, or, for `login` and `logout`, when the server is not an HTTP server with an `oauth` block. `login` SHALL print the authorization URL, read the address, save the grant and print the access token's lifetime and whether there is a refresh token; it SHALL exit with status 2 when the login fails, and give up after 15 minutes or on SIGINT. `status` SHALL print, per server with an `oauth` block, sorted, whether it is logged in or needs a login and why, whether the client was registered or configured, the time of login and the access token's lifetime, using no network, and exit with status 0 only when every enabled one is logged in. `logout` SHALL, when the grant can be read and its authorization server's metadata (read from `authServerMetadataURL` when set, else from the grant's issuer) names a `revocation_endpoint` that is https or loopback, revoke the refresh token and then the access token there (RFC 7009, with `token_type_hint`, the client authenticated as for the token endpoint); it SHALL then delete the grant file and exit with status 0, saying whether the grant was revoked, that the authorization server offers no revocation endpoint, or, when there was none, that the server was not logged in. A grant that cannot be revoked (the metadata cannot be read, the endpoint is not https or loopback, or it answers other than 200) SHALL be reported on standard error and deleted all the same, with exit status 0.
 
 #### Scenario: Login, status and logout
 
 - **WHEN** a server is checked, logged in to, checked again and logged out of
 - **THEN** status first reports `needs login: not logged in` with exit status 2, login prints no token, status then reports `logged in (registered client, …)` with exit status 0, and logout deletes the file
+
+#### Scenario: Logout with revocation
+
+- **WHEN** the authorization server names a revocation endpoint and the server is logged out of
+- **THEN** both tokens are revoked there, logout says so, and the file is deleted
+
+#### Scenario: Revocation fails
+
+- **WHEN** the revocation endpoint answers 503 at logout
+- **THEN** logout reports the failure without a token, deletes the file and exits with status 0

@@ -52,7 +52,8 @@ TimeoutStopSec=40s
 # A child that talks to another program through /tmp (an X11 or other socket there) needs
 # PrivateTmp=no in a drop-in. In a user manager, PrivateTmp, ProtectSystem, ProtectKernel* and
 # ProtectControlGroups run the service in a user namespace (an implicit PrivateUsers=yes): the
-# host needs unprivileged user namespaces, and files of other users show as owned by nobody.
+# host needs unprivileged user namespaces with capabilities (Ubuntu's AppArmor restriction makes
+# the unit fail with 218/CAPABILITIES), and files of other users show as owned by nobody.
 # See docs/operations/systemd.md for the drop-in without them.
 NoNewPrivileges=yes
 ProtectSystem=full

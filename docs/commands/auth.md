@@ -41,4 +41,4 @@ Exit status: 0 when every enabled OAuth server is logged in, 2 otherwise.
 
 ## logout
 
-`mcp-gate auth logout <config.yaml> <server>` deletes the server's grant; a running gate stops using it at its next request and the server needs a login. The authorization server is not told: revoke the grant there to end it sooner.
+`mcp-gate auth logout <config.yaml> <server>` revokes the server's grant at its authorization server and deletes it; a running gate stops using it at its next request and the server needs a login. The revocation (RFC 7009) needs a `revocation_endpoint` in the authorization server's metadata, which logout reads again (from `authServerMetadataURL` when it is set); it revokes the refresh token, then the access token. Without such an endpoint the grant is only deleted, and the authorization server keeps it until it expires. When the revocation fails, logout says so on standard error, deletes the grant all the same and exits with status 0; revoke it at the authorization server to end it sooner.
