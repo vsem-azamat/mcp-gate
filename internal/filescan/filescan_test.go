@@ -196,10 +196,10 @@ func TestOnlyFilesTheToolWroteAreRead(t *testing.T) {
 }
 
 // TestArgumentPathWrittenWithinAClockTick checks that a file only the arguments name is scanned
-// when its inode change time is earlier than the call's start by less than the clock slack: the
-// kernel keeps change times on a coarse clock (and some filesystems truncate them to a second or
-// more), while the call's start is read from the fine one, so a file the tool wrote just after
-// the call started can carry an earlier change time.
+// when its inode change time is earlier than the call's forward time by at most 3 seconds: the
+// kernel keeps change times on a coarse clock, and some filesystems truncate them (FAT to 2
+// seconds), while the forward time is read from the fine clock, so a file the tool wrote just
+// after the forward can carry an earlier change time.
 func TestArgumentPathWrittenWithinAClockTick(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, 0, true)
@@ -213,25 +213,25 @@ func TestArgumentPathWrittenWithinAClockTick(t *testing.T) {
 	if !ok {
 		t.Skip("inode change times are not available on this platform")
 	}
+	const tick = 4 * time.Millisecond // a tick of the kernel's coarse clock at 250 Hz
 	args := func() map[string]any { return map[string]any{"output_path": path} }
 	for _, c := range []struct {
-		name  string
-		start time.Time
-		scan  bool
+		name    string
+		forward time.Time
+		scan    bool
 	}{
-		{"one nanosecond after the change", changed.Add(time.Nanosecond), true},
-		{"one coarse clock tick after", changed.Add(4 * time.Millisecond), true},
-		// A filesystem that keeps whole seconds stores the change time truncated.
-		{"change time truncated to the second", changed.Truncate(time.Second).Add(time.Second - time.Nanosecond), true},
-		{"change time truncated to two seconds", changed.Truncate(2 * time.Second).Add(2*time.Second - time.Nanosecond), true},
-		{"exactly the slack after", changed.Add(clockSlack), true},
-		{"just past the slack", changed.Add(clockSlack + time.Nanosecond), false},
+		{"forwarded one nanosecond after the change", changed.Add(time.Nanosecond), true},
+		{"forwarded one tick after", changed.Add(tick), true},
+		{"change time truncated to the second", changed.Add(time.Second - time.Nanosecond + tick), true},
+		{"change time truncated to 2 seconds, as on FAT", changed.Add(2*time.Second - time.Nanosecond + tick), true},
+		{"forwarded 3 seconds after", changed.Add(3 * time.Second), true},
+		{"forwarded more than 3 seconds after", changed.Add(3*time.Second + time.Nanosecond), false},
 	} {
 		want := 0
 		if c.scan {
 			want = 1
 		}
-		if _, n, err := f.scanner.Scan(t.Context(), "download_media", args, textResult("done"), c.start); err != nil || n != want {
+		if _, n, err := f.scanner.Scan(t.Context(), "download_media", args, textResult("done"), c.forward); err != nil || n != want {
 			t.Errorf("%s: scan = %d, %v; want %d", c.name, n, err, want)
 		}
 	}
