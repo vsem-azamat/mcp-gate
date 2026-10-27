@@ -89,7 +89,10 @@ type Gate struct {
 	audit      audit.Sink
 	metricsSrv *upstream.Server
 	pins       *pinStore
-	started    atomic.Bool
+	// startedAt is when the gate was built; file scanning keeps in the escrow only files written
+	// since then, across reloads.
+	startedAt time.Time
+	started   atomic.Bool
 	// startupOver is closed when the startup watcher returns: started, or shutting down first.
 	startupOver chan struct{}
 	// drain is closed when shutdown begins; it ends the subscriptions/listen streams, which
@@ -135,7 +138,7 @@ func New(opts Options) (*Gate, error) {
 	cfg := opts.Config
 	g := &Gate{
 		opts: opts, boot: cfg, logger: opts.Logger, drain: make(chan struct{}), startupOver: make(chan struct{}),
-		running: make(chan struct{}), drained: make(chan struct{}),
+		running: make(chan struct{}), drained: make(chan struct{}), startedAt: time.Now(),
 	}
 	g.retireCtx, g.stopRetiring = context.WithCancel(context.Background())
 	g.metrics = metrics.New()

@@ -288,6 +288,7 @@ func (g *Gate) newServer(cfg *config.Config, name string, s *config.Server, old 
 		o := filescan.Options{
 			Server: name, Tools: f.Tools, Roots: f.Roots, MaxBytes: int64(*f.MaxBytes),
 			TTL: s.Redact.EscrowTTL.D(), Engine: engine, Logger: g.logger.With("server", name),
+			Started: g.startedAt,
 		}
 		if g.escrowFor(s) {
 			o.Keep = g.escrow.KeepFile
