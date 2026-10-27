@@ -41,7 +41,7 @@ The sync loop, which runs in the server's `Source`, lists what is marked dirty: 
 
 | Step | Where | What it does |
 | --- | --- | --- |
-| listing | `Source.sync` | lists the dirty kinds and keeps them as the server sent them |
+| listing | `Source.sync` | lists the dirty kinds and keeps them as the server sent them; `collect` reads the pages of one kind and fails a listing over 1000 pages or 50000 entries, so a cursor that never ends does not grow memory until `listTimeout` |
 | server filter | `Mirror.filter`, outside the mirror's lock | keeps what the server's filter passes, marking a tool the SDK would reject invalid (`validTool`) and leaving out a resource whose URI does not parse, and logs both |
 | register | `Mirror.register`, under the mirror's lock | registers the entries on the mirror's own server, compiles the server's resource filter from everything listed (`Policy.SetCatalog`) and what reads reach (`served`) |
 | per-token projection | `Mirror.syncView`, under the same lock | registers on each token's server what its policy passes of the registered entries |

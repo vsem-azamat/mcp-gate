@@ -317,15 +317,36 @@ func methodNotFound(err error) bool {
 	return errors.As(err, &we) && we.Code == jsonrpc.CodeMethodNotFound
 }
 
-func collect[T any](seq func(func(*T, error) bool)) ([]*T, error) {
+// Bounds of one listing of a kind, so that a server whose cursor never ends, or whose catalog
+// keeps growing, fails its listing instead of growing the gate's memory until listTimeout.
+const (
+	maxListPages   = 1000
+	maxListEntries = 50000
+)
+
+// errListTooLong is the error of a listing over maxListPages or maxListEntries.
+var errListTooLong = fmt.Errorf("the listing has more than %d pages or %d entries", maxListPages, maxListEntries)
+
+// collect reads every page of a listing: list returns the entries of the page at cursor and the
+// next cursor, empty after the last page.
+func collect[T any](ctx context.Context, list func(ctx context.Context, cursor string) ([]*T, string, error)) ([]*T, error) {
 	var out []*T
-	for item, err := range seq {
+	cursor := ""
+	for range maxListPages {
+		items, next, err := list(ctx, cursor)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, item)
+		if len(out)+len(items) > maxListEntries {
+			return nil, errListTooLong
+		}
+		out = append(out, items...)
+		if next == "" {
+			return out, nil
+		}
+		cursor = next
 	}
-	return out, nil
+	return nil, errListTooLong
 }
 
 // The catalog pipeline. A listing reaches the clients in these steps, in order:
