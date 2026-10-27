@@ -157,6 +157,9 @@ func TestReadAllowed(t *testing.T) {
 		"fake://caf%C3%A9": true, "fake://b%C3%A9": true, "fake://%E6%96%87%E6%A1%A3": true,
 		"fake://docs/secret2": true, "fake://docs/se%20cret": true, "fake://%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9": true,
 		"fake://b%E2%80%8Bc": true,
+		// The authority rules apply again once invisible characters are gone.
+		"fake://b.%E2%80%8B": false, "fake://b.%C2%A0": false, "fake://localhost%E2%80%8B/docs/secret": false,
+		"fake://localhost%E2%80%8B/c": true,
 	} {
 		if got := allow.ReadAllowed(uri); got != want {
 			t.Errorf("allow list: ReadAllowed(%q) = %v, want %v", uri, got, want)
@@ -191,6 +194,8 @@ func TestReadQueries(t *testing.T) {
 		// Format characters are removed and Unicode spaces trimmed.
 		"db://t?id=%E2%80%8B1", "db://t?id=1%E2%80%8B", "db://t?i%E2%80%8Bd=1", "db://t?id=%EF%BB%BF1",
 		"db://t?id=%C2%A01", "db://t?id=%E2%80%831", "db://t?id=%011",
+		// So are variation selectors and the other default ignorable code points.
+		"db://t?i%CD%8Fd=1%EF%B8%8F", "db://t?id=%E3%85%A41", "db://t?id=0x%EF%B8%801",
 		// A hidden parameter without a value is held by the key with any value.
 		"db://f?flag", "db://f?flag=", "db://f?flag=1", "db://f?FLAG=yes", "db://f;flag=1", "db://f?flag[]=1", "db://f?x=1&flag",
 	}
@@ -212,6 +217,19 @@ func TestReadQueries(t *testing.T) {
 	for _, uri := range []string{"db://t?id=2", "db://t", "db://t?id=1"} {
 		if deny.ReadAllowed(uri) {
 			t.Errorf("deny list: %s is read", uri)
+		}
+	}
+}
+
+// TestReadQueryKeySuffix checks that a key whose "[...]" suffix starts after an invisible
+// character is cut as before the other invisible characters were removed, so that a read refused
+// before is still refused.
+func TestReadQueryKeySuffix(t *testing.T) {
+	allow := New(&config.Server{Resources: &config.Filter{Allow: []string{"db"}}})
+	allow.SetCatalog([]Entry{{"db://t?%EF%B8%8F[]=1", "a"}, {"db://u?%CD%8F[x]=1", "b"}}, []Entry{{"db://{+path}", "db"}})
+	for _, uri := range []string{"db://t?%EF%B8%8F=1", "db://t?%EF%B8%8F[]=1", "db://u?%CD%8F[y]=1", "db://u?%CD%8F=1"} {
+		if allow.ReadAllowed(uri) {
+			t.Errorf("%s is read", uri)
 		}
 	}
 }

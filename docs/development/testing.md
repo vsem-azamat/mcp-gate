@@ -57,7 +57,7 @@ Every package with network tests verifies in `TestMain` with [goleak](https://gi
 
 ## Fuzzing
 
-Fuzz targets (`Fuzz*` functions) check invariants on arbitrary input; the redaction engine and its MCP adapter have them. `make test` runs only their seed corpora. `make fuzz` runs each target for `FUZZTIME` (default `60s`), for example `make fuzz FUZZTIME=10m`. A failing input is saved under the package's `testdata/fuzz/` and runs as a regular test from then on; commit it with the fix.
+Fuzz targets (`Fuzz*` functions) check invariants on arbitrary input; the redaction engine, its MCP adapter and the URI comparison key in `internal/policy` have them. `make test` runs only their seed corpora. `make fuzz` runs each target for `FUZZTIME` (default `60s`), for example `make fuzz FUZZTIME=10m`. A failing input is saved under the package's `testdata/fuzz/` and runs as a regular test from then on; commit it with the fix.
 
 ## Benchmarks
 

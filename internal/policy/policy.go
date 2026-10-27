@@ -312,8 +312,9 @@ func (r *Reads) Allowed(uri string) bool {
 // parameter at its first "="; "+" read as a space; format characters (such as a zero-width
 // space) and control characters removed from keys and values, which are then trimmed of spaces
 // and "=" and lower-cased; a key without a "[...]" suffix; a value that reads as a number in its
-// canonical form (see canonicalNumber); empty parameters dropped. Every choice makes more
-// queries alike, which refuses more, never less.
+// canonical form (see canonicalNumber); empty parameters dropped; then the other invisible
+// characters (see dropInvisible) removed from what is left, which is trimmed again (see
+// visibleParam). Every choice makes more queries alike, which refuses more, never less.
 func queryParams(raw string) map[string][]string {
 	_, query, _ := strings.Cut(decodeAll(raw), "?")
 	return parseParams(query)
@@ -349,15 +350,37 @@ func parseParams(query string) map[string][]string {
 		}
 		if n, ok := canonicalNumber(v); ok {
 			v = n
+		} else {
+			v = visibleParam(v)
+			if n, ok := canonicalNumber(v); ok {
+				v = n
+			}
 		}
+		k = visibleParam(k)
 		params[k] = append(params[k], v)
 	}
 	return params
 }
 
-// queryText removes invisible characters from s, trims it of spaces and "=", and lower-cases it.
+// queryText removes format characters (such as a zero-width space) and control characters from
+// s, trims it of spaces and "=", and lower-cases it.
 func queryText(s string) string {
-	return strings.ToLower(strings.TrimFunc(dropInvisible(s), func(r rune) bool { return unicode.IsSpace(r) || r == '=' }))
+	s = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	return trimParam(s)
+}
+
+// visibleParam removes the remaining invisible characters (see dropInvisible) from a key or a
+// value that queryText cleaned, and trims it again. It runs after the "[...]" suffix of a key is
+// dropped and reads only what queryText left, so that parameters that compared alike still do.
+func visibleParam(s string) string { return trimParam(dropInvisible(s)) }
+
+func trimParam(s string) string {
+	return strings.ToLower(strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '=' }))
 }
 
 // dropInvisible removes from s the characters that print nothing: format characters (such as a
@@ -471,17 +494,24 @@ func NormalizeURI(raw string) string {
 }
 
 // visibleKey removes invisible characters from a comparison key, trims surrounding Unicode
-// spaces from each segment of its path and cleans the path again. It reads only the key, so
-// URIs that shared a key still share one: the keys only become coarser. The scheme ends at the
-// first ":" before any "/", so that a ".." the removal forms cannot remove it.
+// spaces from each segment of its path, cleans the path again, and applies the authority rules
+// again to its first segment: a trailing dot is dropped, and so is the segment when it is
+// "localhost". It reads only the key, so URIs that shared a key still share one: the keys only
+// become coarser. The scheme ends at the first ":" before any "/", so that a ".." the removal
+// forms cannot remove it.
 func visibleKey(key string) string {
 	prefix, path := "", key
 	if i := strings.IndexAny(key, ":/"); i >= 0 && key[i] == ':' {
 		prefix, path = key[:i+1], key[i+1:]
 	}
-	return dropInvisible(prefix) + cleanSegments(dropInvisible(path), func(seg string) string {
+	path = cleanSegments(dropInvisible(path), func(seg string) string {
 		return strings.TrimFunc(seg, unicode.IsSpace)
 	})
+	first, rest, _ := strings.Cut(path, "/")
+	if first = strings.TrimSuffix(first, "."); first == "localhost" {
+		first = ""
+	}
+	return dropInvisible(prefix) + cleanSegments(first+"/"+rest, func(seg string) string { return seg })
 }
 
 // decodeAll decodes every percent-encoding until none is left and drops the fragment.
