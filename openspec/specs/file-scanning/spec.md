@@ -19,12 +19,17 @@ File scanning SHALL apply to the tools listed in a server's `redact.files.tools`
 
 The paths of a call SHALL be the absolute paths in its result and arguments: string members named `path`, `file_path`, `filePath`, `outputPath`, `output_path`, `localPath`, `local_path`, `savedTo` or `saved_to` of the structured content, of text content that is JSON, and of the arguments, at a depth of at most 8; strings starting with `file://` (percent-decoded) among them; the URIs of resource links and embedded resources; and the path after `downloaded to`, `saved to` or `written to` in text content, quoted or starting with `/`. An unquoted path SHALL be the longest of the first 16 space-separated words of the rest of its line (up to a quote or angle bracket, and within 4096 bytes) that lies under a root as written and names a regular file, or its first word when none does. The budget SHALL be per call, however the result is split into content items: collecting paths SHALL stop as soon as more than 64 are found, the call's texts hold more than 64 such mentions in all, or more than 1024 files have been looked up for unquoted paths, so that the work stays bounded. Trailing `.`, `,` and `;` SHALL be dropped, and relative paths ignored. A call that exceeds this budget SHALL withhold its result (see Failing closed).
 
-A path SHALL be read only when, with every symlink resolved, it lies strictly under one of `redact.files.roots` (also resolved) and names a regular file with one link; a path that only the arguments name SHALL also have had its inode changed at or after the call started. A path the result names SHALL be read whatever its age, as a tool that caches its downloads reports the same file again, also across a restart of the gate. The file SHALL be opened through its root without following a symlink, and every check SHALL run on the opened file. Any other path SHALL be passed over: it names no file this call wrote. A path that does not exist SHALL be passed over; one written under a root whose symlinks cannot be resolved for another reason (such as a directory it cannot enter) SHALL fail.
+A path SHALL be read only when, with every symlink resolved, it lies strictly under one of `redact.files.roots` (also resolved) and names a regular file with one link; a path that only the arguments name SHALL also have had its inode changed at or after 2 seconds before the call was forwarded, a margin for the coarse clock that inode change times are kept on. A path the result names SHALL be read whatever its age, as a tool that caches its downloads reports the same file again, also across a restart of the gate. The file SHALL be opened through its root without following a symlink, and every check SHALL run on the opened file. Any other path SHALL be passed over: it names no file this call wrote. A path that does not exist SHALL be passed over; one written under a root whose symlinks cannot be resolved for another reason (such as a directory it cannot enter) SHALL fail.
 
 #### Scenario: Paths a caller or server cannot use
 
-- **WHEN** a file tool names a file outside the roots, a symlink inside a root that leads out of it, a file with a second hard link, a directory or a missing file, or only its arguments name a file whose inode predates the call
+- **WHEN** a file tool names a file outside the roots, a symlink inside a root that leads out of it, a file with a second hard link, a directory or a missing file, or only its arguments name a file whose inode changed more than 2 seconds before the call
 - **THEN** none is read and the result is unchanged
+
+#### Scenario: File written within a clock tick of the call
+
+- **WHEN** only the arguments of a file tool name a file with secrets whose inode change time is a clock tick, or less than 2 seconds, earlier than when the call was forwarded
+- **THEN** the file is scanned and withheld
 
 #### Scenario: Ways to report a path
 

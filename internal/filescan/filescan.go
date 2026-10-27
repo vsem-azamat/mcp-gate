@@ -44,7 +44,10 @@ const (
 	// scanSlots bounds concurrent scans, so that parallel downloads cannot pull many large
 	// files into memory at once.
 	scanSlots = 2
-	// clockSlack allows for the coarse clock of inode change times against the gate's start.
+	// clockSlack allows for the coarse clock of inode change times against the fine clock of
+	// time.Now: a file changed at or after a moment can have an inode change time up to one
+	// filesystem clock tick (or timestamp granularity) before it. It is applied to the gate's
+	// start and to the call's start.
 	clockSlack = 2 * time.Second
 	// maxCandidates bounds the paths one call may name; a result naming more is withheld.
 	maxCandidates = 64
@@ -138,13 +141,14 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 		return nil, 0, fmt.Errorf("%w (the call names too many paths)", ErrUnscannable)
 	}
 	for _, c := range cands {
-		// A path only the caller named must have changed after the call started, or a client
-		// could have any file under a root read. One the result names may be older, since a tool
-		// that caches its downloads reports the same file again (also across a restart of the
-		// gate), so it is scanned whatever its age.
+		// A path only the caller named must have changed after the call started, less the clock
+		// slack, or a client could have any file under a root read. Without the slack a file the
+		// tool wrote within one clock tick of the start would look older and pass unscanned. One
+		// the result names may be older, since a tool that caches its downloads reports the same
+		// file again (also across a restart of the gate), so it is scanned whatever its age.
 		var since time.Time
 		if c.fromArguments {
-			since = start
+			since = start.Add(-clockSlack)
 		}
 		f, err := s.open(c.path, since)
 		if err != nil {

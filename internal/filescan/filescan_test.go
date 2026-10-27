@@ -183,15 +183,57 @@ func TestOnlyFilesTheToolWroteAreRead(t *testing.T) {
 			t.Errorf("%s was scanned: %q, %d, %v", path, text(t, res), n, err)
 		}
 	}
-	// A path only the arguments name must have changed after the call started, without slack.
+	// A path only the arguments name must have changed after the call started, less the slack.
 	argOnly := filepath.Join(f.dir, "arg.env")
 	writeFile(t, argOnly, "ARG_PASS"+"WORD="+"arg-pass-1\n")
 	in := textResult("done")
-	if _, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"output_path": argOnly} }, in, time.Now().Add(time.Second)); err != nil || n != 0 {
+	if _, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"output_path": argOnly} }, in, time.Now().Add(clockSlack+time.Second)); err != nil || n != 0 {
 		t.Errorf("an argument path written before the call = %d, %v", n, err)
 	}
 	if _, n, err := f.scan(t, "download_media", map[string]any{"output_path": argOnly}, in); err != nil || n != 1 {
 		t.Errorf("an argument path written during the call = %d, %v", n, err)
+	}
+}
+
+// TestArgumentPathWrittenWithinAClockTick checks that a file only the arguments name is scanned
+// when its inode change time is earlier than the call's start by less than the clock slack: the
+// kernel keeps change times on a coarse clock (and some filesystems truncate them to a second or
+// more), while the call's start is read from the fine one, so a file the tool wrote just after
+// the call started can carry an earlier change time.
+func TestArgumentPathWrittenWithinAClockTick(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, true)
+	path := filepath.Join(f.dir, "tick.env")
+	writeFile(t, path, "TICK_PASS"+"WORD="+"tick-pass-1\n")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, changed, ok := inode(info)
+	if !ok {
+		t.Skip("inode change times are not available on this platform")
+	}
+	args := func() map[string]any { return map[string]any{"output_path": path} }
+	for _, c := range []struct {
+		name  string
+		start time.Time
+		scan  bool
+	}{
+		{"one nanosecond after the change", changed.Add(time.Nanosecond), true},
+		{"one coarse clock tick after", changed.Add(4 * time.Millisecond), true},
+		// A filesystem that keeps whole seconds stores the change time truncated.
+		{"change time truncated to the second", changed.Truncate(time.Second).Add(time.Second - time.Nanosecond), true},
+		{"change time truncated to two seconds", changed.Truncate(2 * time.Second).Add(2*time.Second - time.Nanosecond), true},
+		{"exactly the slack after", changed.Add(clockSlack), true},
+		{"just past the slack", changed.Add(clockSlack + time.Nanosecond), false},
+	} {
+		want := 0
+		if c.scan {
+			want = 1
+		}
+		if _, n, err := f.scanner.Scan(t.Context(), "download_media", args, textResult("done"), c.start); err != nil || n != want {
+			t.Errorf("%s: scan = %d, %v; want %d", c.name, n, err, want)
+		}
 	}
 }
 
