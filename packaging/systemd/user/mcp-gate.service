@@ -15,8 +15,9 @@ StartLimitBurst=5
 # default) above startupGracePeriod. With mcp-gate.socket installed, the gate serves the socket
 # systemd holds instead of opening listen.addr itself.
 Type=notify
-# ~/.local/state/mcp-gate: learned pins (pins.json) and OAuth grants (oauth/). The gate reads it
-# from $STATE_DIRECTORY, so serve and the auth commands run through systemd need no -state-dir.
+# ~/.local/state/mcp-gate: learned pins (pins.json), tool pins (toolpins/) and OAuth grants
+# (oauth/). The gate reads it from $STATE_DIRECTORY, so serve and the auth commands run through
+# systemd need no -state-dir.
 StateDirectory=mcp-gate
 StateDirectoryMode=0700
 # ~/.config/mcp-gate: gate.yaml, and gate.env (0600) with the secrets the config names as

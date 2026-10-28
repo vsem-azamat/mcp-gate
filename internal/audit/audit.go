@@ -150,3 +150,42 @@ func (s logSink) Write(r Record) {
 		slog.Int64("redactions", r.Redactions),
 	)
 }
+
+// PinRecord is the audit record of a tool a server lists with a definition other than the one
+// pinned for it (see the tool-pins spec).
+type PinRecord struct {
+	Server string
+	// Tool is the tool's name, made fit for the log: redacted and cut.
+	Tool string
+	// Change is "changed" for a tool whose definition differs from its accepted one, "added" for
+	// one without an accepted definition.
+	Change string
+	// Pinned is the hash of the accepted definition, "" for an added tool; Listed is the hash of
+	// the definition the server lists.
+	Pinned, Listed string
+	// Held reports that the tool is left out of the catalog until it is accepted.
+	Held bool
+}
+
+// The actions of a PinRecord, as its line names them.
+const (
+	PinServed = "served"
+	PinHeld   = "held"
+)
+
+// LogToolPin writes a PinRecord as one "toolPin" line to logger, at warn level: server, tool,
+// change, pinned, listed and action (PinServed or PinHeld), in that order.
+func LogToolPin(logger *slog.Logger, r PinRecord) {
+	action := PinServed
+	if r.Held {
+		action = PinHeld
+	}
+	logger.Warn("toolPin",
+		slog.String("server", r.Server),
+		slog.String("tool", r.Tool),
+		slog.String("change", r.Change),
+		slog.String("pinned", r.Pinned),
+		slog.String("listed", r.Listed),
+		slog.String("action", action),
+	)
+}

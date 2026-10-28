@@ -225,6 +225,7 @@ func TestServingErrors(t *testing.T) {
 		{"metrics addr is listen", "version: 1\nmetrics: {addr: '127.0.0.1:9090'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must differ from listen.addr"},
 		{"metrics addr under listen", "version: 1\nlisten: {addr: '0.0.0.0:9464'}\nmetrics: {addr: '127.0.0.1:9464'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must differ from listen.addr"},
 		{"metrics addr localhost", "version: 1\nlisten: {addr: '127.0.0.1:9464'}\nmetrics: {addr: 'localhost:9464'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must differ from listen.addr"},
+		{"bad tool pins", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    toolPins: block\n", "servers.a.toolPins: must be one of off, warn, hold"},
 		{"files unredacted", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {enabled: false, files: {tools: [x], roots: [/d]}}\n", "servers.a.redact.files: needs redact.enabled"},
 	}
 	for _, c := range cases {
@@ -251,6 +252,15 @@ func TestDefaults(t *testing.T) {
 	if c.Name != DefaultName || a.CallTimeout != 0 || *a.MaxMessageBytes != DefaultMaxMessageBytes ||
 		a.ProbeInterval.D() != DefaultProbeInterval || a.Restart.MaxBackoff.D() != DefaultMaxBackoff {
 		t.Errorf("defaults not applied: %+v", a)
+	}
+	if a.ToolPins != ToolPinsWarn {
+		t.Errorf("toolPins = %q, want warn", a.ToolPins)
+	}
+	for _, mode := range ToolPinsModes {
+		c, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n    toolPins: "+mode+"\n"), noEnv)
+		if err != nil || c.Servers["a"].ToolPins != mode {
+			t.Errorf("toolPins: %s: %v", mode, err)
+		}
 	}
 	if !slices.Equal(a.Stdio.InheritEnv, DefaultInheritEnv) {
 		t.Errorf("inheritEnv = %v, want the default", a.Stdio.InheritEnv)

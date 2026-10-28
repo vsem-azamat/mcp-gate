@@ -32,6 +32,7 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
+	"github.com/vsem-azamat/mcp-gate/internal/toolpins"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
 
@@ -39,6 +40,10 @@ import (
 const (
 	// listTimeout bounds one catalog listing.
 	listTimeout = 60 * time.Second
+	// listGap is the least time between the starts of two listings of a server, so that one
+	// that keeps sending list-changed notifications cannot have its catalog, and its tool pins,
+	// read and written back to back.
+	listGap = time.Second
 	// The delay before a failed listing is tried again, doubling up to the maximum.
 	retryFirst = 2 * time.Second
 	retryLast  = time.Minute
@@ -89,6 +94,11 @@ type Options struct {
 	Source *Source
 	// OnChange, if set, is called, outside the mirror's lock, after a listing was applied.
 	OnChange func()
+	// ToolPins, if set, holds the server's tool pins, which every listing of its tools is
+	// compared with (see the tool-pins spec); nil compares nothing.
+	ToolPins *toolpins.Store
+	// HoldTools leaves the tools whose definition differs from their pin out of the catalog.
+	HoldTools bool
 }
 
 // Mirror is the upstream face of one downstream server under one config.
@@ -108,6 +118,7 @@ type Mirror struct {
 	resources map[string]*mcp.Resource
 	templates map[string]*mcp.ResourceTemplate
 	lastSync  time.Time
+	held      map[string]bool // the tools the tool pins hold
 
 	watchMu  sync.Mutex
 	watchers map[int]func()
@@ -366,6 +377,8 @@ func collect[T any](ctx context.Context, list func(ctx context.Context, cursor s
 //
 //   - listing: the source lists the kinds that are dirty and keeps them as the server sent them
 //     (Source.sync), then hands them to each mirror's apply;
+//   - tool pins: the listed tools are compared with the server's pins, and those whose
+//     definition differs from their pin are reported and, under hold, left out (checkPins);
 //   - server filter: the entries the server's filter passes, checked outside the mirror's lock,
 //     with the tools the SDK would reject marked invalid and the resources whose URI does not
 //     parse left out (filter);
@@ -401,6 +414,7 @@ func (m *Mirror) apply(kinds kindSet, l *listing, at time.Time) {
 // server's resource filter is compiled from.
 type filtered struct {
 	tools     []candidate
+	held      map[string]bool // the tools the pins hold
 	prompts   map[string]*mcp.Prompt
 	resources map[string]*mcp.Resource
 	templates map[string]*mcp.ResourceTemplate
@@ -415,11 +429,14 @@ type candidate struct {
 	invalid bool
 }
 
-// filter is the server filter step: it needs no lock, and logs the invalid tools and resources.
+// filter runs the tool pins and server filter steps: they need no lock, and log the changed
+// tools and the invalid tools and resources.
 func (m *Mirror) filter(kinds kindSet, l *listing) *filtered {
 	f := &filtered{}
 	if kinds.has(audit.Tool) {
-		f.tools = m.filterTools(l.tools)
+		tools := m.uniqueTools(l.tools)
+		f.held = m.checkPins(tools)
+		f.tools = m.filterTools(tools, f.held)
 	}
 	if kinds.has(audit.Prompt) {
 		f.prompts = m.filterPrompts(l.prompts)
@@ -435,6 +452,7 @@ func (m *Mirror) filter(kinds kindSet, l *listing) *filtered {
 // register is the register step for the kinds of a filtered listing. The caller holds m.mu.
 func (m *Mirror) register(kinds kindSet, f *filtered, at time.Time) {
 	if kinds.has(audit.Tool) {
+		m.held = f.held
 		m.tools = m.registerTools(f.tools)
 	}
 	if kinds.has(audit.Prompt) {
@@ -580,12 +598,70 @@ func syncSet[T any](logger *slog.Logger, logText func(string) string, what entry
 	return out
 }
 
-// filterTools returns the listed tools the server's filter passes, in the order listed, and logs
-// the invalid ones.
-func (m *Mirror) filterTools(list []*mcp.Tool) []candidate {
+// uniqueTools returns the listed tools with each name once, as first listed, so that the pins
+// check and the server filter see the same definition of a name; the others are logged, in one
+// line per listing.
+func (m *Mirror) uniqueTools(list []*mcp.Tool) []*mcp.Tool {
+	seen := make(map[string]bool, len(list))
+	out := make([]*mcp.Tool, 0, len(list))
+	var dups int
+	var first string
+	for _, t := range list {
+		if t == nil {
+			continue
+		}
+		if seen[t.Name] {
+			if dups == 0 {
+				first = t.Name
+			}
+			dups++
+			continue
+		}
+		seen[t.Name] = true
+		out = append(out, t)
+	}
+	if dups > 0 {
+		m.logger.Warn("the server lists tool names more than once; serving the first of each", "duplicates", dups, "first", m.logText(first))
+	}
+	return out
+}
+
+// checkPins is the tool pins step: it compares the listed tools with the server's pins, writes
+// the audit line of each change not reported before, and returns the tools to hold.
+func (m *Mirror) checkPins(tools []*mcp.Tool) map[string]bool {
+	pins := m.opts.ToolPins
+	if pins == nil {
+		return nil
+	}
+	res := pins.Check(m.opts.Name, m.opts.HoldTools, tools)
+	if res.Pinned > 0 {
+		m.logger.Info("pinned the tool definitions of a server listed for the first time", "tools", res.Pinned)
+	}
+	if res.Err != nil {
+		m.logger.Error("cannot read or write the tool pins", "error", res.Err.Error(), "hold", m.opts.HoldTools, "held", len(res.Held))
+	}
+	if res.Suppressed > 0 {
+		names := make([]string, len(res.SuppressedTools))
+		for i, n := range res.SuppressedTools {
+			names[i] = m.logText(n)
+		}
+		m.logger.Warn("the server changes its tools too often; these changes are logged after the limit's window, if still listed",
+			"suppressed", res.Suppressed, "tools", names, "limit", toolpins.ReportLimit, "per", toolpins.ReportWindow.String())
+	}
+	for _, c := range res.Changes {
+		audit.LogToolPin(m.opts.Logger, audit.PinRecord{
+			Server: m.opts.Name, Tool: m.logText(c.Tool), Change: c.Kind, Pinned: c.Pinned, Listed: c.Listed, Held: res.Held[c.Tool],
+		})
+	}
+	return res.Held
+}
+
+// filterTools returns the listed tools the server's filter passes and the pins do not hold, in
+// the order listed, and logs the invalid ones.
+func (m *Mirror) filterTools(list []*mcp.Tool, held map[string]bool) []candidate {
 	out := make([]candidate, 0, len(list))
 	for _, t := range list {
-		if t == nil || !m.opts.Policy.Tools.Allows(t.Name) {
+		if t == nil || !m.opts.Policy.Tools.Allows(t.Name) || held[t.Name] {
 			continue
 		}
 		if err := validTool(t); err != nil {

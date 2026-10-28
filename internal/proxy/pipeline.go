@@ -19,8 +19,9 @@ import (
 //   - begin: the audit record starts and the call is counted (Mirror.begin), and the token
 //     policy's decision is labelled (Mirror.start);
 //   - before forward: the kind's before stages, each of which may refuse the request or change
-//     what is sent: today the server's filter, then the caller's token policy, each of which
-//     refuses an entry it hides with the error of an unknown one;
+//     what is sent: today the server's filter with the tools the tool pins hold, then the
+//     caller's token policy, each of which refuses an entry it hides with the error of an
+//     unknown one;
 //   - forward: the request goes to the server through the supervisor, with the downstream
 //     _meta and progress (Mirror.forward);
 //   - outcome: the server's answer becomes a result or an error fit for the client, and what
@@ -155,9 +156,9 @@ func (pl *pipeline[P, R]) fail(err error) (R, error) {
 
 // The before stages.
 
-// serverFilter refuses an entry that the server's filter hides.
+// serverFilter refuses an entry that the server's filter hides, and a tool the tool pins hold.
 func serverFilter[P any](_ context.Context, x *exchange, _ P) error {
-	if !x.m.serverAllows(x.kind, x.entry) {
+	if !x.m.serverAllows(x.kind, x.entry) || (x.kind == audit.Tool && x.m.isHeld(x.entry)) {
 		x.outcome = audit.Denied
 		return errUnknown(x.kind, x.shown)
 	}

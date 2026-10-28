@@ -502,6 +502,9 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	if s.Restart.MaxBackoff != nil && (s.Restart.MaxBackoff.D() < MinMaxBackoff || s.Restart.MaxBackoff.D() > MaxMaxBackoff) {
 		add(path+".restart.maxBackoff", "must be between %s and %s", FormatDuration(MinMaxBackoff), FormatDuration(MaxMaxBackoff))
 	}
+	if s.ToolPins != "" && !slices.Contains(ToolPinsModes, s.ToolPins) {
+		add(path+".toolPins", "must be one of %s", strings.Join(ToolPinsModes, ", "))
+	}
 	s.Tools.validate(path+".tools", add)
 	s.Prompts.validate(path+".prompts", add)
 

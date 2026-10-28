@@ -18,9 +18,9 @@ StartLimitBurst=5
 Type=notify
 User=mcp-gate
 Group=mcp-gate
-# /var/lib/mcp-gate: learned pins (pins.json) and OAuth grants (oauth/). The gate reads it from
-# $STATE_DIRECTORY, so serve and the auth commands run through systemd need no -state-dir. It is
-# also the user's home, so stdio children that write under $HOME write there.
+# /var/lib/mcp-gate: learned pins (pins.json), tool pins (toolpins/) and OAuth grants (oauth/).
+# The gate reads it from $STATE_DIRECTORY, so serve and the auth commands run through systemd need
+# no -state-dir. It is also the user's home, so stdio children that write under $HOME write there.
 StateDirectory=mcp-gate
 StateDirectoryMode=0700
 # /etc/mcp-gate, owned by root: gate.yaml, and gate.env with the secrets the config names as

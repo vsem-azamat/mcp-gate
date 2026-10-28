@@ -43,8 +43,8 @@ import (
 //     notifications for the call's progress token, waiting ms before each, with messages
 //     "step <n>" padded with dots to size bytes, then returns "done";
 //   - meta: returns the request's _meta as JSON;
-//   - addtool {"name": string}: adds a tool of that name, which the server reports as a list
-//     change;
+//   - addtool {"name": string, "description": string}: adds a tool of that name, or replaces
+//     the one of that name, which the server reports as a list change; the tool returns its name;
 //   - badblob: returns an embedded text/plain resource whose blob is not valid UTF-8;
 //   - writefile {"path": string, "text": string, "repeat": number}: writes text (repeat times)
 //     to the file at path, like a download tool, and returns "Media downloaded to <path>." with
@@ -347,7 +347,8 @@ func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *
 	})
 	tool("addtool", func(_ context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 		name, _ := args["name"].(string)
-		s.AddTool(&mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}},
+		desc, _ := args["description"].(string)
+		s.AddTool(&mcp.Tool{Name: name, Description: desc, InputSchema: map[string]any{"type": "object"}},
 			func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) { return text(name), nil })
 		return text("added"), nil
 	})

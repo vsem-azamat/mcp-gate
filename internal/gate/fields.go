@@ -80,6 +80,7 @@ var serverFields = map[string]fieldClass{
 	"Resources":       mirrorField,
 	"Redact":          mirrorField,
 	"ForwardMeta":     mirrorField,
+	"ToolPins":        mirrorField,
 	"Auth":            routeField,
 	"Log":             routeField,
 	"Transport":       derivedField,

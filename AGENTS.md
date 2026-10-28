@@ -75,6 +75,7 @@ This repository is public. Before every commit and PR, check that nothing privat
 | `internal/redact/` | Redaction engine: rules with priorities, findings, replacers (no MCP or HTTP imports) |
 | `internal/redact/mcpredact/` | Redaction of MCP SDK results and errors, failing closed |
 | `internal/smoke/` | The binary smoke test: a built `mcp-gate` run as a process against fake servers |
+| `internal/toolpins/` | Tool pins: the pinned definition of a tool and its hash, the per-server pins file in the state directory with its lock, the check of a listing, accepting, the field diff `mcp-gate toolpins` shows |
 | `internal/systemd/` | Socket activation and readiness notification, without a systemd library |
 | `internal/testkit/` | Fake MCP servers for tests: catalog hub, scriptable stdio and HTTP fakes, a fake behind OAuth; the escrow contract check |
 | `internal/upstream/` | HTTP listener side: limits, the drain at shutdown, named tokens, Host check, request log, health and status handlers |

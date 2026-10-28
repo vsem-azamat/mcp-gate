@@ -46,12 +46,24 @@ func (g *Gate) Reload(ctx context.Context, load func() (*config.Config, error)) 
 		g.notify(systemd.Reloading())
 		defer g.notify(systemd.Ready)
 	}
+	// Whatever comes of the config, the tool pins are read again, so that a definition accepted
+	// with mcp-gate toolpins accept is served.
+	defer g.recheckPins()
 	cfg, err := load()
 	if err == nil {
 		err = g.apply(ctx, cfg)
 	}
 	g.metrics.Reloaded(err == nil)
 	return err
+}
+
+// recheckPins applies the tools every server of the current snapshot has listed to its mirror
+// again, which compares them with the tool pins again. The caller holds mu.
+func (g *Gate) recheckPins() {
+	sn := g.snap.Load()
+	for _, name := range sn.names {
+		sn.servers[name].rt.src.Recheck()
+	}
 }
 
 // apply swaps in the snapshot of cfg; see Reload. The caller holds mu.

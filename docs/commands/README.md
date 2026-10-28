@@ -11,3 +11,4 @@ How to use the `mcp-gate` subcommands. The exact behaviour of each is specified 
 | [compare](compare.md) | Diff the catalogs two MCP endpoints or snapshots serve |
 | [import](import.md) | Convert an mcp-proxy config into an mcp-gate config |
 | [serve](serve.md) | Run the gate: routes, clients, health, status and logs |
+| [toolpins](toolpins.md) | Show and accept the tool definitions the gate pinned |
