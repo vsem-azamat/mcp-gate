@@ -507,8 +507,8 @@ func (im *importer) unwrap(path string, s *server, st *config.Stdio, w envWrappe
 var varNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // shownName returns a variable name from the command line as comments and warnings show it: as
-// it is when it is a valid name, else quoted, so that a line break or a "#" in it cannot end a
-// YAML comment.
+// it is when it is a valid name, else quoted as a Go string, so that a line break, a control
+// character or a terminal escape in it stays visible and harmless in the file and on stderr.
 func shownName(name string) string {
 	if varNameRE.MatchString(name) {
 		return name

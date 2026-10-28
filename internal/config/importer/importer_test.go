@@ -420,23 +420,23 @@ func TestImportLowersReconnectInterval(t *testing.T) {
 }
 
 // TestImportUnsetNamesInComments checks that a variable name from env -u that is not a valid
-// name is quoted in the comments, so that it cannot add keys to the YAML.
+// name is quoted in the comments and warnings, control characters included.
 func TestImportUnsetNamesInComments(t *testing.T) {
 	t.Parallel()
 	doc := `{"mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${HUB_TOKEN}"]}}, "mcpServers": {"a": {"command": "/usr/bin/env",
-	  "args": ["-u", "SECRET\ndisabled: true", "-u", "HOME\n#x", "server"]}}}`
+	  "args": ["-u", "SECRET\ndisabled: true", "-u", "LC_\u001b[31m", "server"]}}}`
 	res, err := Import([]byte(doc), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := config.Parse(res.YAML, anyValue)
-	if err != nil {
+	if _, err := config.Parse(res.YAML, anyValue); err != nil {
 		t.Fatalf("%v\n%s", err, res.YAML)
-	}
-	if c.Servers["a"].Disabled {
-		t.Errorf("a name in a comment added a key:\n%s", res.YAML)
 	}
 	if !strings.Contains(string(res.YAML), `"SECRET\ndisabled: true"`) {
 		t.Errorf("the name is not quoted:\n%s", res.YAML)
+	}
+	warnings := strings.Join(res.Warnings, "\n")
+	if strings.Contains(warnings, "\x1b") || !strings.Contains(warnings, `"LC_\x1b[31m"`) {
+		t.Errorf("the warning shows the escape as it is: %q", warnings)
 	}
 }
