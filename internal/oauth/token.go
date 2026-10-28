@@ -103,20 +103,9 @@ type client struct {
 // requestToken posts a token request and returns the response. Errors never carry the
 // request or the response body, which hold codes and tokens.
 func requestToken(ctx context.Context, hc *http.Client, endpoint string, cl client, form url.Values) (*tokenResponse, error) {
-	if cl.style == AuthInParams || cl.secret == "" {
-		form.Set("client_id", cl.id)
-		if cl.secret != "" {
-			form.Set("client_secret", cl.secret)
-		}
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	req, err := clientRequest(ctx, endpoint, cl, form)
 	if err != nil {
 		return nil, errors.New("the token endpoint is not a valid URL")
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	if cl.style == AuthInHeader && cl.secret != "" {
-		req.SetBasicAuth(url.QueryEscape(cl.id), url.QueryEscape(cl.secret))
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -158,6 +147,27 @@ func requestToken(ctx context.Context, hc *http.Client, endpoint string, cl clie
 		return nil, errors.New("token request: a token holds characters a header cannot carry")
 	}
 	return &tr, nil
+}
+
+// clientRequest returns a form POST to an endpoint of the authorization server, with the
+// client authenticated as the token endpoint expects it (RFC 6749, section 2.3.1).
+func clientRequest(ctx context.Context, endpoint string, cl client, form url.Values) (*http.Request, error) {
+	if cl.style == AuthInParams || cl.secret == "" {
+		form.Set("client_id", cl.id)
+		if cl.secret != "" {
+			form.Set("client_secret", cl.secret)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if cl.style == AuthInHeader && cl.secret != "" {
+		req.SetBasicAuth(url.QueryEscape(cl.id), url.QueryEscape(cl.secret))
+	}
+	return req, nil
 }
 
 // notToken reports characters that do not belong in a bearer token header value.

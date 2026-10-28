@@ -27,7 +27,7 @@ Commands:
   login <config.yaml> <server>   sign in: prints a URL to open in any browser, then reads the
                                  address the browser is sent back to
   status <config.yaml>           show the grant of every OAuth server, without the network
-  logout <config.yaml> <server>  delete a server's grant
+  logout <config.yaml> <server>  revoke and delete a server's grant
 
 Exit status: 0 done (for status, every enabled OAuth server has a grant), 2 otherwise.
 `
@@ -105,7 +105,7 @@ func runAuth(ctx context.Context, args []string, env lookupEnv, stdout, stderr i
 		return exitUsage
 	}
 	if cmd == "logout" {
-		return authLogout(ctx, store, name, stdout, stderr)
+		return authLogout(ctx, store, name, s, stdout, stderr)
 	}
 	ctx, cancel := context.WithTimeout(ctx, loginTimeout)
 	defer cancel()
@@ -255,22 +255,48 @@ func grantLine(store *oauth.Store, name string, s *config.Server, now time.Time)
 	return fmt.Sprintf("%s (%s, since %s): %s", state, client, g.ObtainedAt.UTC().Format(time.RFC3339), describeTokens(g, now)), usable
 }
 
-func authLogout(ctx context.Context, store *oauth.Store, name string, stdout, stderr io.Writer) int {
+// authLogout deletes a server's grant and then revokes it at its authorization server, when
+// that offers a revocation endpoint. The grant lock is held only to read and delete the file, so
+// that a refresh waiting for it is not held up by requests to the authorization server; a grant
+// that cannot be revoked is gone all the same.
+func authLogout(ctx context.Context, store *oauth.Store, name string, s *config.Server, stdout, stderr io.Writer) int {
 	unlock, err := store.Lock(ctx, name)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", err)
 		return exitTrouble
 	}
-	defer unlock()
-	ok, err := store.Delete(name)
+	g, loadErr := store.Load(name)
+	ok, delErr := store.Delete(name)
+	unlock()
 	switch {
-	case err != nil:
-		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", err)
+	case delErr != nil && !ok: // the file is still there
+		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", delErr)
 		return exitTrouble
 	case !ok:
 		_, _ = fmt.Fprintf(stdout, "%s was not logged in.\n", name)
-	default:
-		_, _ = fmt.Fprintf(stdout, "Logged out of %s: its grant is deleted. The authorization server keeps it until it expires; revoke it there to end it sooner.\n", name)
+		return exitOK
+	}
+	// The file is removed. A failed sync of the directory may bring it back after a crash, but
+	// the tokens are revoked all the same: once the grant is gone they could not be revoked from
+	// here any more.
+	revoked := "The authorization server offers no revocation endpoint, so it keeps the grant until it expires; revoke it there to end it sooner."
+	if loadErr != nil {
+		revoked = "The grant could not be read, so it was not revoked; revoke it at the authorization server to end it sooner."
+		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", loadErr)
+	} else if g != nil {
+		has, err := oauth.Revoke(ctx, oauth.RevokeOptions{Grant: g, Config: *s.HTTP.OAuth, HTTPClient: oauth.NewHTTPClient(s.HTTP.URL)})
+		switch {
+		case err != nil:
+			revoked = "Revoking it at the authorization server failed; revoke it there to end it sooner."
+			_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", err)
+		case has:
+			revoked = "The authorization server revoked it."
+		}
+	}
+	_, _ = fmt.Fprintf(stdout, "Logged out of %s: its grant is deleted. %s\n", name, revoked)
+	if delErr != nil {
+		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", delErr)
+		return exitTrouble
 	}
 	return exitOK
 }

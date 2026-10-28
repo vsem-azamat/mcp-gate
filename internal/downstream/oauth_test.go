@@ -66,6 +66,26 @@ func TestOAuthRevokedGrantNeedsLogin(t *testing.T) {
 	}
 }
 
+// A server that drops its tokens again and again, as one that restarts does, never rejects the
+// grant: every refreshed token it accepts starts the count of 401s again.
+func TestOAuthRepeatedTokenLossKeepsTheGrant(t *testing.T) {
+	t.Parallel()
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{})
+	store := oauth.NewStore(t.TempDir())
+	srv.Login(t, store, "fake")
+	s := start(t, oauthOptions(t, srv, store))
+	waitReady(t, s)
+	for i := range 5 {
+		srv.ExpireAccess()
+		if _, err := callTool(t, s, "echo", map[string]any{"text": "x"}); err != nil {
+			t.Fatalf("call after token loss %d: %v", i+1, err)
+		}
+	}
+	if st := s.Status(); st.State != Ready || srv.Refreshes() != 5 {
+		t.Errorf("state %s after %d refreshes: %s", st.State, srv.Refreshes(), st.LastError)
+	}
+}
+
 // Stop ends a token refresh that waits for the grant lock another process holds; the SDK holds
 // its connection lock meanwhile, so the wait would otherwise outlast the stop limit.
 func TestStopEndsOAuthLockWait(t *testing.T) {
