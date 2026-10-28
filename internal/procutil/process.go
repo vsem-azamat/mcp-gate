@@ -253,3 +253,14 @@ func groupGone(pgid int) bool {
 	err := syscall.Kill(-pgid, 0)
 	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)
 }
+
+// KillAll sends SIGKILL to the process group of every child Start started that has not been
+// reaped yet, without waiting, for a forced exit. The lock keeps each leader unreaped, so its
+// PID, and with it the group ID, cannot have been reused.
+func KillAll() {
+	managed.Lock()
+	defer managed.Unlock()
+	for pid := range managed.pids {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}
+}

@@ -21,11 +21,11 @@ import (
 )
 
 // TestSecondSignalForcesExit checks that a second SIGINT during a shutdown that waits for a call
-// in flight ends the gate at once, by the signal.
+// in flight ends the gate at once, by the signal, and kills its children's process groups.
 func TestSecondSignalForcesExit(t *testing.T) {
 	bin := gateBinary(t)
 	dir := t.TempDir()
-	cmd, args := testkit.StdioCommand(t, testkit.Fake{Name: "local"})
+	cmd, args := testkit.StdioCommand(t, testkit.Fake{Name: "local", Grandchild: true})
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +51,10 @@ func TestSecondSignalForcesExit(t *testing.T) {
 	tr := &http.Transport{}
 	t.Cleanup(tr.CloseIdleConnections)
 	cs := connect(t, tr, base+"/local/mcp")
+	var pids struct{ PID, PGID, Grandchild int }
+	if err := json.Unmarshal([]byte(callText(t, cs, "pids", nil)), &pids); err != nil || pids.Grandchild == 0 || pids.PGID <= 1 {
+		t.Fatalf("pids: %+v, %v", pids, err)
+	}
 	go func() { _, _ = cs.CallTool(context.WithoutCancel(t.Context()), &mcp.CallToolParams{Name: "hang"}) }()
 	time.Sleep(300 * time.Millisecond) // the call reaches the server
 
@@ -83,5 +87,11 @@ func TestSecondSignalForcesExit(t *testing.T) {
 	}
 	if ws, ok := exit.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGINT {
 		t.Errorf("exit = %v, want death by SIGINT", gate.waitErr)
+	}
+	// The child's process group is killed, its own child included.
+	for what, pid := range map[string]int{"child": pids.PID, "grandchild": pids.Grandchild, "process group": -pids.PGID} {
+		if err := gone(pid); err != nil {
+			t.Errorf("the %s outlived the forced exit: %v", what, err)
+		}
 	}
 }

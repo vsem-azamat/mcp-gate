@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/vsem-azamat/mcp-gate/internal/procutil"
 	"github.com/vsem-azamat/mcp-gate/internal/version"
 )
 
@@ -39,16 +41,31 @@ Commands:
 type lookupEnv func(string) (string, bool)
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		// The first signal begins the shutdown; a second one ends the process at once, by the
-		// signal's default action, without waiting for the shutdown.
-		<-ctx.Done()
-		stop()
+		<-sigs
+		cancel() // the first signal begins the shutdown
+		forceExit(<-sigs)
 	}()
 	code := run(ctx, os.Args[1:], os.LookupEnv, os.Stdout, os.Stderr)
-	stop()
+	signal.Stop(sigs)
+	cancel()
 	os.Exit(code)
+}
+
+// forceExit ends the process at a second signal, without waiting for the shutdown: it kills the
+// process group of every child, so that their own children go too, and then dies of the signal.
+func forceExit(sig os.Signal) {
+	procutil.KillAll()
+	signal.Reset(sig)
+	if s, ok := sig.(syscall.Signal); ok {
+		_ = syscall.Kill(os.Getpid(), s)
+	}
+	// The signal is delivered asynchronously; give it the time to end the process.
+	time.Sleep(time.Second)
+	os.Exit(exitTrouble)
 }
 
 // run executes the command named by args and returns the process exit code.
