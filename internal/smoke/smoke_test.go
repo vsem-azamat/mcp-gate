@@ -305,19 +305,22 @@ servers:
 	// The legacy server leaves server/discover unanswered, so the gate pins its protocol version
 	// and keeps the pin in the state directory.
 	var pins struct {
-		Version int               `json:"version"`
-		Pins    map[string]string `json:"pins"`
+		Version int `json:"version"`
+		Pins    map[string]struct {
+			Version   string `json:"version"`
+			Transport string `json:"transport"`
+		} `json:"pins"`
 	}
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
 		data, err := os.ReadFile(filepath.Join(stateDir, "pins.json"))
-		if err == nil && json.Unmarshal(data, &pins) == nil && pins.Pins["legacy"] != "" {
+		if err == nil && json.Unmarshal(data, &pins) == nil && pins.Pins["legacy"].Version != "" {
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("no learned pin in the state directory: %s, %v\n%s", data, err, logs)
 		}
 	}
-	if pins.Version != 1 || len(pins.Pins) != 1 {
+	if pins.Version != 2 || len(pins.Pins) != 1 || pins.Pins["legacy"].Transport == "" {
 		t.Errorf("pins.json = %+v", pins)
 	}
 	for _, cs := range sessions {
