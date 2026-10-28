@@ -6,6 +6,7 @@ How to use the `mcp-gate` subcommands. The exact behaviour of each is specified 
 
 | Page | Contents |
 | --- | --- |
+| [approvals](approvals.md) | List, approve and deny the tool calls a running gate holds for the owner |
 | [auth](auth.md) | Log in to and out of the servers that use OAuth, and show their grants |
 | [check](check.md) | Validate a config, and connect to its servers |
 | [compare](compare.md) | Diff the catalogs two MCP endpoints or snapshots serve |

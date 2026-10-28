@@ -134,6 +134,8 @@ func (g *Gate) apply(ctx context.Context, cfg *config.Config) error {
 	}
 
 	g.snap.Store(sn)
+	// A pending approval was asked under the config just replaced.
+	g.approvals.DenyAll()
 	g.prunePins(cfg)
 	for _, rt := range replaced {
 		rt.retire()

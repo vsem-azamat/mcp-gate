@@ -30,8 +30,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 
+	"github.com/vsem-azamat/mcp-gate/internal/approval"
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
+	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/toolpins"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -84,8 +86,10 @@ type Options struct {
 	// Redaction redacts results; nil passes them unchanged.
 	Redaction *Redaction
 	// Files, if set, scans the files tool calls write, after their results are redacted.
-	Files  FileScanner
-	Logger *slog.Logger
+	Files FileScanner
+	// Approval, if set, holds the tool calls its rules name for the owner's approval.
+	Approval *Approval
+	Logger   *slog.Logger
 	// Audit receives the audit record of every request; nil writes them as call lines to
 	// Logger.
 	Audit audit.Sink
@@ -99,6 +103,16 @@ type Options struct {
 	ToolPins *toolpins.Store
 	// HoldTools leaves the tools whose definition differs from their pin out of the catalog.
 	HoldTools bool
+}
+
+// Approval holds a server's tool calls that its rules name until the owner decides them.
+type Approval struct {
+	Rules    *approval.Rules
+	Store    *approval.Store
+	Settings approval.Settings
+	// Engine redacts the arguments shown to the owner when the server's results are not
+	// redacted.
+	Engine *redact.Engine
 }
 
 // Mirror is the upstream face of one downstream server under one config.
@@ -119,6 +133,11 @@ type Mirror struct {
 	templates map[string]*mcp.ResourceTemplate
 	lastSync  time.Time
 	held      map[string]bool // the tools the tool pins hold
+
+	// approveMu guards approveWarned, the exact approve patterns already reported as matching
+	// no listed tool.
+	approveMu     sync.Mutex
+	approveWarned map[string]bool
 
 	watchMu  sync.Mutex
 	watchers map[int]func()
@@ -435,6 +454,7 @@ func (m *Mirror) filter(kinds kindSet, l *listing) *filtered {
 	f := &filtered{}
 	if kinds.has(audit.Tool) {
 		tools := m.uniqueTools(l.tools)
+		m.checkApprove(tools)
 		f.held = m.checkPins(tools)
 		f.tools = m.filterTools(tools, f.held)
 	}
@@ -624,6 +644,31 @@ func (m *Mirror) uniqueTools(list []*mcp.Tool) []*mcp.Tool {
 		m.logger.Warn("the server lists tool names more than once; serving the first of each", "duplicates", dups, "first", m.logText(first))
 	}
 	return out
+}
+
+// checkApprove warns, once per mirror, about each exact approve pattern that names no tool the
+// server lists: a misspelt pattern, or one written as the aggregate endpoint names the tool,
+// holds nothing.
+func (m *Mirror) checkApprove(tools []*mcp.Tool) {
+	a := m.opts.Approval
+	if a == nil {
+		return
+	}
+	listed := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		listed[t.Name] = true
+	}
+	m.approveMu.Lock()
+	defer m.approveMu.Unlock()
+	if m.approveWarned == nil {
+		m.approveWarned = map[string]bool{}
+	}
+	for _, pat := range a.Rules.Unmatched(listed) {
+		if !m.approveWarned[pat] {
+			m.approveWarned[pat] = true
+			m.logger.Warn("an approve pattern names no tool the server lists, so it holds nothing until the server lists one", "pattern", m.logText(pat))
+		}
+	}
 }
 
 // checkPins is the tool pins step: it compares the listed tools with the server's pins, writes

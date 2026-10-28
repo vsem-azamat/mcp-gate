@@ -44,6 +44,7 @@ const (
 	DefaultEscrowMaxEntries   = 1000
 	DefaultFileMaxBytes       = 20 << 20
 	DefaultEscrowSocketMode   = FileMode(0o600)
+	DefaultApprovalTimeout    = 5 * time.Minute
 )
 
 // DefaultTrustedProxies are the peers whose X-Forwarded-For is read when behindProxy is set
@@ -91,7 +92,28 @@ type Config struct {
 	Aggregate *Aggregate `yaml:"aggregate,omitempty"`
 	// Policies narrows what a token may reach, by token name.
 	Policies map[string]*TokenPolicy `yaml:"policies,omitempty"`
-	Servers  map[string]*Server      `yaml:"servers"`
+	// Approvals configures how the tool calls that approve lists name wait for the owner.
+	Approvals Approvals          `yaml:"approvals,omitempty"`
+	Servers   map[string]*Server `yaml:"servers"`
+}
+
+// Approvals configures the pending approvals of held tool calls.
+type Approvals struct {
+	// Timeout is how long a held call waits for a decision; nil means DefaultApprovalTimeout.
+	Timeout *Duration `yaml:"timeout,omitempty"`
+	// Webhook, if set, is where each pending approval is announced.
+	Webhook *Webhook `yaml:"webhook,omitempty"`
+}
+
+// Webhook is the endpoint pending approvals are announced to.
+type Webhook struct {
+	// URL receives a POST with the notice of each pending approval.
+	URL string `yaml:"url"`
+	// Secret, if set, is the key of the HMAC-SHA256 signature of each notice, usually ${VAR}.
+	Secret string `yaml:"secret,omitempty"`
+	// LinkURL, if set, is the base URL at which relays reach the gate; the notices then carry
+	// one-time links that approve or deny.
+	LinkURL string `yaml:"linkURL,omitempty"`
 }
 
 // TokenPolicy narrows what one token sees and may call, server by server, on top of each
@@ -108,6 +130,8 @@ type ServerPolicy struct {
 	Tools     *PolicyFilter `yaml:"tools,omitempty"`
 	Prompts   *PolicyFilter `yaml:"prompts,omitempty"`
 	Resources *PolicyFilter `yaml:"resources,omitempty"`
+	// Approve adds tool name patterns whose calls by the token wait for the owner's approval.
+	Approve []string `yaml:"approve,omitempty"`
 }
 
 // PolicyNone is the value of a policy filter that hides every entry of its kind.
@@ -309,6 +333,9 @@ type Server struct {
 	// ToolPins is what the gate does when the server lists a tool whose definition differs from
 	// its pin: one of ToolPinsModes; "" means DefaultToolPins.
 	ToolPins string `yaml:"toolPins,omitempty"`
+	// Approve lists tool name patterns (a name, or a prefix ending in *) whose calls wait for
+	// the owner's approval.
+	Approve []string `yaml:"approve,omitempty"`
 	// Transport is set by Parse: the server's command, arguments and working directory, or its
 	// URL, as written, before variables are expanded, encoded as JSON. It identifies the server
 	// without holding the values of the variables it names.
@@ -749,6 +776,10 @@ func (c *Config) applyDefaults() {
 	if c.Escrow.TTL == nil {
 		v := Duration(DefaultEscrowTTL)
 		c.Escrow.TTL = &v
+	}
+	if c.Approvals.Timeout == nil {
+		v := Duration(DefaultApprovalTimeout)
+		c.Approvals.Timeout = &v
 	}
 	if c.Escrow.MaxEntries == 0 {
 		c.Escrow.MaxEntries = DefaultEscrowMaxEntries

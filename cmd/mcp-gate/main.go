@@ -1,6 +1,7 @@
 // Command mcp-gate is an MCP gateway: serve runs it; compare diffs the catalogs that MCP endpoints
 // serve, check validates a config and can connect to its servers, import converts an mcp-proxy
-// config, auth manages OAuth grants and toolpins shows and accepts pinned tool definitions.
+// config, auth manages OAuth grants, toolpins shows and accepts pinned tool definitions, and
+// approvals decides the tool calls a running gate holds.
 package main
 
 import (
@@ -34,6 +35,7 @@ Commands:
   import     convert an mcp-proxy config.json into an mcp-gate config
   auth       log in to, and out of, the servers that use OAuth
   toolpins   show and accept the tool definitions the gate pinned
+  approvals  list, approve and deny the tool calls a running gate holds
   help       show this help
   version    print the version and commit
 `
@@ -88,6 +90,8 @@ func run(ctx context.Context, args []string, env lookupEnv, stdout, stderr io.Wr
 		return runAuth(ctx, args[1:], env, stdout, stderr)
 	case "toolpins":
 		return runToolpins(args[1:], env, stdout, stderr)
+	case "approvals":
+		return runApprovals(ctx, args[1:], env, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		_, _ = io.WriteString(stdout, usage)
 		return exitOK

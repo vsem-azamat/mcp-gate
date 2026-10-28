@@ -163,3 +163,20 @@ func (l *limiter) fail(client string) (time.Duration, bool) {
 	l.global.tokens--
 	return 0, true
 }
+
+// AuthLimit is the failed-authentication limit above, for another endpoint that takes a secret,
+// such as the gate's admin endpoints. It keeps its own buckets.
+type AuthLimit struct{ l *limiter }
+
+// NewAuthLimit returns an empty limit.
+func NewAuthLimit() *AuthLimit { return &AuthLimit{l: newLimiter(&clock{now: time.Now})} }
+
+// Allow reports whether client may present a secret now, and if not, how long until it may.
+func (a *AuthLimit) Allow(client string) (time.Duration, bool) { return a.l.allow(client) }
+
+// Fail counts a wrong secret presented by client; false, with how long until one is counted
+// again, refuses it with 429.
+func (a *AuthLimit) Fail(client string) (time.Duration, bool) { return a.l.fail(client) }
+
+// Succeed records that client presented the right secret.
+func (a *AuthLimit) Succeed(client string) { a.l.succeed(client) }

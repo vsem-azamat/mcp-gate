@@ -42,7 +42,7 @@ The gate SHALL serve these families, each with `# HELP` and `# TYPE` lines, fami
 - `mcp_gate_downstream_state{server,state}`, a gauge, for each enabled server and each supervisor state (`starting`, `ready`, `degraded`, `backoff`, `disabled`, `stopped`, `needs-login`), of 1 for the state it is in and 0 for the others.
 - `mcp_gate_escrow_entries`, a gauge of the entries the escrow holds, and `mcp_gate_escrow_stored_total`, a counter of the entries it stored under a new handle; both only with the escrow on.
 - `mcp_gate_reloads_total{result}`, a counter of reloads by `success` or `failure`: a config that did not load or could not be applied is a failure; a reload skipped because the shutdown began is not counted.
-- `mcp_gate_auth_failures_total{route}`, a counter of the requests answered with 401 because they carried no accepted token, by route: `/<server>/mcp`, `/mcp`, `/_status`, `/_metrics` and `/_escrow/`.
+- `mcp_gate_auth_failures_total{route}`, a counter of the requests answered with 401 because they carried no accepted token, by route: `/<server>/mcp`, `/mcp`, `/_status`, `/_metrics`, `/_approvals` and `/_escrow/`.
 
 Label values SHALL be escaped as the format requires. Counters and histograms SHALL keep their series for the life of the process, including those of servers a reload removed, and SHALL NOT be reset by a reload.
 

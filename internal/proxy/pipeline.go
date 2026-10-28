@@ -1,15 +1,22 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/approval"
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/redact/mcpredact"
 )
 
@@ -21,7 +28,9 @@ import (
 //   - before forward: the kind's before stages, each of which may refuse the request or change
 //     what is sent: today the server's filter with the tools the tool pins hold, then the
 //     caller's token policy, each of which refuses an entry it hides with the error of an
-//     unknown one;
+//     unknown one, then, for a tool call, the owner's approval. Approval stays the last before
+//     stage: a check added here goes before it, so that the owner is asked only about a call
+//     the gate would otherwise forward;
 //   - forward: the request goes to the server through the supervisor, with the downstream
 //     _meta and progress (Mirror.forward);
 //   - outcome: the server's answer becomes a result or an error fit for the client, and what
@@ -55,7 +64,8 @@ type result interface {
 }
 
 // beforeStage checks or changes a request before it is forwarded. An error refuses the request,
-// with the outcome the stage set.
+// with the outcome the stage set; a softRefusal is answered with a soft result when the kind
+// has one.
 type beforeStage[P any] func(ctx context.Context, x *exchange, p P) error
 
 // afterStage checks or changes a result. An error withholds the result, with the outcome the
@@ -83,6 +93,9 @@ func (pl *pipeline[P, R]) run(ctx context.Context, x *exchange, p P) (R, error) 
 	var none R
 	for _, stage := range pl.before {
 		if err := stage(ctx, x, p); err != nil {
+			if soft, ok := errors.AsType[softRefusal](err); ok {
+				return pl.fail(soft.error)
+			}
 			return none, err
 		}
 	}
@@ -174,6 +187,252 @@ func tokenPolicy[P any](_ context.Context, x *exchange, _ P) error {
 	return nil
 }
 
+// softRefusal is a refusal that a tool call reports to the model in its result.
+type softRefusal struct{ error }
+
+// approve holds a tool call that the server's approval rules name for the caller until the
+// owner decides it, and refuses it unless it is approved. It runs after every other before
+// stage, so that a hidden tool is refused as an unknown one without the owner being asked. The
+// arguments of a held call are decoded strictly, and what is forwarded is the encoding of
+// exactly what the owner was shown before redaction: arguments a decoder could read two ways,
+// such as a key given twice, are refused.
+func approve(ctx context.Context, x *exchange, p *mcp.CallToolParams) error {
+	a := x.m.opts.Approval
+	if a == nil || !a.Rules.Holds(x.principal, x.entry) {
+		return nil
+	}
+	raw, _ := p.Arguments.(json.RawMessage) // as callToolAs sets it
+	canonical, err := canonicalArguments(raw)
+	if err != nil {
+		x.approval, x.approver, x.outcome = audit.ApprovalDenied, approval.ByGate, audit.NotApproved
+		return softRefusal{fmt.Errorf("mcp-gate: the arguments of this call of %s cannot be shown for approval: %w", x.shown, err)}
+	}
+	if canonical != nil {
+		p.Arguments = canonical
+	}
+	shown, truncated := x.m.shownArguments(canonical)
+	q := approval.Question{
+		Server: x.m.opts.Name, Tool: x.entry, Principal: x.principal,
+		Arguments: shown, Size: len(canonical), Truncated: truncated,
+	}
+	d := a.Store.Ask(ctx, q, a.Settings, func(id string, n int) { x.waiting(ctx, id, n) })
+	x.approval, x.approver = d.Approval, d.By
+	switch d.Approval {
+	case audit.Approved:
+		return nil
+	case audit.ApprovalCancelled:
+		x.outcome = audit.Error
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("the call was cancelled while it waited for approval")
+	case audit.ApprovalExpired:
+		x.outcome = audit.NotApproved
+		return softRefusal{fmt.Errorf("mcp-gate: the owner did not answer the approval request for %s in time", x.shown)}
+	case audit.ApprovalDenied:
+	}
+	x.outcome = audit.NotApproved
+	return softRefusal{fmt.Errorf("mcp-gate: the owner did not approve this call of %s", x.shown)}
+}
+
+// errDuplicateKey is arguments with a key given twice in one object, which decoders read
+// differently (the first or the last value), so that the owner could be shown one and the
+// server run the other.
+var errDuplicateKey = errors.New("a key is given twice in one object")
+
+// canonicalArguments decodes a held call's arguments strictly, a JSON object with no key given
+// twice at any depth, and returns their encoding with sorted keys and numbers as written; nil
+// for no arguments.
+func canonicalArguments(raw json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	v, err := strictValue(dec, 0)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := v.(map[string]any); !ok {
+		return nil, errors.New("they are not a JSON object")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("they hold more than one JSON value")
+	}
+	return encodeJSON(v)
+}
+
+// maxArgumentDepth bounds the nesting of a held call's arguments.
+const maxArgumentDepth = 64
+
+// strictValue reads one JSON value from dec, refusing a key given twice in an object.
+func strictValue(dec *json.Decoder, depth int) (any, error) {
+	if depth > maxArgumentDepth {
+		return nil, errors.New("they are nested too deep")
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, errors.New("they are not valid JSON")
+	}
+	switch t := tok.(type) {
+	case json.Delim:
+		switch t {
+		case '{':
+			obj := map[string]any{}
+			for dec.More() {
+				kt, err := dec.Token()
+				if err != nil {
+					return nil, errors.New("they are not valid JSON")
+				}
+				key, _ := kt.(string)
+				if _, dup := obj[key]; dup {
+					return nil, errDuplicateKey
+				}
+				if obj[key], err = strictValue(dec, depth+1); err != nil {
+					return nil, err
+				}
+			}
+			_, err = dec.Token() // }
+			return obj, err
+		case '[':
+			arr := []any{}
+			for dec.More() {
+				v, err := strictValue(dec, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				arr = append(arr, v)
+			}
+			_, err = dec.Token() // ]
+			return arr, err
+		}
+		return nil, errors.New("they are not valid JSON")
+	default:
+		return t, nil
+	}
+}
+
+// encodeJSON encodes v with sorted keys, without HTML escapes and without a trailing newline.
+func encodeJSON(v any) (json.RawMessage, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+}
+
+// What the owner is shown of a held call's arguments: each string value or key cut at
+// maxShownValue bytes, each array at maxShownItems items and each object at maxShownKeys keys,
+// so that every key of a usual call stays visible however long one value is.
+const (
+	maxShownValue = 512
+	maxShownItems = 64
+	maxShownKeys  = 256
+)
+
+// shownArguments returns a held call's canonical arguments as the owner is shown them: redacted
+// with the server's rules, or the default ones when its results are not redacted, findings
+// replaced by markers and never kept; every rune that is not printable or is a format
+// character, such as a bidirectional override, written as \uXXXX; long values, arrays and
+// objects cut, which truncated reports.
+func (m *Mirror) shownArguments(canonical json.RawMessage) (shown string, truncated bool) {
+	if len(canonical) == 0 {
+		return "", false
+	}
+	const unredactable = "(the arguments could not be redacted)"
+	engine := m.opts.Approval.Engine
+	if r := m.opts.Redaction; r != nil {
+		engine = r.engine
+	}
+	if engine == nil {
+		return unredactable, false
+	}
+	out, err := engine.RedactJSON(canonical, redact.Marker{})
+	if err != nil {
+		return unredactable, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(out))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return unredactable, false
+	}
+	v = shownValue(v, &truncated)
+	enc, err := encodeJSON(v)
+	if err != nil {
+		return unredactable, false
+	}
+	return string(enc), truncated
+}
+
+// shownValue makes v fit to show (see shownArguments), setting truncated when it cuts.
+func shownValue(v any, truncated *bool) any {
+	text := func(s string) string {
+		s = approval.Printable(s)
+		if len(s) > maxShownValue {
+			*truncated = true
+			s = redact.Cut(s, maxShownValue)
+		}
+		return s
+	}
+	switch t := v.(type) {
+	case string:
+		return text(t)
+	case []any:
+		if len(t) > maxShownItems {
+			*truncated = true
+			rest := len(t) - maxShownItems
+			t = append(t[:maxShownItems:maxShownItems], fmt.Sprintf("… %d more", rest))
+		}
+		for i := range t {
+			t[i] = shownValue(t[i], truncated)
+		}
+		return t
+	case map[string]any:
+		keys := slices.Sorted(maps.Keys(t))
+		more := len(keys) - maxShownKeys
+		if more > 0 {
+			*truncated = true
+			keys = keys[:maxShownKeys]
+		}
+		out := make(map[string]any, len(keys)+1)
+		put := func(k string, v any) {
+			// Two keys that read the same once escaped or cut are both shown.
+			for _, ok := out[k]; ok; _, ok = out[k] {
+				*truncated = true
+				k += " (another key)"
+			}
+			out[k] = v
+		}
+		for _, k := range keys {
+			put(text(k), shownValue(t[k], truncated))
+		}
+		if more > 0 {
+			put("…", fmt.Sprintf("%d more keys", more))
+		}
+		return out
+	}
+	return v
+}
+
+// waiting tells the caller, through its request's progress token if it has one, that its call
+// waits for the owner's approval; n is how many times it was told before, plus one. ctx is the
+// request's, which routes the notification to its stream.
+func (x *exchange) waiting(ctx context.Context, id string, n int) {
+	token := progressToken(x.meta)
+	if token == nil || x.session == nil {
+		return
+	}
+	err := x.session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+		ProgressToken: token, Progress: float64(n), Message: "waiting for the owner's approval (" + id + ")",
+	})
+	if err != nil {
+		x.m.logger.Debug("approval progress not delivered", "error", err.Error())
+	}
+}
+
 // The after stages.
 
 // redactWith returns the stage that redacts a result with the server's redaction, if it has
@@ -223,7 +482,8 @@ func toolErrorOutcome(_ context.Context, x *exchange, res *mcp.CallToolResult) (
 // The pipelines of the three kinds.
 
 var toolPipeline = &pipeline[*mcp.CallToolParams, *mcp.CallToolResult]{
-	before: []beforeStage[*mcp.CallToolParams]{serverFilter[*mcp.CallToolParams], tokenPolicy[*mcp.CallToolParams]},
+	// approve stays last; see the pipeline above.
+	before: []beforeStage[*mcp.CallToolParams]{serverFilter[*mcp.CallToolParams], tokenPolicy[*mcp.CallToolParams], approve},
 	send: func(ctx context.Context, d Downstream, p *mcp.CallToolParams) (*mcp.CallToolResult, error) {
 		return d.CallTool(ctx, p)
 	},

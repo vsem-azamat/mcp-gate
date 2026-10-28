@@ -127,6 +127,22 @@ Listing a user ID trusts every process of that user outside the gate's process t
 
 The access log names a socket client `unix:uid=<n>`, and the failed-auth limit counts per user ID; a request served without a key skips it. The socket's directory, with symlinks resolved, must be root's or the gate's user's and writable by nobody else (a sticky directory only when root's), or the gate does not start. Even so, do not put the socket in a shared sticky directory such as `/tmp`: while the gate is down, another user can create a socket of their own at the path and collect the key a client sends. Use a directory of the gate's own, such as a systemd `RuntimeDirectory=`. The default mode `0600` admits only the gate's user and root; a reader running as another user needs a shared group, as in [systemd](../operations/systemd.md#escrow-socket). Where the system does not report the peer's user (on systems other than Linux and macOS), every socket request needs the key.
 
+## Approvals
+
+Tools named in a server's `approve` list, or in a token's `approve` list on that server, wait for the owner before the gate forwards them (see [Configuration](../configuration/README.md#approvals) and the [approvals spec](../../openspec/specs/approvals/spec.md)). The call blocks for at most `approvals.timeout` (default 5 minutes). Each held call is posted to `approvals.webhook.url`, if set, as JSON:
+
+```json
+{"id":"3f2a9c0d11e4b5a7","server":"chat","tool":"send_message","principal":"laptop","arguments":"{\"chat\":\"team\",\"text\":\"token [REDACTED:github_token]\"}","size":61,"truncated":false,"created":"2026-01-02T10:00:00Z","expires":"2026-01-02T10:05:00Z","approveURL":"https://gate.example.com/_approvals/link/approve","denyURL":"https://gate.example.com/_approvals/link/deny","linkToken":"<43 characters>"}
+```
+
+The arguments are decoded strictly, and a call whose arguments give a key twice in one object is refused at once: decoders disagree on which value counts, so the owner could be shown one and the server run the other. The server gets exactly the decoded arguments, re-encoded with sorted keys. What the notice shows is redacted, with every control, format and bidirectional character written as `\uXXXX`, and each key and string cut at 512 bytes (arrays at 64 items, objects at 256 keys), so every key stays visible; `truncated` says something was cut and `size` is the length of what is forwarded. With `approvals.webhook.secret`, the request carries `X-Mcp-Gate-Signature: sha256=<hex>`, the HMAC-SHA256 of the body, which the receiver should check; it should also ignore a notice whose `expires` has passed or whose `id` it has seen, since a captured notice can be sent again. `approveURL`, `denyURL` and `linkToken` are there only with `approvals.webhook.linkURL`: a `POST` of `{"token": "<linkToken>"}` to either decides once. The token travels in the body, never in the URL, so it stays out of access logs, and a chat app's link preview, which fetches URLs with `GET`, cannot approve anything. A relay for Telegram or ntfy turns the notice into a message with two buttons whose handler makes that `POST`. At most 4 notices are sent at a time and 64 wait; a notice whose call is no longer pending is skipped. The webhook is sent directly, without `HTTP_PROXY`; a failed or non-2xx notice is logged as a warning with the class of the failure (`dns`, `connect`, `tls`, `timeout`, `answered 500`, …), never the URL or host, and the call still waits.
+
+The owner decides with [`mcp-gate approvals`](approvals.md), which calls `GET /_approvals` and `POST /_approvals/<id>/approve` or `/deny` with an admin token, or through the links. A call that nobody decides in time gets the tool error `mcp-gate: the owner did not answer the approval request for <tool> in time`, a denied one `mcp-gate: the owner did not approve this call of <tool>`; neither reaches the server. A reload that applies a config, and the shutdown, deny every pending approval, so a restart forgets them.
+
+While a call waits, a client that sent a progress token gets a progress notification every 10 seconds (`waiting for the owner's approval (<id>)`), which keeps a client whose timeout restarts on progress waiting. A client without a progress token, or one with a fixed request timeout shorter than `approvals.timeout`, gives up first: set the timeout below the client's, and above it any reverse proxy's read timeout (nginx's `proxy_read_timeout` is 60 seconds by default). A tool a token's policy or the server's filter hides is refused as unknown before anything is held.
+
+Holding a call protects only while the agent cannot decide it itself: keep the admin tokens out of its reach (they must differ from every client token, which `check` enforces, and wrong ones are rate-limited per address like the escrow key), and keep the relay channel and its link tokens out of its reach too. The approval identifier the agent sees in its progress messages is useless without an admin token. At most 16 calls of one token, and 64 in all, wait at a time.
+
 ## Logs
 
 Every forwarded call writes one `call` line with the server, the token name (`principal`), the method, the tool or prompt or resource URI, the duration, the outcome, what the token's policy decided (`tokenPolicy`: `none` without a policy on the server, `allow` or `deny`) and the number of redactions; arguments and results are never logged:
@@ -141,6 +157,12 @@ When a server lists a tool whose definition differs from its pin, or a tool it h
 
 ```json
 {"time":"…","level":"WARN","msg":"toolPin","server":"notes","tool":"read_note","change":"changed","pinned":"sha256:9f2c…","listed":"sha256:41ab…","action":"held"}
+```
+
+A tool call held for approval (see [Approvals](#approvals)) has two more attributes, `approval` (`approved`, `denied`, `expired` or `cancelled`) and, for a decision, `approver` (the admin token's name, `link` or `gate`); a denied or expired call has outcome `not_approved`:
+
+```json
+{"time":"…","level":"INFO","msg":"call","server":"chat","principal":"laptop","method":"tools/call","tool":"send_message","durMs":48210,"outcome":"ok","tokenPolicy":"none","redactions":0,"approval":"approved","approver":"owner"}
 ```
 
 With `log.requests`, each HTTP request to the route also writes a `request` line with its method, status, duration and remote address; `aggregate.log.requests` does the same for `/mcp`, with `server` `/mcp`. A call the aggregate endpoint refuses before any server sees it (a name of a server the token does not reach, say) is a `call` line with outcome `denied` and an empty `server`.

@@ -62,7 +62,10 @@ var configFields = map[string]fieldClass{
 	"Warnings":               derivedField,
 	"Aggregate":              routeField,
 	"Policies":               mirrorField, // each server's mirror takes the token policies on it
-	"Servers":                0,           // see serverFields
+	// Each mirror takes the approval settings; the link route is mounted per snapshot. Every
+	// reload that applies denies the pending approvals anyway.
+	"Approvals": mirrorField | snapshotField,
+	"Servers":   0, // see serverFields
 }
 
 // serverFields classifies the fields of config.Server.
@@ -81,6 +84,7 @@ var serverFields = map[string]fieldClass{
 	"Redact":          mirrorField,
 	"ForwardMeta":     mirrorField,
 	"ToolPins":        mirrorField,
+	"Approve":         mirrorField,
 	"Auth":            routeField,
 	"Log":             routeField,
 	"Transport":       derivedField,

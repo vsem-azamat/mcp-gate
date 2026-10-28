@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/approval"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/escrow"
@@ -245,12 +246,21 @@ func (g *Gate) build(cfg *config.Config, prev *snapshot) (sn *snapshot, err erro
 	mux.Handle("GET /_readyz", upstream.Recover(g.logger, "_readyz", upstream.HealthHandler(info, g.Readiness)))
 	if len(cfg.Admin.Tokens) > 0 {
 		admin := upstream.NewTokens(cfg.Admin.Tokens)
-		mux.Handle("GET /_status", upstream.Recover(g.logger, "_status",
-			upstream.StatusHandler(admin, g.rejected("/_status"), func() any { return g.Status() })))
+		mux.Handle("GET /_status", upstream.Recover(g.logger, "_status", g.limitAdmin(sn, admin,
+			upstream.StatusHandler(admin, g.rejected("/_status"), func() any { return g.Status() }))))
+		approvals := upstream.Recover(g.logger, "_approvals", g.limitAdmin(sn, admin,
+			g.approvals.AdminHandler(admin.Authenticate, g.rejected(approval.Route))))
+		mux.Handle(approval.Route, approvals)
+		mux.Handle(approval.Route+"/", approvals)
 		if cfg.Metrics.Enabled {
-			mux.Handle("GET "+metricsRoute, upstream.Recover(g.logger, "_metrics",
-				upstream.RequireAdmin(admin, g.rejected(metricsRoute), g.metricsHandler())))
+			mux.Handle("GET "+metricsRoute, upstream.Recover(g.logger, "_metrics", g.limitAdmin(sn, admin,
+				upstream.RequireAdmin(admin, g.rejected(metricsRoute), g.metricsHandler()))))
 		}
+	}
+	if w := cfg.Approvals.Webhook; w != nil && w.LinkURL != "" {
+		mux.Handle(approval.LinkRoute, upstream.Recover(g.logger, "_approvals", g.approvals.LinkHandler()))
+	} else {
+		mux.Handle(approval.LinkRoute, http.NotFoundHandler())
 	}
 	sn.mux = mux
 	return sn, nil
@@ -314,13 +324,31 @@ func (g *Gate) newServer(cfg *config.Config, name string, s *config.Server, old 
 	}
 	mo := proxy.Options{
 		Name: name, Version: g.opts.Version, Policy: policy.New(s), Tokens: policy.NewTokens(cfg, name), ForwardMeta: s.ForwardMeta,
-		Redaction: redaction, Files: files, Logger: g.logger, Audit: g.audit, Source: rt.src,
+		Redaction: redaction, Files: files, Approval: g.approvalOf(cfg, name), Logger: g.logger, Audit: g.audit, Source: rt.src,
 	}
 	if s.ToolPins != config.ToolPinsOff {
 		mo.ToolPins, mo.HoldTools = g.toolPins, s.ToolPins == config.ToolPinsHold
 	}
 	mirror := proxy.New(mo)
 	return &server{name: name, cfg: s, rt: rt, sup: rt.sup, mirror: mirror, mkey: mkey, engine: engine}, true, nil
+}
+
+// approvalOf returns what holds the tool calls of the server named name for approval; nil when
+// cfg holds none of them.
+func (g *Gate) approvalOf(cfg *config.Config, name string) *proxy.Approval {
+	rules := approval.NewRules(cfg, name)
+	if rules == nil {
+		return nil
+	}
+	set := approval.Settings{Timeout: config.DefaultApprovalTimeout}
+	if t := cfg.Approvals.Timeout; t != nil {
+		set.Timeout = t.D()
+	}
+	if w := cfg.Approvals.Webhook; w != nil {
+		set.Notifier = approval.NewWebhook(w.URL, w.Secret, g.logger)
+		set.LinkURL = w.LinkURL
+	}
+	return &proxy.Approval{Rules: rules, Store: g.approvals, Settings: set, Engine: g.defaultRules}
 }
 
 // newRuntime builds the supervisor and the source of a server, not started.

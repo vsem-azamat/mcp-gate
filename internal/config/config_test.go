@@ -65,7 +65,7 @@ func TestParseFull(t *testing.T) {
 	t.Parallel()
 	c, err := Parse([]byte(fullConfig), env(map[string]string{
 		"NOTES_DB": "/srv/notes/db", "NOTES_TOKEN": "tok-123", "SHOP_KEY": "key-456",
-		"LAPTOP_TOKEN": "lt", "ADMIN_TOKEN": "at", "PHONE_TOKEN": "pt",
+		"LAPTOP_TOKEN": "lt", "ADMIN_TOKEN": "at0123456789abcdef", "PHONE_TOKEN": "pt",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestParseFull(t *testing.T) {
 		t.Errorf("shop = %+v", s)
 	}
 	if c.Listen.Addr != "0.0.0.0:8080" || !c.Listen.BehindProxy || c.StartupGracePeriod.D() != 90*time.Second ||
-		c.LogLevel != "debug" || c.Admin.Tokens["owner"] != "at" {
+		c.LogLevel != "debug" || c.Admin.Tokens["owner"] != "at0123456789abcdef" {
 		t.Errorf("top level = %+v", c)
 	}
 	if !slices.Equal(n.Tools.Allow, []string{"search", "read"}) || n.Prompts.Allow == nil || len(n.Prompts.Allow) != 0 ||
@@ -164,7 +164,7 @@ func TestEscrowKeys(t *testing.T) {
 
 func TestMetrics(t *testing.T) {
 	t.Parallel()
-	const tail = "auth: {tokens: {a: s}}\nadmin: {tokens: {o: t}}\nservers:\n  a:\n    stdio: {command: x}\n"
+	const tail = "auth: {tokens: {a: s}}\nadmin: {tokens: {o: t0123456789abcdef}}\nservers:\n  a:\n    stdio: {command: x}\n"
 	for _, addr := range []string{"127.0.0.1:9464", "[::1]:9464", "localhost:9464", "127.0.0.2:0"} {
 		c, err := Parse([]byte("version: 1\nmetrics: {enabled: true, addr: '"+addr+"'}\n"+tail), noEnv)
 		if err != nil {
@@ -438,7 +438,7 @@ func TestLoad(t *testing.T) {
 	}
 	if _, err := Load(path, env(map[string]string{
 		"NOTES_DB": "d", "NOTES_TOKEN": "t", "SHOP_KEY": "k",
-		"LAPTOP_TOKEN": "l", "ADMIN_TOKEN": "a", "PHONE_TOKEN": "p",
+		"LAPTOP_TOKEN": "l", "ADMIN_TOKEN": "a0123456789abcdef", "PHONE_TOKEN": "p",
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +744,7 @@ policies:
 		"policies: {agent: {servers: {b: {tools: {allow: [x]}}}}}":            "policies.agent.servers.b: the server does not accept the token agent",
 		"policies: {bot: {servers: {a: {tools: {allow: [x]}}}}}":              "policies.bot.servers.a: the server does not accept the token bot",
 		"policies: {agent: {servers: {pub: {tools: {allow: [x]}}}}}":          "policies.agent.servers.pub: the server is public",
-		"policies: {agent: {servers: {a: {}}}}":                               "policies.agent.servers.a: needs at least one of tools, prompts and resources",
+		"policies: {agent: {servers: {a: {}}}}":                               "policies.agent.servers.a: needs at least one of tools, prompts, resources and approve",
 		"policies: {agent: {servers: {}}}":                                    "policies.agent.servers: must name at least one server",
 		"policies: {agent: {}}":                                               "policies.agent.servers: must name at least one server",
 		"policies: {agent: {servers: {a: {tools: {allow: [x], deny: [y]}}}}}": "policies.agent.servers.a.tools: needs exactly one of allow and deny, or none",
@@ -897,5 +897,74 @@ func TestDecodeErrorHidesValueWithBacktick(t *testing.T) {
 	_, err := Parse([]byte(doc), noEnv)
 	if err == nil || strings.Contains(err.Error(), "hunt") || !strings.Contains(err.Error(), "value not shown") {
 		t.Errorf("error = %v", err)
+	}
+}
+
+func TestApprovals(t *testing.T) {
+	t.Parallel()
+	const head = "version: 1\nauth: {tokens: {phone: s}}\n"
+	c, err := Parse([]byte(head+`admin: {tokens: {owner: t0123456789abcdef}}
+approvals:
+  timeout: 2m
+  webhook: {url: "https://relay.example.com/hook", secret: "0123456789abcdef", linkURL: "https://gate.example.com/base"}
+policies:
+  phone:
+    servers:
+      a: {approve: [echo]}
+servers:
+  a:
+    stdio: {command: x}
+    approve: [send_message, "delete_*", "*"]
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Approvals.Timeout.D() != 2*time.Minute || c.Approvals.Webhook.LinkURL != "https://gate.example.com/base" ||
+		!slices.Equal(c.Servers["a"].Approve, []string{"send_message", "delete_*", "*"}) ||
+		!slices.Equal(c.ServerPolicy("phone", "a").Approve, []string{"echo"}) {
+		t.Errorf("approvals: %+v %+v", c.Approvals, c.Servers["a"].Approve)
+	}
+	d, err := Parse([]byte(head+"servers:\n  a: {stdio: {command: x}}\n"), noEnv)
+	if err != nil || d.Approvals.Timeout.D() != DefaultApprovalTimeout || d.Approvals.Webhook != nil {
+		t.Errorf("defaults: %+v %v", d.Approvals, err)
+	}
+	// The links alone are enough to decide.
+	if _, err := Parse([]byte(head+"approvals: {webhook: {url: 'http://127.0.0.1:8000/h', linkURL: 'https://gate.example.com'}}\nservers:\n  a: {stdio: {command: x}, approve: [x]}\n"), noEnv); err != nil {
+		t.Errorf("links only: %v", err)
+	}
+
+	const srv = "servers:\n  a:\n    stdio: {command: x}\n"
+	const admin = "admin: {tokens: {owner: t0123456789abcdef}}\n"
+	cases := []struct{ name, doc, want string }{
+		{"nobody decides", head + srv + "    approve: [x]\n", "servers.a.approve: holds calls that no one can decide"},
+		{"nobody decides for a token", head + "policies: {phone: {servers: {a: {approve: [x]}}}}\n" + srv, "policies.phone.servers.a.approve: holds calls that no one can decide"},
+		{"empty list", head + admin + srv + "    approve: []\n", "servers.a.approve: is empty"},
+		{"empty pattern", head + admin + srv + "    approve: ['']\n", "servers.a.approve[0]: cannot be empty"},
+		{"inner star", head + admin + srv + "    approve: ['a*b']\n", "servers.a.approve[0]: may hold * only at its end"},
+		{"twice", head + admin + srv + "    approve: [x, x]\n", "servers.a.approve[1]: is listed twice"},
+		{"aggregate name", head + admin + "policies: {phone: {servers: {a: {approve: [a__x]}}}}\n" + srv, "policies.phone.servers.a.approve[0]: names the tool as the aggregate endpoint does"},
+		{"short timeout", head + admin + "approvals: {timeout: 500ms}\n" + srv, "approvals.timeout: must be between 1s and 1h"},
+		{"long timeout", head + admin + "approvals: {timeout: 2h}\n" + srv, "approvals.timeout: must be between 1s and 1h"},
+		{"no url", head + admin + "approvals: {webhook: {secret: 0123456789abcdef}}\n" + srv, "approvals.webhook.url: is required"},
+		{"plain http", head + admin + "approvals: {webhook: {url: 'http://relay.example.com/h'}}\n" + srv, "approvals.webhook.url: must be https"},
+		{"query", head + admin + "approvals: {webhook: {url: 'https://relay.example.com/h?k=v'}}\n" + srv, "approvals.webhook.url: must not contain a query"},
+		{"link query", head + admin + "approvals: {webhook: {url: 'https://relay.example.com/h', linkURL: 'https://gate.example.com/?a=b'}}\n" + srv, "approvals.webhook.linkURL: must not contain a query"},
+		{"short admin token", head + "admin: {tokens: {owner: short}}\n" + srv, "admin.tokens.owner: must be at least 16 characters"},
+		{"admin token of a client", "version: 1\nauth: {tokens: {phone: samesecret0123456789}}\nadmin: {tokens: {owner: samesecret0123456789}}\n" + srv, "admin.tokens.owner: has the value of a client token"},
+		{"admin token of a server's client", head + "admin: {tokens: {owner: samesecret0123456789}}\n" + srv + "    auth: {tokens: {bot: samesecret0123456789}}\n", "admin.tokens.owner: has the value of a client token"},
+		{"server pattern in aggregate form", head + admin + srv + "    approve: [a__send]\n", "servers.a.approve[0]: names the tool as the aggregate endpoint does"},
+		{"short secret", head + admin + "approvals: {webhook: {url: 'https://relay.example.com/h', secret: short}}\n" + srv, "approvals.webhook.secret: must be at least 16 characters"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(c.doc), noEnv)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error = %v, want it to contain %q", err, c.want)
+			}
+			if err != nil && strings.Contains(err.Error(), "short") {
+				t.Errorf("the error quotes the secret: %v", err)
+			}
+		})
 	}
 }
