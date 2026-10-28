@@ -110,6 +110,23 @@ func TestLearnedPinIsKept(t *testing.T) {
 	}
 }
 
+// TestLearnedPinPrunedOnReload checks that a reload that changes a pinned server's arguments
+// drops its pin from the file.
+func TestLearnedPinPrunedOnReload(t *testing.T) {
+	dir := t.TempDir()
+	tune := func(o *downstream.Options) { o.DiscoverTimeout = 500 * time.Millisecond }
+	r := startGate(t, configDoc("", map[string]string{"legacy": stdioServer(t, testkit.Fake{SilentDiscover: true}, "")}),
+		gateOpts{stateDir: dir, tune: tune})
+	r.waitReady(t, "legacy")
+	if pins := readPins(t, dir); pins["legacy"].Version == "" {
+		t.Fatalf("no pin learned: %+v", pins)
+	}
+	r.reload(t, configDoc("", map[string]string{"legacy": stdioServer(t, testkit.Fake{ProtocolVersions: []string{"2025-11-25"}}, "")}))
+	if pins := readPins(t, dir); len(pins) != 0 {
+		t.Errorf("pins after the reload: %+v", pins)
+	}
+}
+
 type pinEntry struct{ Version, Transport string }
 
 // readPins reads the pins file in dir.
