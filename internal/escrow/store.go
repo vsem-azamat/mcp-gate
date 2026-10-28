@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -61,6 +62,8 @@ type store struct {
 	byDedup    map[string]string
 	maxEntries int
 	totalBytes int
+	// stored counts the entries inserted under a new handle.
+	stored atomic.Uint64
 }
 
 func newStore(maxEntries int, logger *slog.Logger) *store {
@@ -146,12 +149,20 @@ func (s *store) insert(e *entry, ttl time.Duration) (string, error) {
 		e.handle, e.created, e.expires = handle, now, expires
 		s.entries[handle] = e
 		s.totalBytes += len(e.value)
+		s.stored.Add(1)
 		if e.dedupKey != "" {
 			s.byDedup[e.dedupKey] = handle
 		}
 		return handle, nil
 	}
 	return "", errors.New("could not allocate an escrow handle")
+}
+
+// len returns the number of entries held, expired ones not yet swept included.
+func (s *store) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
 }
 
 // get returns a copy of a live entry, with its own copy of the value.

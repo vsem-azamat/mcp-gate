@@ -110,6 +110,7 @@ func (e *Escrow) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			status = http.StatusUnauthorized
+			e.authFailures.Add(1)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="escrow"`)
 			http.Error(w, "Unauthorized", status)
 			return

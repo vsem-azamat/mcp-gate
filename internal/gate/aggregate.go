@@ -26,6 +26,8 @@ type aggregate struct {
 	tokens  map[string]*upstream.Tokens // by member; nil for a public one
 	mirrors map[string]*proxy.Mirror    // by member
 	views   map[string]*proxy.View      // by viewKey of the access it serves
+	// rejected, if set, counts a request refused with 401.
+	rejected func()
 }
 
 // grant is what one request to the aggregate route may reach.
@@ -90,7 +92,10 @@ func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*r
 	if prev.keeps(key, mirrors) {
 		return prev, nil
 	}
-	a := &aggregate{members: members, tokens: map[string]*upstream.Tokens{}, mirrors: map[string]*proxy.Mirror{}, views: map[string]*proxy.View{}}
+	a := &aggregate{
+		members: members, tokens: map[string]*upstream.Tokens{}, mirrors: map[string]*proxy.Mirror{}, views: map[string]*proxy.View{},
+		rejected: g.rejected(config.AggregatePath),
+	}
 	for _, name := range members {
 		a.mirrors[name] = sn.servers[name].mirror
 		if t := tokens[name]; t != nil {
@@ -100,7 +105,7 @@ func (g *Gate) aggregateRoute(sn *snapshot, prev *route, again http.Handler) (*r
 	if len(members) == 0 {
 		g.logger.Warn("the aggregate endpoint serves no server: every server it would serve is disabled")
 	}
-	agg, err := proxy.NewAggregate(proxy.AggregateOptions{Name: sn.cfg.Name, Version: g.opts.Version, Members: mirrors, Logger: g.logger})
+	agg, err := proxy.NewAggregate(proxy.AggregateOptions{Name: sn.cfg.Name, Version: g.opts.Version, Members: mirrors, Logger: g.logger, Audit: g.audit})
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +198,7 @@ func (a *aggregate) access(header string) (map[string]string, bool) {
 
 // authorize lets through only requests that may reach some member, with their grant in the
 // context and their access in the TokenInfo the MCP handlers see. Others get 401 with the body
-// "Unauthorized".
+// "Unauthorized", and are counted.
 func (a *aggregate) authorize(next http.Handler) http.Handler {
 	return upstream.Authorize(func(r *http.Request) (context.Context, *auth.TokenInfo, bool) {
 		access, ok := a.access(r.Header.Get("Authorization"))
@@ -206,7 +211,7 @@ func (a *aggregate) authorize(next http.Handler) http.Handler {
 		}
 		gr := &grant{access: access, principal: principals(access), view: view}
 		return context.WithValue(r.Context(), grantKey{}, gr), proxy.AccessInfo(gr.principal, gr.access), true
-	}, next)
+	}, a.rejected, next)
 }
 
 // principals joins the distinct token names of an access, sorted.

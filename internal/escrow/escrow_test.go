@@ -211,6 +211,26 @@ func TestReplacer(t *testing.T) {
 	}
 }
 
+func TestStats(t *testing.T) {
+	t.Parallel()
+	e := New(Options{KeyHash: testHash()})
+	r := e.Replacer(Source{Server: "chat"})
+	marker := r.Replace(redact.Finding{Kind: "password", Value: "Qwerty-12345"})
+	r.Replace(redact.Finding{Kind: "password", Value: "Qwerty-12345"})                                  // the same handle
+	e.Replacer(Source{Server: "mail"}).Replace(redact.Finding{Kind: "password", Value: "Qwerty-12345"}) // another server's
+	m := markerRE.FindStringSubmatch(marker)
+	request(t, e, http.MethodGet, Route+m[2], "Bearer wrong")
+	request(t, e, http.MethodGet, Route+m[2], "")
+	request(t, e, http.MethodGet, Route+m[2], "Bearer "+testKey)
+	if st := e.Stats(); st != (Stats{Entries: 2, Stored: 2, AuthFailures: 2}) {
+		t.Errorf("stats %+v", st)
+	}
+	request(t, e, http.MethodDelete, Route+m[2], "Bearer "+testKey)
+	if st := e.Stats(); st.Entries != 1 || st.Stored != 2 {
+		t.Errorf("stats after a delete %+v", st)
+	}
+}
+
 func TestHTTPContract(t *testing.T) {
 	t.Parallel()
 	e := New(Options{KeyHash: testHash()})

@@ -54,7 +54,8 @@ func TestRequireToken(t *testing.T) {
 		principal = Principal(auth.TokenInfoFromContext(r.Context()))
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := RequireToken(NewTokens(map[string]string{"laptop": "secret-a"}), next)
+	rejected := 0
+	h := RequireToken(NewTokens(map[string]string{"laptop": "secret-a"}), func() { rejected++ }, next)
 	for _, c := range []struct {
 		header string
 		code   int
@@ -82,6 +83,9 @@ func TestRequireToken(t *testing.T) {
 		if c.code == http.StatusNoContent && principal != "laptop" {
 			t.Errorf("%q: principal %q", c.header, principal)
 		}
+	}
+	if rejected != 3 {
+		t.Errorf("rejected called %d times, want 3", rejected)
 	}
 	if Principal(nil) != "" {
 		t.Error("Principal(nil) is not empty")
@@ -223,7 +227,8 @@ func TestHealthHandler(t *testing.T) {
 }
 
 func TestStatusHandler(t *testing.T) {
-	h := StatusHandler(NewTokens(map[string]string{"owner": "admin-secret"}), func() any { return map[string]int{"servers": 1} })
+	rejected := 0
+	h := StatusHandler(NewTokens(map[string]string{"owner": "admin-secret"}), func() { rejected++ }, func() any { return map[string]int{"servers": 1} })
 	for header, want := range map[string]int{"Bearer admin-secret": http.StatusOK, "admin-secret": http.StatusOK, "Bearer nope": http.StatusUnauthorized, "": http.StatusUnauthorized} {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_status", nil)
 		if header != "" {
@@ -237,6 +242,9 @@ func TestStatusHandler(t *testing.T) {
 		if want == http.StatusOK && !strings.Contains(rec.Body.String(), `"servers": 1`) {
 			t.Errorf("%q: body %q", header, rec.Body.String())
 		}
+	}
+	if rejected != 2 {
+		t.Errorf("rejected called %d times, want 2", rejected)
 	}
 }
 
@@ -358,11 +366,28 @@ func TestAuthorizeHidesTheSecret(t *testing.T) {
 		seen = r.Header.Values("Authorization")
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := RequireToken(NewTokens(map[string]string{"laptop": "secret-a"}), next)
+	h := RequireToken(NewTokens(map[string]string{"laptop": "secret-a"}), nil, next)
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/s/mcp", nil)
 	req.Header.Set("Authorization", "Bearer secret-a")
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if len(seen) != 1 || strings.Contains(seen[0], "secret-a") {
 		t.Errorf("the handler sees the header %q", seen)
+	}
+}
+
+func TestAllowLoopbackHosts(t *testing.T) {
+	h := AllowLoopbackHosts(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	for host, want := range map[string]int{
+		"localhost": http.StatusNoContent, "LOCALHOST:9464": http.StatusNoContent, "127.0.0.1:9464": http.StatusNoContent,
+		"127.0.0.2": http.StatusNoContent, "[::1]": http.StatusNoContent, "[::1]:9464": http.StatusNoContent,
+		"evil.example.com": http.StatusForbidden, "evil.example.com:9464": http.StatusForbidden, "192.0.2.1:9464": http.StatusForbidden, "": http.StatusForbidden,
+	} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_metrics", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Errorf("Host %q: %d, want %d", host, rec.Code, want)
+		}
 	}
 }

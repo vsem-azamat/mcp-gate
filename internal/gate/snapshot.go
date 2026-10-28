@@ -245,7 +245,11 @@ func (g *Gate) build(cfg *config.Config, prev *snapshot) (sn *snapshot, err erro
 	if len(cfg.Admin.Tokens) > 0 {
 		admin := upstream.NewTokens(cfg.Admin.Tokens)
 		mux.Handle("GET /_status", upstream.Recover(g.logger, "_status",
-			upstream.StatusHandler(admin, func() any { return g.Status() })))
+			upstream.StatusHandler(admin, g.rejected("/_status"), func() any { return g.Status() })))
+		if cfg.Metrics.Enabled {
+			mux.Handle("GET "+metricsRoute, upstream.Recover(g.logger, "_metrics",
+				upstream.RequireAdmin(admin, g.rejected(metricsRoute), g.metricsHandler())))
+		}
 	}
 	sn.mux = mux
 	return sn, nil
@@ -305,7 +309,7 @@ func (g *Gate) newServer(cfg *config.Config, name string, s *config.Server, old 
 	}
 	mirror := proxy.New(proxy.Options{
 		Name: name, Version: g.opts.Version, Policy: policy.New(s), Tokens: policy.NewTokens(cfg, name), ForwardMeta: s.ForwardMeta,
-		Redaction: redaction, Files: files, Logger: g.logger, Source: rt.src,
+		Redaction: redaction, Files: files, Logger: g.logger, Audit: g.audit, Source: rt.src,
 	})
 	return &server{name: name, cfg: s, rt: rt, sup: rt.sup, mirror: mirror, mkey: mkey, engine: engine}, true, nil
 }
@@ -317,6 +321,7 @@ func (g *Gate) newRuntime(cfg *config.Config, name string, s *config.Server, key
 	o.Redactor = engine
 	o.Notifications = src.Notifications()
 	o.OnSession = src.OnSession
+	o.OnRestart = func() { g.metrics.Restarted(name) }
 	o.LearnedPin = g.pins.get(name)
 	o.OnPinLearned = func(v string) {
 		if err := g.pins.set(name, v); err != nil {
@@ -349,7 +354,8 @@ func (g *Gate) serverRoute(sn *snapshot, s *server, prev *route, again http.Hand
 	var authorize func(http.Handler) http.Handler
 	if tokens != nil {
 		t := upstream.NewTokens(tokens)
-		authorize = func(h http.Handler) http.Handler { return upstream.RequireToken(t, h) }
+		rejected := g.rejected("/" + s.name + "/mcp")
+		authorize = func(h http.Handler) http.Handler { return upstream.RequireToken(t, rejected, h) }
 	}
 	rt.handler = g.chain(sn, rt, s.name, s.cfg.Log.Requests, authorize,
 		func(*http.Request) (bool, bool) {

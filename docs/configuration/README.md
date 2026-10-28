@@ -89,7 +89,9 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `startupGracePeriod` | `30s` | Longest time `/_readyz` reports `initializing` while servers connect |
 | `logLevel` | `info` | `debug`, `info`, `warn` or `error`; `debug` adds the servers' own log messages |
 | `auth.tokens` | none | Client tokens by name, accepted by every server that inherits them. The name identifies the caller in the audit log |
-| `admin.tokens` | none | Tokens by name that may read `/_status`; without them `/_status` is 404 |
+| `admin.tokens` | none | Tokens by name that may read `/_status`, and `/_metrics` with `metrics.enabled`; without them `/_status` is 404 |
+| `metrics.enabled` | `false` | Serve Prometheus metrics at `/_metrics` on `listen.addr` to `admin.tokens` tokens; needs `admin.tokens` (see [Metrics](../operations/metrics.md)) |
+| `metrics.addr` | none | A loopback `host:port` (or `localhost:port`), other than `listen.addr`, that serves only `/_metrics`, without a token, for a scraper on the same host: every local user and process can read it. Requests whose Host is not a loopback name get 403. Read at start |
 | `escrow.keyHash` | none | Hex SHA-256 of the escrow API key, as `${VAR}`. Setting `MCP_GATE_ESCROW_KEY_SHA256` in the environment instead needs no config; a variable named here is kept from the stdio servers too. The escrow is on when a key hash comes from here, `escrow.keyHashFile` or the environment (see [serve](../commands/serve.md#escrow)) |
 | `escrow.keyHashFile` | none | Absolute path of a file that holds the hex SHA-256, such as a systemd credential (`${CREDENTIALS_DIRECTORY}/escrow-key-sha256`) or a mounted secret. Read at start; it must be a regular file owned by root or the gate's user (any owner when the gate runs as root) and not writable by group or others. Excludes `keyHash` |
 | `escrow.ttl` | `24h` | How long the escrow keeps a secret, unless its server sets `redact.escrowTTL` |

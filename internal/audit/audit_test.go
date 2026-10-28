@@ -71,3 +71,15 @@ func TestKind(t *testing.T) {
 		t.Error("the kinds are not distinct bits")
 	}
 }
+
+type collect []Record
+
+func (c *collect) Write(r Record) { *c = append(*c, r) }
+
+func TestTee(t *testing.T) {
+	var a, b collect
+	Tee(&a, &b).Write(Record{Server: "s", Kind: Tool, Name: "echo", Outcome: OK})
+	if len(a) != 1 || len(b) != 1 || a[0].Name != "echo" || b[0].Server != "s" {
+		t.Errorf("tee: %v %v", a, b)
+	}
+}

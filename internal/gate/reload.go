@@ -47,10 +47,11 @@ func (g *Gate) Reload(ctx context.Context, load func() (*config.Config, error)) 
 		defer g.notify(systemd.Ready)
 	}
 	cfg, err := load()
-	if err != nil {
-		return err
+	if err == nil {
+		err = g.apply(ctx, cfg)
 	}
-	return g.apply(ctx, cfg)
+	g.metrics.Reloaded(err == nil)
+	return err
 }
 
 // apply swaps in the snapshot of cfg; see Reload. The caller holds mu.

@@ -108,12 +108,27 @@ type Record struct {
 	TokenPolicy policy.Decision
 	// Redactions counts the findings replaced in the result, and the files withheld.
 	Redactions int64
+	// Listed reports a tool or prompt that was in the server's mirrored catalog when the request
+	// ended and that the caller's token policy does not hide; false for a resource read and for a
+	// request no server saw.
+	Listed bool
 }
 
 // Sink receives the audit records. Write is called once per request, on the request's
 // goroutine, and must not block.
 type Sink interface {
 	Write(Record)
+}
+
+// Tee returns the sink that hands each record to every one of sinks, in order.
+func Tee(sinks ...Sink) Sink { return tee(sinks) }
+
+type tee []Sink
+
+func (t tee) Write(r Record) {
+	for _, s := range t {
+		s.Write(r)
+	}
 }
 
 // Log returns the sink that writes each record as one "call" line to logger, at info level:

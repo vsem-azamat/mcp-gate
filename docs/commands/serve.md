@@ -73,6 +73,7 @@ A resource read passes when the resource listed under its URI passes, or, when n
 | `/_healthz` | none | 200 `ok` while the process serves |
 | `/_readyz` | none | 200 `ok`; 503 `initializing` during `startupGracePeriod`, `degraded` (with `unhealthy`) while a connected server is down or (with `needsLogin`) while a server needs an OAuth login, `unavailable` when no server ever connected |
 | `/_status` | an `admin.tokens` token | Per-server state, protocol version, pins, restarts, last error, PID and memory, catalog counts, call counts |
+| `/_metrics` | an `admin.tokens` token; none on `metrics.addr` | Prometheus metrics, with `metrics.enabled` or `metrics.addr` (see [Metrics](../operations/metrics.md)) |
 
 ```console
 $ curl -s http://127.0.0.1:9090/_readyz
@@ -147,7 +148,7 @@ SIGHUP (`systemctl reload mcp-gate`) makes the gate read its config file again. 
 | A server's `stdio` or `http` (command, arguments, environment, URL, headers, OAuth), `callTimeout`, `maxMessageBytes`, `protocolVersion`, `probeInterval`, `restart`, `disabled`, or the config's `name` | The server restarts once the requests in flight on the routes that reach it have ended (at most 10 seconds); meanwhile requests to it are held until it is back, at most `startupGracePeriod`. Added servers start after that, and a replacement waits for an old process that is slow to end |
 | A server's `tools`, `prompts`, `resources`, `redact`, `forwardMeta`; the token policies on it; `escrow.ttl` | At once, the server keeps running; the `subscriptions/listen` streams of its routes end |
 | Tokens (`auth`, a server's `auth`), a server's `log`, `aggregate`, `listen.allowedHosts`, `listen.behindProxy`, `listen.trustedProxies` | At once: a removed token gets 401 from its next request, and a call it began before completes. Only the routes whose tokens or settings changed are replaced, ending their listen streams |
-| `logLevel`, `admin` | At once |
-| `listen.addr`, `escrow` (but `escrow.ttl`), `startupGracePeriod` | Only at the next restart; the reload logs a warning |
+| `logLevel`, `admin`, `metrics.enabled` | At once; the metrics' counts are kept |
+| `listen.addr`, `metrics.addr`, `escrow` (but `escrow.ttl`), `startupGracePeriod` | Only at the next restart; the reload logs a warning |
 
 A request whose body is still arriving when a reload revokes its token, or that is held while the gate starts, is checked again under the new config. `${VAR}` values come from the environment the gate started with, so a token added to the environment needs a restart. Each reload logs `config reloaded` with the servers added, restarted, removed and kept. Under systemd, once startup is over, the gate reports `RELOADING=1` and then `READY=1`; `systemctl reload` itself returns as soon as the signal is sent, so the outcome of a reload is in the log. A SIGHUP during startup is applied without a report.

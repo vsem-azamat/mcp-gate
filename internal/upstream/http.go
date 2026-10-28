@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/vsem-azamat/mcp-gate/internal/config"
 )
 
 // Limits of the HTTP listener.
@@ -406,6 +408,22 @@ func NewRemote(behindProxy bool, trusted []netip.Prefix) RemoteFunc {
 		}
 		return host
 	}
+}
+
+// AllowLoopbackHosts answers 403 to a request whose Host is not localhost or a loopback address, with
+// any port.
+func AllowLoopbackHosts(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := strings.Trim(r.Host, "[]")
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = h
+		}
+		if !config.LoopbackHost(host) {
+			http.Error(w, "Forbidden: invalid Host header", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // AllowHosts rejects with 403 a request whose Host is not in hosts. An entry without a port

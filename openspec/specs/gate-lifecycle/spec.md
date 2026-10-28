@@ -61,7 +61,7 @@
 
 ### Requirement: Status
 
-When `admin.tokens` is set, `GET /_status` SHALL return, to a request carrying one of those tokens as on a route, an indented JSON object with the gate's `name`, `version`, whether startup completed (`started`), and per enabled server its state, whether its catalog was listed (`mounted`), protocol version, whether it runs on an automatic pin and the pin it learned, sessions, restarts, the last error (redacted) and its time, the child's PID and resident memory, the last 20 lines of the child's stderr while it is not ready, the counts of tools, prompts, resources and resource templates, the time of the last listing, and the counts of calls, failed calls and dropped notifications. Others SHALL get 401. Without admin tokens the path SHALL be 404. The answer SHALL carry `Cache-Control: no-store`.
+When `admin.tokens` is set, `GET /_status` SHALL return, to a request carrying one of those tokens as on a route, an indented JSON object with the gate's `name`, `version`, whether startup completed (`started`), and per enabled server its state, whether its catalog was listed (`mounted`), protocol version, whether it runs on an automatic pin and the pin it learned, sessions, restarts, the last error (redacted) and its time, the child's PID and resident memory, the last 20 lines of the child's stderr while it is not ready, the counts of tools, prompts, resources and resource templates, the time of the last listing, and the counts of calls, failed calls and dropped notifications. Others SHALL get 401. Without admin tokens the path SHALL be 404. The answer SHALL carry `Cache-Control: no-store`. `/_metrics` is specified in the metrics spec.
 
 #### Scenario: Status
 
