@@ -75,22 +75,11 @@ func loadPins(dir string) (*pinStore, error) {
 	return s, nil
 }
 
-// transportHash identifies what a server's pin was learned on: the command, arguments and
-// working directory of a stdio server, or the URL of an HTTP one. The environment and headers
-// are left out, so that the file holds nothing derived from secrets kept there.
+// transportHash identifies what a server's pin was learned on: the SHA-256 of its command,
+// arguments and working directory, or of its URL, as written in the config (config.Server's
+// Transport), so that the file holds nothing derived from the values of variables.
 func transportHash(s *config.Server) string {
-	var id any
-	switch {
-	case s.Stdio != nil:
-		id = map[string]any{"command": s.Stdio.Command, "args": s.Stdio.Args, "cwd": s.Stdio.Cwd}
-	case s.HTTP != nil:
-		id = map[string]any{"url": s.HTTP.URL}
-	}
-	data, err := json.Marshal(id)
-	if err != nil {
-		panic(err) // strings always encode
-	}
-	sum := sha256.Sum256(data)
+	sum := sha256.Sum256([]byte(s.Transport))
 	return hex.EncodeToString(sum[:])
 }
 

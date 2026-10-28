@@ -12,6 +12,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -301,6 +302,26 @@ type Server struct {
 	// ForwardMeta lists the _meta keys of a client request that are passed to the server, by
 	// exact name. Others are dropped.
 	ForwardMeta []string `yaml:"forwardMeta,omitempty"`
+	// Transport is set by Parse: the server's command, arguments and working directory, or its
+	// URL, as written, before variables are expanded, encoded as JSON. It identifies the server
+	// without holding the values of the variables it names.
+	Transport string `yaml:"-"`
+}
+
+// transportText returns what Server.Transport holds for s, before expansion.
+func transportText(s *Server) string {
+	var id any
+	switch {
+	case s.Stdio != nil:
+		id = map[string]any{"command": s.Stdio.Command, "args": s.Stdio.Args, "cwd": s.Stdio.Cwd}
+	case s.HTTP != nil:
+		id = map[string]any{"url": s.HTTP.URL}
+	}
+	data, err := json.Marshal(id)
+	if err != nil {
+		panic(err) // strings always encode
+	}
+	return string(data)
 }
 
 // Filter is an allow list or a deny list; exactly one is set.
@@ -475,7 +496,16 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	}
 	skip := map[string]bool{}
 	keyHashVars := varNames(c.Escrow.KeyHash)
+	transports := map[string]string{} // as written; set after expansion, which would expand them
+	for name, srv := range c.Servers {
+		if srv != nil {
+			transports[name] = transportText(srv)
+		}
+	}
 	expandAll(&c, lookup, &errs, skip)
+	for name, t := range transports {
+		c.Servers[name].Transport = t
+	}
 	c.Escrow.KeyHashVars = keyHashVars
 	home, _ := lookup("HOME")
 	c.validate(&errs, skip, home)

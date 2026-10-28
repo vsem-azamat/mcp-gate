@@ -816,3 +816,38 @@ func TestDecodeErrorsWithTheRest(t *testing.T) {
 		t.Errorf("duplicate key: %v", err)
 	}
 }
+
+// TestServerTransport checks that Server.Transport holds the transport as written: variables are
+// not expanded in it, and the environment and headers are not part of it.
+func TestServerTransport(t *testing.T) {
+	t.Parallel()
+	parse := func(server string) string {
+		t.Helper()
+		c, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n"+server), func(name string) (string, bool) {
+			return "value-of-" + name, true
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Servers["a"].Transport
+	}
+	stdio := parse("    stdio: {command: /bin/a, args: ['--token=${TOKEN}'], env: {K: v}}\n")
+	if strings.Contains(stdio, "value-of") || !strings.Contains(stdio, "${TOKEN}") {
+		t.Errorf("stdio transport = %s", stdio)
+	}
+	if other := parse("    stdio: {command: /bin/a, args: ['--token=${TOKEN}'], env: {K: other}}\n"); other != stdio {
+		t.Errorf("the environment changes the transport: %s", other)
+	}
+	for _, changed := range []string{
+		"    stdio: {command: /bin/b, args: ['--token=${TOKEN}']}\n",
+		"    stdio: {command: /bin/a, args: ['--token=${OTHER}']}\n",
+		"    stdio: {command: /bin/a, args: ['--token=${TOKEN}'], cwd: /srv}\n",
+	} {
+		if parse(changed) == stdio {
+			t.Errorf("%q keeps the transport", changed)
+		}
+	}
+	if h := parse("    http: {url: 'https://${HOST}/mcp', headers: {X-Key: '${KEY}'}}\n"); h != `{"url":"https://${HOST}/mcp"}` {
+		t.Errorf("http transport = %s", h)
+	}
+}
