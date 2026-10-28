@@ -13,7 +13,7 @@ The config is validated as `check` does; an invalid one exits with status 2 befo
 
 Under systemd the gate serves the listening socket that a socket unit passes it (`LISTEN_FDS`), instead of opening `listen.addr`, and reports `READY=1` once startup is over and `STOPPING=1` at shutdown (`NOTIFY_SOCKET`). With the socket held by systemd, a restart refuses no connection and fails no call; see [systemd](../operations/systemd.md#restarts) for the units and what a restart keeps.
 
-`-state-dir` is where the gate keeps the protocol pins it learns (`pins.json`), so that a server that ignores `server/discover` does not cost the 5 second sub-deadline again after a restart, and the OAuth grants (`oauth/<server>.json`, see [auth](auth.md)). It defaults to the first directory of `$STATE_DIRECTORY`, which systemd sets for a unit with `StateDirectory=`; without one, pins last only while the process runs and OAuth servers cannot log in. A pin holds while the server's command, arguments and working directory (or URL), as written in the config, stay the same; a changed or removed server loses its pin. Delete `pins.json` to make the gate try discover again.
+`-state-dir` is where the gate keeps the protocol pins it learns (`pins.json`), so that a server that ignores `server/discover` does not cost the 5 second sub-deadline again after a restart, the OAuth grants (`oauth/<server>.json`, see [auth](auth.md)), and the tool pins (`toolpins/<server>.json`, see [toolpins](toolpins.md)). It defaults to the first directory of `$STATE_DIRECTORY`, which systemd sets for a unit with `StateDirectory=`; without one, protocol and tool pins last only while the process runs, OAuth servers cannot log in, and a server with `toolPins: hold` stops the start. A pin holds while the server's command, arguments and working directory (or URL), as written in the config, stay the same; a changed or removed server loses its pin. Delete `pins.json` to make the gate try discover again.
 
 An OAuth server without a usable grant is `needs-login`: it sends nothing to the server, its route answers 503 until it has connected once, and its calls fail. It picks up a login made with `mcp-gate auth login` at its next attempt, within `restart.maxBackoff`, without a restart.
 
@@ -137,6 +137,12 @@ Every forwarded call writes one `call` line with the server, the token name (`pr
 
 A call a token's policy hides is a line with outcome `denied` and `tokenPolicy` `deny`.
 
+When a server lists a tool whose definition differs from its pin, or a tool it has not listed before, the gate writes one `toolPin` line at warn level, once per definition and action and at most 20 a minute per server: the server, the tool, the change (`changed` or `added`), the hashes of the accepted (`pinned`, empty for `added`) and the listed definition, and what the gate does (`served`, or `held` under `toolPins: hold`). [toolpins](toolpins.md) shows what changed and accepts it.
+
+```json
+{"time":"…","level":"WARN","msg":"toolPin","server":"notes","tool":"read_note","change":"changed","pinned":"sha256:9f2c…","listed":"sha256:41ab…","action":"held"}
+```
+
 With `log.requests`, each HTTP request to the route also writes a `request` line with its method, status, duration and remote address; `aggregate.log.requests` does the same for `/mcp`, with `server` `/mcp`. A call the aggregate endpoint refuses before any server sees it (a name of a server the token does not reach, say) is a `call` line with outcome `denied` and an empty `server`.
 
 ## Reload
@@ -146,9 +152,9 @@ SIGHUP (`systemctl reload mcp-gate`) makes the gate read its config file again. 
 | Change | Effect |
 | --- | --- |
 | A server's `stdio` or `http` (command, arguments, environment, URL, headers, OAuth), `callTimeout`, `maxMessageBytes`, `protocolVersion`, `probeInterval`, `restart`, `disabled`, or the config's `name` | The server restarts once the requests in flight on the routes that reach it have ended (at most 10 seconds); meanwhile requests to it are held until it is back, at most `startupGracePeriod`. Added servers start after that, and a replacement waits for an old process that is slow to end |
-| A server's `tools`, `prompts`, `resources`, `redact`, `forwardMeta`; the token policies on it; `escrow.ttl` | At once, the server keeps running; the `subscriptions/listen` streams of its routes end |
+| A server's `tools`, `prompts`, `resources`, `redact`, `forwardMeta`, `toolPins`; the token policies on it; `escrow.ttl` | At once, the server keeps running; the `subscriptions/listen` streams of its routes end |
 | Tokens (`auth`, a server's `auth`), a server's `log`, `aggregate`, `listen.allowedHosts`, `listen.behindProxy`, `listen.trustedProxies` | At once: a removed token gets 401 from its next request, and a call it began before completes. Only the routes whose tokens or settings changed are replaced, ending their listen streams |
 | `logLevel`, `admin`, `metrics.enabled` | At once; the metrics' counts are kept |
 | `listen.addr`, `metrics.addr`, `escrow` (but `escrow.ttl`), `startupGracePeriod` | Only at the next restart; the reload logs a warning |
 
-A request whose body is still arriving when a reload revokes its token, or that is held while the gate starts, is checked again under the new config. `${VAR}` values come from the environment the gate started with, so a token added to the environment needs a restart. Each reload logs `config reloaded` with the servers added, restarted, removed and kept. Under systemd, once startup is over, the gate reports `RELOADING=1` and then `READY=1`; `systemctl reload` itself returns as soon as the signal is sent, so the outcome of a reload is in the log. A SIGHUP during startup is applied without a report.
+A request whose body is still arriving when a reload revokes its token, or that is held while the gate starts, is checked again under the new config. `${VAR}` values come from the environment the gate started with, so a token added to the environment needs a restart. Each reload logs `config reloaded` with the servers added, restarted, removed and kept. Every reload, even one whose config does not load, also reads the tool pins again, which serves the definitions [`toolpins accept`](toolpins.md#accept) accepted. Under systemd, once startup is over, the gate reports `RELOADING=1` and then `READY=1`; `systemctl reload` itself returns as soon as the signal is sent, so the outcome of a reload is in the log. A SIGHUP during startup is applied without a report.

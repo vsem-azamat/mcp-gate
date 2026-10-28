@@ -27,6 +27,7 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/systemd"
+	"github.com/vsem-azamat/mcp-gate/internal/toolpins"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
 
@@ -49,7 +50,8 @@ type Options struct {
 	Config *config.Config
 	// Environ is the gate's environment, which stdio servers inherit from.
 	Environ []string
-	// StateDir, if set, is where learned protocol pins are kept.
+	// StateDir, if set, is where learned protocol pins and tool pins are kept; without one, tool
+	// pins are kept in memory and no server can hold its tools.
 	StateDir string
 	Version  string
 	Logger   *slog.Logger
@@ -89,6 +91,7 @@ type Gate struct {
 	audit      audit.Sink
 	metricsSrv *upstream.Server
 	pins       *pinStore
+	toolPins   *toolpins.Store
 	// startedAt is when the gate was built; file scanning keeps in the escrow only files written
 	// since then, across reloads.
 	startedAt time.Time
@@ -143,6 +146,7 @@ func New(opts Options) (*Gate, error) {
 	g.retireCtx, g.stopRetiring = context.WithCancel(context.Background())
 	g.metrics = metrics.New()
 	g.audit = audit.Tee(audit.Log(g.logger), g.metrics)
+	g.toolPins = toolpins.New(opts.StateDir)
 	var err error
 	if g.pins, err = loadPins(opts.StateDir); err != nil {
 		g.logger.Warn("cannot read the learned protocol pins; starting without them", "error", err.Error())

@@ -217,6 +217,13 @@ func (m *Mirror) serverAllows(kind audit.Kind, name string) bool {
 	return false
 }
 
+// isHeld reports whether the tool pins hold the tool.
+func (m *Mirror) isHeld(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.held[name]
+}
+
 // mirrored reports whether the mirrored catalog has the tool or prompt name, or serves the
 // resource URI.
 func (m *Mirror) mirrored(kind audit.Kind, name string) bool {

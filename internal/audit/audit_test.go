@@ -35,6 +35,26 @@ func TestLogLine(t *testing.T) {
 	}
 }
 
+func TestToolPinLine(t *testing.T) {
+	var out strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&out, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+	LogToolPin(logger, PinRecord{Server: "s", Tool: "echo", Change: "changed", Pinned: "sha256:aa", Listed: "sha256:bb", Held: true})
+	LogToolPin(logger, PinRecord{Server: "s", Tool: "fresh", Change: "added", Listed: "sha256:cc"})
+	want := `{"level":"WARN","msg":"toolPin","server":"s","tool":"echo","change":"changed","pinned":"sha256:aa","listed":"sha256:bb","action":"held"}
+{"level":"WARN","msg":"toolPin","server":"s","tool":"fresh","change":"added","pinned":"","listed":"sha256:cc","action":"served"}
+`
+	if out.String() != want {
+		t.Errorf("lines:\n%s\nwant:\n%s", out.String(), want)
+	}
+}
+
 func TestOutcomeFailed(t *testing.T) {
 	for _, c := range []struct {
 		o      Outcome

@@ -152,6 +152,24 @@ func (s *Source) detach(m *Mirror) {
 	s.mirrors = slices.DeleteFunc(s.mirrors, func(x *Mirror) bool { return x == m })
 }
 
+// Recheck applies the tools the source has listed to its mirrors again, which compares them with
+// the server's tool pins again, so that a definition accepted since the listing is served.
+func (s *Source) Recheck() {
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	s.mu.Lock()
+	if !s.listed.has(audit.Tool) {
+		s.mu.Unlock()
+		return
+	}
+	raw, lastSync := s.raw, s.lastSync
+	mirrors := slices.Clone(s.mirrors)
+	s.mu.Unlock()
+	for _, m := range mirrors {
+		m.apply(kindSet(audit.Tool), &raw, lastSync)
+	}
+}
+
 // shows returns the kinds some mirror shows; tools always.
 func (s *Source) shows() kindSet {
 	s.mu.Lock()

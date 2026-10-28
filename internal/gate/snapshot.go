@@ -3,6 +3,7 @@ package gate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -299,6 +300,9 @@ func (g *Gate) newServer(cfg *config.Config, name string, s *config.Server, old 
 		}
 		files = sc
 	}
+	if s.ToolPins == config.ToolPinsHold && !g.toolPins.Persistent() {
+		return nil, false, errors.New("toolPins: hold needs a state directory (serve -state-dir), where the accepted definitions are kept")
+	}
 	if rt == nil {
 		if rt, err = g.newRuntime(cfg, name, s, dkey, engine); err != nil {
 			return nil, false, err
@@ -308,10 +312,14 @@ func (g *Gate) newServer(cfg *config.Config, name string, s *config.Server, old 
 			rt.restarting.Store(true)
 		}
 	}
-	mirror := proxy.New(proxy.Options{
+	mo := proxy.Options{
 		Name: name, Version: g.opts.Version, Policy: policy.New(s), Tokens: policy.NewTokens(cfg, name), ForwardMeta: s.ForwardMeta,
 		Redaction: redaction, Files: files, Logger: g.logger, Audit: g.audit, Source: rt.src,
-	})
+	}
+	if s.ToolPins != config.ToolPinsOff {
+		mo.ToolPins, mo.HoldTools = g.toolPins, s.ToolPins == config.ToolPinsHold
+	}
+	mirror := proxy.New(mo)
 	return &server{name: name, cfg: s, rt: rt, sup: rt.sup, mirror: mirror, mkey: mkey, engine: engine}, true, nil
 }
 

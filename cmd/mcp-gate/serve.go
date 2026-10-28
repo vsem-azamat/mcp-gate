@@ -63,7 +63,7 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 		_, _ = io.WriteString(fs.Output(), serveUsage)
 		fs.PrintDefaults()
 	}
-	stateDir := fs.String("state-dir", defaultStateDir(env), "directory for learned protocol pins and OAuth grants (default $STATE_DIRECTORY; empty keeps none)")
+	stateDir := fs.String("state-dir", defaultStateDir(env), "directory for learned protocol pins, tool pins and OAuth grants (default $STATE_DIRECTORY; empty keeps none)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
@@ -98,7 +98,7 @@ func runServe(ctx context.Context, args []string, env lookupEnv, stderr io.Write
 		defer r.Close()
 	}
 	if *stateDir == "" {
-		logger.Info("no state directory: learned protocol pins are not kept across restarts, and OAuth servers cannot log in")
+		logger.Info("no state directory: learned protocol pins and tool pins are not kept across restarts, OAuth servers cannot log in, and no server can hold its tools")
 	}
 	key, err := escrowKey(cfg, env)
 	if err != nil {

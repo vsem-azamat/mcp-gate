@@ -306,6 +306,9 @@ type Server struct {
 	// ForwardMeta lists the _meta keys of a client request that are passed to the server, by
 	// exact name. Others are dropped.
 	ForwardMeta []string `yaml:"forwardMeta,omitempty"`
+	// ToolPins is what the gate does when the server lists a tool whose definition differs from
+	// its pin: one of ToolPinsModes; "" means DefaultToolPins.
+	ToolPins string `yaml:"toolPins,omitempty"`
 	// Transport is set by Parse: the server's command, arguments and working directory, or its
 	// URL, as written, before variables are expanded, encoded as JSON. It identifies the server
 	// without holding the values of the variables it names.
@@ -327,6 +330,21 @@ func transportText(s *Server) string {
 	}
 	return string(data)
 }
+
+// The values of a server's toolPins.
+const (
+	// ToolPinsOff compares nothing.
+	ToolPinsOff = "off"
+	// ToolPinsWarn logs a changed or new tool and serves it.
+	ToolPinsWarn = "warn"
+	// ToolPinsHold logs a changed or new tool and hides it until its definition is accepted.
+	ToolPinsHold = "hold"
+	// DefaultToolPins is the value of a server that leaves toolPins out.
+	DefaultToolPins = ToolPinsWarn
+)
+
+// ToolPinsModes are the values toolPins takes.
+var ToolPinsModes = []string{ToolPinsOff, ToolPinsWarn, ToolPinsHold}
 
 // Filter is an allow list or a deny list; exactly one is set.
 type Filter struct {
@@ -767,6 +785,9 @@ func (c *Config) applyDefaults() {
 		if s.ProbeInterval == nil {
 			v := Duration(DefaultProbeInterval)
 			s.ProbeInterval = &v
+		}
+		if s.ToolPins == "" {
+			s.ToolPins = DefaultToolPins
 		}
 		if s.Restart.MaxBackoff == nil {
 			v := Duration(DefaultMaxBackoff)
