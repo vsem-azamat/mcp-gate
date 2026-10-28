@@ -36,8 +36,6 @@ import (
 // stages need to know of it.
 type exchange struct {
 	*call
-	// entry is the server's own name for the entry: the tool or prompt name, the resource URI.
-	entry string
 	// shown is the name the caller used, which the errors of a hidden entry give.
 	shown string
 	// session and meta are the upstream request's: progress goes to the session, and the
@@ -267,7 +265,7 @@ var resourcePipeline = &pipeline[*mcp.ReadResourceParams, *mcp.ReadResourceResul
 func (m *Mirror) start(ctx context.Context, kind audit.Kind, extra *mcp.RequestExtra, entry, shown string, ss *mcp.ServerSession, meta mcp.Meta) *exchange {
 	c := m.begin(ctx, kind, extra, entry)
 	c.decision = m.decision(c.principal, kind, entry)
-	return &exchange{call: c, entry: entry, shown: shown, session: ss, meta: meta}
+	return &exchange{call: c, shown: shown, session: ss, meta: meta}
 }
 
 func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

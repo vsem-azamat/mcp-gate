@@ -26,7 +26,7 @@ const (
 	// from this table (routeKey), so classifying a field here is all a route needs.
 	routeField
 	// snapshotField is applied in place without touching a route: the log level, the health
-	// endpoints, /_status.
+	// endpoints, /_status, /_metrics on the listener.
 	snapshotField
 	// bootField keeps its value from the start; a reload that changes it logs a warning.
 	bootField
@@ -49,6 +49,8 @@ var configFields = map[string]fieldClass{
 	"LogLevel":               snapshotField,
 	"Auth":                   routeField,
 	"Admin":                  snapshotField,
+	"Metrics.Enabled":        snapshotField,
+	"Metrics.Addr":           bootField,
 	"Escrow.TTL":             mirrorField, // the default of every server's redact.escrowTTL
 	"Escrow.MaxEntries":      bootField,
 	"Escrow.KeyHash":         bootField,

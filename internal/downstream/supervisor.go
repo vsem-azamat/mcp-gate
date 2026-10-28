@@ -126,6 +126,9 @@ type Options struct {
 	// OnSession, if set, is called with each new session once it is ready to serve calls. It
 	// runs on the supervision loop and must not block.
 	OnSession func(*mcp.ClientSession)
+	// OnRestart, if set, is called for each connection attempt that Status counts as a restart.
+	// It runs on the supervision loop with the status locked and must not block.
+	OnRestart func()
 
 	Logger *slog.Logger
 	// Redactor scrubs child stderr lines and error messages; nil uses the default rules.
@@ -251,6 +254,9 @@ const (
 	Stopped                 // stopped by Stop
 	NeedsLogin              // an OAuth server without a usable grant, waiting for a login
 )
+
+// States are every state, in order.
+var States = []State{Starting, Ready, Degraded, Backoff, Disabled, Stopped, NeedsLogin}
 
 func (s State) String() string {
 	switch s {
@@ -642,6 +648,9 @@ func (s *Supervisor) run(base context.Context) {
 		if !awaiting {
 			if attempt > 0 && !waited { // the first attempt with a grant is no restart
 				s.restarts++
+				if s.opts.OnRestart != nil {
+					s.opts.OnRestart()
+				}
 			}
 			s.setStateLocked(Starting)
 		}

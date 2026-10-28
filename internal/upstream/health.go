@@ -71,15 +71,27 @@ func HealthHandler(info HealthInfo, readiness func() Readiness) http.HandlerFunc
 	}
 }
 
-// StatusHandler serves /_status to callers holding an admin token, as "Bearer <token>" or the
-// bare token, with the JSON encoding of what status returns. Others get 401.
-func StatusHandler(admin *Tokens, status func() any) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+// RequireAdmin passes only requests holding an admin token, as "Bearer <token>" or the bare
+// token; others get 401, and rejected, if set, is called for each. Every answer carries
+// Cache-Control: no-store.
+func RequireAdmin(admin *Tokens, rejected func(), next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if _, ok := admin.Authenticate(r.Header.Get("Authorization")); !ok {
+			if rejected != nil {
+				rejected()
+			}
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// StatusHandler serves /_status to callers holding an admin token (see RequireAdmin), with the
+// JSON encoding of what status returns.
+func StatusHandler(admin *Tokens, rejected func(), status func() any) http.Handler {
+	return RequireAdmin(admin, rejected, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodHead {
 			return
@@ -87,5 +99,5 @@ func StatusHandler(admin *Tokens, status func() any) http.HandlerFunc {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(status())
-	}
+	}))
 }

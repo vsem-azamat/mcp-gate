@@ -92,6 +92,7 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 	}
 	validateTokens("auth.tokens", c.Auth.Tokens, add)
 	validateTokens("admin.tokens", c.Admin.Tokens, add)
+	c.validateMetrics(add)
 	if c.Escrow.TTL != nil && c.Escrow.TTL.D() == 0 {
 		add("escrow.ttl", "must be positive")
 	}
@@ -382,6 +383,64 @@ func (c *Config) validateServerAuth(name, path string, add func(path, format str
 		}
 		seen[tokens[k]] = k
 	}
+}
+
+func (c *Config) validateMetrics(add func(path, format string, args ...any)) {
+	m := c.Metrics
+	if m.Enabled && len(c.Admin.Tokens) == 0 {
+		add("metrics.enabled", "needs admin.tokens, whose tokens may read /_metrics")
+	}
+	if m.Addr == "" {
+		return
+	}
+	host, port, err := net.SplitHostPort(m.Addr)
+	if err != nil || port == "" {
+		add("metrics.addr", "must be host:port, such as 127.0.0.1:9464")
+		return
+	}
+	if !LoopbackHost(host) {
+		add("metrics.addr", "must be on a loopback address or localhost, since it serves without a token; scrape /_metrics on listen.addr with an admin token from elsewhere")
+	}
+	listen := c.Listen.Addr
+	if listen == "" {
+		listen = DefaultListenAddr
+	}
+	if sameSocket(m.Addr, listen) {
+		add("metrics.addr", "must differ from listen.addr")
+	}
+}
+
+// LoopbackHost reports whether a host, without a port or brackets, is localhost or a loopback
+// address.
+func LoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
+}
+
+// LoopbackAddr reports whether a host:port is on localhost or a loopback address.
+func LoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	return err == nil && LoopbackHost(host)
+}
+
+// sameSocket reports whether a loopback address metrics would collide with listen: the same
+// port, not 0, with listen on every address, on the same address, or either on localhost. It is
+// conservative: [::1]:P beside 0.0.0.0:P could bind on some systems, and is still refused.
+func sameSocket(metrics, listen string) bool {
+	mh, mp, err1 := net.SplitHostPort(metrics)
+	lh, lp, err2 := net.SplitHostPort(listen)
+	if err1 != nil || err2 != nil || mp != lp || mp == "0" {
+		return false
+	}
+	if lh == "" || strings.EqualFold(mh, "localhost") || strings.EqualFold(lh, "localhost") {
+		return true
+	}
+	ma, err1 := netip.ParseAddr(mh)
+	la, err2 := netip.ParseAddr(lh)
+	return err1 == nil && err2 == nil && (la.Unmap().IsUnspecified() || ma.Unmap() == la.Unmap())
 }
 
 func (l *Listen) validate(add func(path, format string, args ...any)) {

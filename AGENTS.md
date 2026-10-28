@@ -67,6 +67,7 @@ This repository is public. Before every commit and PR, check that nothing privat
 | `internal/escrow/` | Secret escrow: key hash sources, in-memory store, replacer that keeps findings, kept files, the frozen `/_escrow/` HTTP API, its failed-auth limit, the unix socket with peer credentials |
 | `internal/filescan/` | Scanning of the files download tools write: paths, safe opening under roots, withholding, failing closed |
 | `internal/gate/` | `mcp-gate serve` assembled: per-server runtimes, mirrors and routes in a snapshot per config, the aggregate route, its token check and its views per access and token policy, readiness, `/_status`, learned pins file, reloads and the classification of config fields, shutdown |
+| `internal/metrics/` | Prometheus counts fed by the audit sink and hooks, and the text exposition format |
 | `internal/oauth/` | OAuth client of HTTP servers: discovery, registration and login for `mcp-gate auth`, the grant store, the token source that refreshes |
 | `internal/policy/` | Server filters and token policy filters, their decisions, the one algorithm for which resource URIs may be read, URI normalization |
 | `internal/proxy/` | Source of one server (catalog sync, counters, progress, notification queue) and its mirror under one config with its per-token servers, the request pipeline of calls (checks, forwarding, result redaction), the errors of hidden entries, audit records; the aggregate catalog of several mirrors and its per-access views |

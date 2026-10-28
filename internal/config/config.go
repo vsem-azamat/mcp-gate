@@ -73,8 +73,10 @@ type Config struct {
 	LogLevel string `yaml:"logLevel,omitempty"`
 	// Auth holds the client tokens every server accepts unless it opts out.
 	Auth Tokens `yaml:"auth,omitempty"`
-	// Admin holds the tokens that may read /_status.
+	// Admin holds the tokens that may read /_status, and /_metrics on the listener.
 	Admin Tokens `yaml:"admin,omitempty"`
+	// Metrics configures the Prometheus metrics endpoint.
+	Metrics Metrics `yaml:"metrics,omitempty"`
 	// Escrow configures the secret escrow, which is on when its key hash is in the config or the
 	// environment.
 	Escrow Escrow `yaml:"escrow,omitempty"`
@@ -244,6 +246,14 @@ type EscrowSocket struct {
 	AllowUIDs []int `yaml:"allowUIDs,omitempty"`
 	// Mode is the socket file's permission bits; nil means DefaultEscrowSocketMode.
 	Mode *FileMode `yaml:"mode,omitempty"`
+}
+
+// Metrics configures where the Prometheus metrics are served. Both are off by default.
+type Metrics struct {
+	// Enabled serves /_metrics on the listener to admin tokens; it needs admin.tokens.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// Addr, if set, is a loopback host:port on which /_metrics is served without a token.
+	Addr string `yaml:"addr,omitempty"`
 }
 
 // Listen configures the upstream listener.

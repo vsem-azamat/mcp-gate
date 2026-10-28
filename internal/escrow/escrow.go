@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
@@ -85,6 +86,23 @@ type Escrow struct {
 	remote  func(*http.Request) string
 	limit   *limiter
 	logger  *slog.Logger
+	// authFailures counts the requests answered with 401.
+	authFailures atomic.Uint64
+}
+
+// Stats are the escrow's counts.
+type Stats struct {
+	// Entries is the number of entries held.
+	Entries int
+	// Stored counts the entries stored under a new handle since the start.
+	Stored uint64
+	// AuthFailures counts the API requests answered with 401 since the start.
+	AuthFailures uint64
+}
+
+// Stats returns the escrow's counts.
+func (e *Escrow) Stats() Stats {
+	return Stats{Entries: e.store.len(), Stored: e.store.stored.Load(), AuthFailures: e.authFailures.Load()}
 }
 
 // New returns an escrow. Run drops expired entries while it runs.

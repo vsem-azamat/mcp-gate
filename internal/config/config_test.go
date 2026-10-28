@@ -147,6 +147,25 @@ func TestEscrowKeys(t *testing.T) {
 	}
 }
 
+func TestMetrics(t *testing.T) {
+	t.Parallel()
+	const tail = "auth: {tokens: {a: s}}\nadmin: {tokens: {o: t}}\nservers:\n  a:\n    stdio: {command: x}\n"
+	for _, addr := range []string{"127.0.0.1:9464", "[::1]:9464", "localhost:9464", "127.0.0.2:0"} {
+		c, err := Parse([]byte("version: 1\nmetrics: {enabled: true, addr: '"+addr+"'}\n"+tail), noEnv)
+		if err != nil {
+			t.Errorf("%s: %v", addr, err)
+			continue
+		}
+		if !c.Metrics.Enabled || c.Metrics.Addr != addr {
+			t.Errorf("%s: %+v", addr, c.Metrics)
+		}
+	}
+	c, err := Parse([]byte("version: 1\n"+tail), noEnv)
+	if err != nil || c.Metrics != (Metrics{}) {
+		t.Errorf("default metrics: %+v %v", c.Metrics, err)
+	}
+}
+
 func TestServingErrors(t *testing.T) {
 	t.Parallel()
 	const srv = "servers:\n  a:\n    stdio: {command: x}\n"
@@ -184,6 +203,13 @@ func TestServingErrors(t *testing.T) {
 		{"slash root", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [x], roots: [/]}}\n", "servers.a.redact.files.roots[0]: must be an absolute path other than /"},
 		{"twice a tool", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [x, x], roots: [/d]}}\n", "servers.a.redact.files.tools[1]: is listed twice"},
 		{"tiny file limit", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {files: {tools: [x], roots: [/d], maxBytes: 10B}}\n", "servers.a.redact.files.maxBytes: must be between"},
+		{"metrics without admin", "version: 1\nmetrics: {enabled: true}\nauth: {tokens: {a: s}}\n" + srv, "metrics.enabled: needs admin.tokens"},
+		{"metrics addr form", "version: 1\nmetrics: {addr: localhost}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must be host:port"},
+		{"metrics addr public", "version: 1\nmetrics: {addr: '0.0.0.0:9464'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must be on a loopback address"},
+		{"metrics addr name", "version: 1\nmetrics: {addr: 'metrics.example.com:9464'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must be on a loopback address"},
+		{"metrics addr is listen", "version: 1\nmetrics: {addr: '127.0.0.1:9090'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must differ from listen.addr"},
+		{"metrics addr under listen", "version: 1\nlisten: {addr: '0.0.0.0:9464'}\nmetrics: {addr: '127.0.0.1:9464'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must differ from listen.addr"},
+		{"metrics addr localhost", "version: 1\nlisten: {addr: '127.0.0.1:9464'}\nmetrics: {addr: 'localhost:9464'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must differ from listen.addr"},
 		{"files unredacted", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {enabled: false, files: {tools: [x], roots: [/d]}}\n", "servers.a.redact.files: needs redact.enabled"},
 	}
 	for _, c := range cases {
@@ -743,5 +769,17 @@ servers:
 	}
 	if c.EffectiveTokens("own")["agent"] != "secret-own" || c.EffectiveTokens("a")["agent"] != "secret-global" {
 		t.Error("the two tokens named agent")
+	}
+}
+
+func TestLoopbackAddr(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		addr string
+		want bool
+	}{{"127.0.0.1:8790", true}, {"[::1]:8790", true}, {"localhost:8790", true}, {"LocalHost:1", true}, {"127.0.0.2:1", true}, {"0.0.0.0:8790", false}, {"192.0.2.1:8790", false}, {":8790", false}, {"localhost", false}} {
+		if got := LoopbackAddr(tc.addr); got != tc.want {
+			t.Errorf("LoopbackAddr(%q) = %v, want %v", tc.addr, got, tc.want)
+		}
 	}
 }

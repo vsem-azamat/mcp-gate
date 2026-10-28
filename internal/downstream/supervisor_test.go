@@ -304,7 +304,10 @@ func TestStdioNoiseOnStdout(t *testing.T) {
 
 func TestCrashRestarts(t *testing.T) {
 	t.Parallel()
-	s := start(t, stdioOptions(t, testkit.Fake{}))
+	o := stdioOptions(t, testkit.Fake{})
+	var hooked atomic.Int32
+	o.OnRestart = func() { hooked.Add(1) }
+	s := start(t, o)
 	pid := waitReady(t, s).PID
 	if _, err := callTool(t, s, "crash", nil); err == nil {
 		t.Error("the crashing call succeeded")
@@ -312,6 +315,9 @@ func TestCrashRestarts(t *testing.T) {
 	st := waitFor(t, s, "restart", func(st Status) bool { return st.State == Ready && st.Restarts == 1 })
 	if st.PID == pid || !strings.Contains(st.LastError, "exit status 3") && !strings.Contains(st.LastError, "closed") {
 		t.Errorf("status after restart = %+v", st)
+	}
+	if n := hooked.Load(); n != 1 {
+		t.Errorf("OnRestart called %d times, want 1", n)
 	}
 	mustEcho(t, s)
 }

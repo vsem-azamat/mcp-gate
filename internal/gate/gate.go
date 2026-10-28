@@ -6,6 +6,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -13,14 +14,15 @@ import (
 	"net/netip"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/escrow"
+	"github.com/vsem-azamat/mcp-gate/internal/metrics"
 	"github.com/vsem-azamat/mcp-gate/internal/oauth"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
@@ -80,8 +82,14 @@ type Gate struct {
 	escrowAPI http.Handler
 	srv       *upstream.Server
 	sock      *upstream.Server // serves the escrow socket; nil without one
-	pins      *pinStore
-	started   atomic.Bool
+	// metrics counts for the life of the process; audit is the sink of every mirror and of the
+	// aggregate: the call lines and the metrics. metricsSrv serves /_metrics on metrics.addr,
+	// nil without one.
+	metrics    *metrics.Registry
+	audit      audit.Sink
+	metricsSrv *upstream.Server
+	pins       *pinStore
+	started    atomic.Bool
 	// startupOver is closed when the startup watcher returns: started, or shutting down first.
 	startupOver chan struct{}
 	// drain is closed when shutdown begins; it ends the subscriptions/listen streams, which
@@ -130,6 +138,8 @@ func New(opts Options) (*Gate, error) {
 		running: make(chan struct{}), drained: make(chan struct{}),
 	}
 	g.retireCtx, g.stopRetiring = context.WithCancel(context.Background())
+	g.metrics = metrics.New()
+	g.audit = audit.Tee(audit.Log(g.logger), g.metrics)
 	var err error
 	if g.pins, err = loadPins(opts.StateDir); err != nil {
 		g.logger.Warn("cannot read the learned protocol pins; starting without them", "error", err.Error())
@@ -178,6 +188,13 @@ func New(opts Options) (*Gate, error) {
 		return nil, err
 	}
 	g.snap.Store(sn)
+	if cfg.Metrics.Addr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("GET "+metricsRoute, g.metricsHandler())
+		// No token guards it, so a page a browser on this host opens must not reach it through
+		// a name that resolves to the loopback address (DNS rebinding): only loopback Hosts.
+		g.metricsSrv = upstream.NewServer(cfg.Metrics.Addr, upstream.Recover(g.logger, "_metrics", upstream.AllowLoopbackHosts(mux)), g.logger)
+	}
 	g.srv = upstream.NewServer(cfg.Listen.Addr, http.HandlerFunc(g.serveHTTP), g.logger)
 	g.srv.RegisterOnShutdown(func() { g.drainOnce.Do(func() { close(g.drain) }) })
 	return g, nil
@@ -277,23 +294,41 @@ func (g *Gate) Listen(ctx context.Context) (net.Listener, error) {
 // done, then shuts down: it stops accepting, lets calls in flight finish for ShutdownGrace, and
 // stops the servers in parallel. The socket file is removed on the way out.
 func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
+	var metricsServed chan error
+	var ml net.Listener
+	if g.metricsSrv != nil {
+		var lc net.ListenConfig
+		var err error
+		if ml, err = lc.Listen(ctx, "tcp", g.boot.Metrics.Addr); err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("metrics.addr: %w", err)
+		}
+	}
 	var sockServed chan error
 	if g.sock != nil {
 		s := g.boot.Escrow.Socket
 		sl, err := escrow.ListenSocket(ctx, s.Path, fs.FileMode(*s.Mode))
 		if err != nil {
 			_ = ln.Close()
+			if ml != nil {
+				_ = ml.Close()
+			}
 			return err
 		}
 		sockServed = make(chan error, 1)
 		go func() { sockServed <- g.sock.Serve(sl) }()
 		g.logger.Info("escrow socket listening", "path", s.Path, "allowUIDs", socketUIDs(s))
 	}
+	if ml != nil {
+		metricsServed = make(chan error, 1)
+		go func() { metricsServed <- g.metricsSrv.Serve(ml) }()
+		g.logger.Info("metrics listening", "addr", ml.Addr().String())
+	}
 	g.mu.Lock()
 	g.served = ln.Addr().String()
 	sn := g.snap.Load()
 	// On the address served, which a socket systemd passed may set rather than listen.addr.
-	if g.escrowAPI != nil && !sn.cfg.Listen.BehindProxy && loopbackListen(g.served) {
+	if g.escrowAPI != nil && !sn.cfg.Listen.BehindProxy && config.LoopbackAddr(g.served) {
 		g.logger.Warn("the escrow API is on a loopback listener without listen.behindProxy: behind a reverse proxy " +
 			"on this host every client is 127.0.0.1 and shares one failed-auth budget; set behindProxy and trustedProxies")
 	}
@@ -336,8 +371,11 @@ func (g *Gate) Run(ctx context.Context, ln net.Listener) error {
 	// After the startup watcher, so that READY=1 never follows it.
 	g.notify(systemd.Stopping)
 	err = errors.Join(err, g.shutdown(context.WithoutCancel(ctx)))
-	if sockServed != nil {
-		if serr := <-sockServed; !errors.Is(serr, http.ErrServerClosed) {
+	for _, c := range []chan error{sockServed, metricsServed} {
+		if c == nil {
+			continue
+		}
+		if serr := <-c; !errors.Is(serr, http.ErrServerClosed) {
 			err = errors.Join(err, serr)
 		}
 	}
@@ -437,13 +475,17 @@ func (g *Gate) shutdown(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, ShutdownGrace)
 	defer cancel()
 	var errs []error
-	// The socket server shuts down alongside the listener, so that a slow socket client does
-	// not take the grace from the calls in flight; closing it also removes the socket file.
+	// The socket server and the metrics listener shut down alongside the listener, so that a slow
+	// client of theirs does not take the grace from the calls in flight; closing the socket server
+	// also removes the socket file.
 	var sockDone sync.WaitGroup
-	if g.sock != nil {
+	for _, s := range []*upstream.Server{g.sock, g.metricsSrv} {
+		if s == nil {
+			continue
+		}
 		sockDone.Go(func() {
-			if err := g.sock.Shutdown(ctx); err != nil {
-				_ = g.sock.Close()
+			if err := s.Shutdown(ctx); err != nil {
+				_ = s.Close()
 			}
 		})
 	}
@@ -508,17 +550,4 @@ func (g *Gate) Readiness() upstream.Readiness {
 		}
 	}
 	return r
-}
-
-// loopbackListen reports whether a listen address is on a loopback address or localhost.
-func loopbackListen(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	a, err := netip.ParseAddr(host)
-	return err == nil && a.Unmap().IsLoopback()
 }

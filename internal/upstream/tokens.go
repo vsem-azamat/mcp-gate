@@ -86,19 +86,19 @@ func Principal(info *auth.TokenInfo) string {
 }
 
 // RequireToken passes only requests whose Authorization header carries one of tokens (see
-// Tokens.Authenticate). Others get 401 with the body "Unauthorized". The token's name reaches MCP
-// handlers as the TokenInfo UserID.
-func RequireToken(tokens *Tokens, next http.Handler) http.Handler {
+// Tokens.Authenticate). Others get 401 with the body "Unauthorized", and rejected, if set, is
+// called for each. The token's name reaches MCP handlers as the TokenInfo UserID.
+func RequireToken(tokens *Tokens, rejected func(), next http.Handler) http.Handler {
 	return Authorize(func(r *http.Request) (context.Context, *auth.TokenInfo, bool) {
 		name, ok := tokens.Authenticate(r.Header.Get("Authorization"))
 		return r.Context(), &auth.TokenInfo{UserID: name}, ok
-	}, next)
+	}, rejected, next)
 }
 
 // Authorize passes only the requests that check accepts; the others get 401 with the body
-// "Unauthorized". check returns the context the request goes on with and the TokenInfo that
-// reaches its MCP handlers (see Principal).
-func Authorize(check func(*http.Request) (context.Context, *auth.TokenInfo, bool), next http.Handler) http.Handler {
+// "Unauthorized", and rejected, if set, is called for each. check returns the context the
+// request goes on with and the TokenInfo that reaches its MCP handlers (see Principal).
+func Authorize(check func(*http.Request) (context.Context, *auth.TokenInfo, bool), rejected func(), next http.Handler) http.Handler {
 	type infoKey struct{}
 	verify := func(_ context.Context, _ string, r *http.Request) (*auth.TokenInfo, error) {
 		info, _ := r.Context().Value(infoKey{}).(*auth.TokenInfo)
@@ -113,6 +113,9 @@ func Authorize(check func(*http.Request) (context.Context, *auth.TokenInfo, bool
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, info, ok := check(r)
 		if !ok {
+			if rejected != nil {
+				rejected()
+			}
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

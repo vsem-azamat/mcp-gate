@@ -31,10 +31,12 @@ type call struct {
 	principal string
 	decision  policy.Decision // of the caller's token policy
 	start     time.Time
-	name      string // fit for the log
-	outcome   audit.Outcome
-	count     *counter
-	req       Request
+	// entry is the server's own name for the entry: the tool or prompt name, the resource URI.
+	entry   string
+	name    string // fit for the log
+	outcome audit.Outcome
+	count   *counter
+	req     Request
 }
 
 // begin starts the audit record of a request for the entry of the given kind and name (a tool or
@@ -45,7 +47,7 @@ func (m *Mirror) begin(ctx context.Context, kind audit.Kind, extra *mcp.RequestE
 	}
 	m.src.stats.calls.Add(1)
 	return &call{
-		m: m, kind: kind, principal: principalOf(extra), decision: policy.NoPolicy, start: time.Now(), name: m.logText(name),
+		m: m, kind: kind, principal: principalOf(extra), decision: policy.NoPolicy, start: time.Now(), entry: name, name: m.logText(name),
 		outcome: audit.OK, count: &counter{},
 	}
 }
@@ -55,6 +57,9 @@ func (c *call) end() {
 	c.m.emit(audit.Record{
 		Server: c.m.opts.Name, Principal: c.principal, Kind: c.kind, Name: c.name, Duration: time.Since(c.start),
 		Outcome: c.outcome, TokenPolicy: c.decision, Redactions: c.count.n.Load(),
+		// A name the caller's token policy hides is not listed for it: the metrics must not
+		// tell a hidden entry from a missing one.
+		Listed: c.kind != audit.Resource && c.decision != policy.Denied && c.m.mirrored(c.kind, c.entry),
 	})
 }
 
