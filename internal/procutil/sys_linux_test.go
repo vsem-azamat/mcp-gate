@@ -104,3 +104,44 @@ func TestChildPIDs(t *testing.T) {
 		t.Errorf("the children files list %v (%v), not the child %d", pids, ok, p.PID())
 	}
 }
+
+// TestReapOrphansSkipsManaged checks that the reaper leaves a zombie child that Start registered
+// to its Process, and reaps it once it is not registered. Not parallel: it reaps the children of
+// the test process.
+func TestReapOrphansSkipsManaged(t *testing.T) {
+	pid, err := syscall.ForkExec("/bin/true", []string{"true"}, &syscall.ProcAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		var ws syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+		managed.Lock()
+		delete(managed.pids, pid)
+		managed.Unlock()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if state, _, ok := procStat(pid); ok && state == 'Z' {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the child did not become a zombie")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	managed.Lock()
+	managed.pids[pid] = true
+	managed.Unlock()
+	reapOrphans()
+	if state, _, ok := procStat(pid); !ok || state != 'Z' {
+		t.Fatalf("a registered zombie was reaped (state %q, found %v)", state, ok)
+	}
+	managed.Lock()
+	delete(managed.pids, pid)
+	managed.Unlock()
+	reapOrphans()
+	if _, _, ok := procStat(pid); ok {
+		t.Error("an unregistered zombie was not reaped")
+	}
+}

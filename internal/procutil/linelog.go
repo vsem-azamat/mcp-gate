@@ -62,8 +62,11 @@ func (l *LineLog) Consume(r io.Reader) {
 	for {
 		line, err := br.ReadSlice('\n')
 		truncated := errors.Is(err, bufio.ErrBufferFull)
-		if len(line) > 0 {
-			l.add(trimEOL(line), truncated)
+		switch {
+		case truncated:
+			l.add(string(line), true) // a cut line has no line ending: it ends in no newline
+		case len(line) > 0:
+			l.add(trimEOL(line), false)
 		}
 		for errors.Is(err, bufio.ErrBufferFull) {
 			_, err = br.ReadSlice('\n') // drop the rest of a long line
@@ -133,6 +136,9 @@ func (l *LineLog) add(line string, truncated bool) {
 // which only the whole read shows, is redacted in the first and not in the second, so the start
 // ends before it. This holds however much the filter shrinks or grows the text.
 func scannedStart(filter func(string) string, line string) string {
+	if len(line) <= cutMargin {
+		return "" // nothing lies before the margin
+	}
 	whole, short := filter(line), filter(line[:len(line)-cutMargin])
 	n := 0
 	for n < len(whole) && n < len(short) && whole[n] == short[n] {
