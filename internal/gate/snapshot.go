@@ -246,14 +246,15 @@ func (g *Gate) build(cfg *config.Config, prev *snapshot) (sn *snapshot, err erro
 	mux.Handle("GET /_readyz", upstream.Recover(g.logger, "_readyz", upstream.HealthHandler(info, g.Readiness)))
 	if len(cfg.Admin.Tokens) > 0 {
 		admin := upstream.NewTokens(cfg.Admin.Tokens)
-		mux.Handle("GET /_status", upstream.Recover(g.logger, "_status",
-			upstream.StatusHandler(admin, g.rejected("/_status"), func() any { return g.Status() })))
-		approvals := upstream.Recover(g.logger, "_approvals", g.approvals.AdminHandler(admin.Authenticate, g.rejected(approval.Route)))
+		mux.Handle("GET /_status", upstream.Recover(g.logger, "_status", g.limitAdmin(sn, admin,
+			upstream.StatusHandler(admin, g.rejected("/_status"), func() any { return g.Status() }))))
+		approvals := upstream.Recover(g.logger, "_approvals", g.limitAdmin(sn, admin,
+			g.approvals.AdminHandler(admin.Authenticate, g.rejected(approval.Route))))
 		mux.Handle(approval.Route, approvals)
 		mux.Handle(approval.Route+"/", approvals)
 		if cfg.Metrics.Enabled {
-			mux.Handle("GET "+metricsRoute, upstream.Recover(g.logger, "_metrics",
-				upstream.RequireAdmin(admin, g.rejected(metricsRoute), g.metricsHandler())))
+			mux.Handle("GET "+metricsRoute, upstream.Recover(g.logger, "_metrics", g.limitAdmin(sn, admin,
+				upstream.RequireAdmin(admin, g.rejected(metricsRoute), g.metricsHandler()))))
 		}
 	}
 	if w := cfg.Approvals.Webhook; w != nil && w.LinkURL != "" {

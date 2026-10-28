@@ -92,6 +92,22 @@ func callBackground(cs *mcp.ClientSession, name string, args map[string]any, met
 	return out
 }
 
+// link posts a link token to a link endpoint.
+func (r *running) link(t *testing.T, path, token string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, r.base+path, strings.NewReader(`{"token":"`+token+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(body)
+}
+
 // decide posts to an approval endpoint with an optional Authorization header.
 func (r *running) decide(t *testing.T, path, header string) (int, string) {
 	t.Helper()
@@ -138,10 +154,10 @@ func TestApprovals(t *testing.T) {
 	if code, _, _ := r.get(t, http.MethodGet, deny, ""); code != http.StatusMethodNotAllowed {
 		t.Errorf("GET of a link: %d", code)
 	}
-	if code, body := r.decide(t, deny, ""); code != http.StatusOK || !strings.Contains(body, `"approval":"denied"`) {
+	if code, body := r.link(t, deny, n.LinkToken); code != http.StatusOK || !strings.Contains(body, `"approval":"denied"`) {
 		t.Errorf("deny link: %d %s", code, body)
 	}
-	if code, _ := r.decide(t, approve, ""); code != http.StatusNotFound {
+	if code, _ := r.link(t, approve, n.LinkToken); code != http.StatusNotFound {
 		t.Errorf("a used link: %d", code)
 	}
 	if c := <-got; c.err != nil || !c.res.IsError || textOf(t, c.res) != "mcp-gate: the owner did not approve this call of echo" {
@@ -223,5 +239,38 @@ func TestApprovalProgressAndReload(t *testing.T) {
 	}
 	if code, _ := r.decide(t, "/_approvals/"+n.ID+"/approve", "Bearer "+adminToken); code != http.StatusNotFound {
 		t.Errorf("approve after the reload: %d", code)
+	}
+}
+
+// TestAdminGuessingLimited checks that wrong admin tokens are limited per client on
+// /_approvals and /_status, and that without linkURL the link endpoints are 404.
+func TestAdminGuessingLimited(t *testing.T) {
+	r := startGate(t, configDoc("admin:\n  tokens: {owner: \"${ADMIN}\"}\n", map[string]string{
+		"s": stdioServer(t, testkit.Fake{}, "approve: [echo]\n"),
+	}), gateOpts{})
+	if code, _ := r.link(t, approval.LinkRoute+"approve", "x"); code != http.StatusNotFound {
+		t.Errorf("link without linkURL: %d", code)
+	}
+	limited := false
+	for range 30 {
+		code, _, _ := r.get(t, http.MethodGet, "/_approvals", "Bearer wrong-guess-0123456789")
+		if code == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+		if code != http.StatusUnauthorized {
+			t.Fatalf("wrong token: %d", code)
+		}
+	}
+	if !limited {
+		t.Fatal("wrong admin tokens are not limited")
+	}
+	// The client is limited on every admin endpoint, the right token included, until its
+	// bucket refills; a request without a token is not counted.
+	if code, h, _ := r.get(t, http.MethodGet, "/_status", "Bearer "+adminToken); code != http.StatusTooManyRequests || h.Get("Retry-After") == "" {
+		t.Errorf("status while limited: %d", code)
+	}
+	if code, _, _ := r.get(t, http.MethodGet, "/_approvals", ""); code != http.StatusUnauthorized {
+		t.Errorf("no token while limited: %d", code)
 	}
 }

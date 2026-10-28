@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -67,5 +68,28 @@ func TestApprovalsCommand(t *testing.T) {
 		if code, _, _ := runIt(ok, args...); code != exitUsage {
 			t.Errorf("%v: %d", args, code)
 		}
+	}
+}
+
+func TestApprovalsListEscapes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"pending":[{"id":"0123456789abcdef","server":"s","tool":"send\u001b]0;pwned\u0007\u001b[2K","principal":"p",` +
+			`"arguments":"{\"to\":\"a\u202eb\",\"c\":\"\u009b2J\"}","size":30,"truncated":true,"created":"2026-01-01T00:00:00Z","expires":"2099-01-01T00:00:00Z"}]}`))
+	}))
+	defer srv.Close()
+	env := func(k string) (string, bool) {
+		if k == "MCP_GATE_ADMIN_TOKEN" {
+			return "x", true
+		}
+		return "", false
+	}
+	var out, errb bytes.Buffer
+	if code := runApprovals(t.Context(), []string{"-url", srv.URL, "list"}, env, &out, &errb); code != exitOK {
+		t.Fatalf("code %d: %s", code, errb.String())
+	}
+	got := out.String()
+	if strings.ContainsAny(got, "\x1b\x07\u202e\u009b") || !strings.Contains(got, `send\u001B]0;pwned\u0007\u001B[2K`) ||
+		!strings.Contains(got, `a\u202Eb`) || !strings.Contains(got, "(cut; 30 bytes forwarded)") {
+		t.Errorf("list: %q", got)
 	}
 }

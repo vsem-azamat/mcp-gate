@@ -65,7 +65,7 @@ func TestParseFull(t *testing.T) {
 	t.Parallel()
 	c, err := Parse([]byte(fullConfig), env(map[string]string{
 		"NOTES_DB": "/srv/notes/db", "NOTES_TOKEN": "tok-123", "SHOP_KEY": "key-456",
-		"LAPTOP_TOKEN": "lt", "ADMIN_TOKEN": "at", "PHONE_TOKEN": "pt",
+		"LAPTOP_TOKEN": "lt", "ADMIN_TOKEN": "at0123456789abcdef", "PHONE_TOKEN": "pt",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestParseFull(t *testing.T) {
 		t.Errorf("shop = %+v", s)
 	}
 	if c.Listen.Addr != "0.0.0.0:8080" || !c.Listen.BehindProxy || c.StartupGracePeriod.D() != 90*time.Second ||
-		c.LogLevel != "debug" || c.Admin.Tokens["owner"] != "at" {
+		c.LogLevel != "debug" || c.Admin.Tokens["owner"] != "at0123456789abcdef" {
 		t.Errorf("top level = %+v", c)
 	}
 	if !slices.Equal(n.Tools.Allow, []string{"search", "read"}) || n.Prompts.Allow == nil || len(n.Prompts.Allow) != 0 ||
@@ -164,7 +164,7 @@ func TestEscrowKeys(t *testing.T) {
 
 func TestMetrics(t *testing.T) {
 	t.Parallel()
-	const tail = "auth: {tokens: {a: s}}\nadmin: {tokens: {o: t}}\nservers:\n  a:\n    stdio: {command: x}\n"
+	const tail = "auth: {tokens: {a: s}}\nadmin: {tokens: {o: t0123456789abcdef}}\nservers:\n  a:\n    stdio: {command: x}\n"
 	for _, addr := range []string{"127.0.0.1:9464", "[::1]:9464", "localhost:9464", "127.0.0.2:0"} {
 		c, err := Parse([]byte("version: 1\nmetrics: {enabled: true, addr: '"+addr+"'}\n"+tail), noEnv)
 		if err != nil {
@@ -438,7 +438,7 @@ func TestLoad(t *testing.T) {
 	}
 	if _, err := Load(path, env(map[string]string{
 		"NOTES_DB": "d", "NOTES_TOKEN": "t", "SHOP_KEY": "k",
-		"LAPTOP_TOKEN": "l", "ADMIN_TOKEN": "a", "PHONE_TOKEN": "p",
+		"LAPTOP_TOKEN": "l", "ADMIN_TOKEN": "a0123456789abcdef", "PHONE_TOKEN": "p",
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -903,7 +903,7 @@ func TestDecodeErrorHidesValueWithBacktick(t *testing.T) {
 func TestApprovals(t *testing.T) {
 	t.Parallel()
 	const head = "version: 1\nauth: {tokens: {phone: s}}\n"
-	c, err := Parse([]byte(head+`admin: {tokens: {owner: t}}
+	c, err := Parse([]byte(head+`admin: {tokens: {owner: t0123456789abcdef}}
 approvals:
   timeout: 2m
   webhook: {url: "https://relay.example.com/hook", secret: "0123456789abcdef", linkURL: "https://gate.example.com/base"}
@@ -934,7 +934,7 @@ servers:
 	}
 
 	const srv = "servers:\n  a:\n    stdio: {command: x}\n"
-	const admin = "admin: {tokens: {owner: t}}\n"
+	const admin = "admin: {tokens: {owner: t0123456789abcdef}}\n"
 	cases := []struct{ name, doc, want string }{
 		{"nobody decides", head + srv + "    approve: [x]\n", "servers.a.approve: holds calls that no one can decide"},
 		{"nobody decides for a token", head + "policies: {phone: {servers: {a: {approve: [x]}}}}\n" + srv, "policies.phone.servers.a.approve: holds calls that no one can decide"},
@@ -949,6 +949,10 @@ servers:
 		{"plain http", head + admin + "approvals: {webhook: {url: 'http://relay.example.com/h'}}\n" + srv, "approvals.webhook.url: must be https"},
 		{"query", head + admin + "approvals: {webhook: {url: 'https://relay.example.com/h?k=v'}}\n" + srv, "approvals.webhook.url: must not contain a query"},
 		{"link query", head + admin + "approvals: {webhook: {url: 'https://relay.example.com/h', linkURL: 'https://gate.example.com/?a=b'}}\n" + srv, "approvals.webhook.linkURL: must not contain a query"},
+		{"short admin token", head + "admin: {tokens: {owner: short}}\n" + srv, "admin.tokens.owner: must be at least 16 characters"},
+		{"admin token of a client", "version: 1\nauth: {tokens: {phone: samesecret0123456789}}\nadmin: {tokens: {owner: samesecret0123456789}}\n" + srv, "admin.tokens.owner: has the value of a client token"},
+		{"admin token of a server's client", head + "admin: {tokens: {owner: samesecret0123456789}}\n" + srv + "    auth: {tokens: {bot: samesecret0123456789}}\n", "admin.tokens.owner: has the value of a client token"},
+		{"server pattern in aggregate form", head + admin + srv + "    approve: [a__send]\n", "servers.a.approve[0]: names the tool as the aggregate endpoint does"},
 		{"short secret", head + admin + "approvals: {webhook: {url: 'https://relay.example.com/h', secret: short}}\n" + srv, "approvals.webhook.secret: must be at least 16 characters"},
 	}
 	for _, c := range cases {

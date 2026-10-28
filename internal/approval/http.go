@@ -2,6 +2,7 @@ package approval
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
@@ -11,8 +12,11 @@ import (
 const (
 	// Route lists the pending approvals, and with /<id>/approve or /<id>/deny decides one.
 	Route = "/_approvals"
-	// LinkRoute, followed by a link token and /approve or /deny, decides through a link.
+	// LinkRoute, followed by approve or deny, decides through a link: a POST whose JSON body
+	// holds the link token, so that the token never appears in a URL or an access log.
 	LinkRoute = "/_approvals/link/"
+	// maxLinkBody bounds the body of a link request.
+	maxLinkBody = 1 << 10
 )
 
 // listBody is the answer of GET /_approvals.
@@ -61,13 +65,22 @@ func (st *Store) AdminHandler(admin func(header string) (string, bool), rejected
 	})
 }
 
-// LinkHandler serves POST /_approvals/link/{token}/approve|deny without a token, the link token
-// being the credential; any other method gets 405, so that fetching a link decides nothing.
+// LinkHandler serves POST /_approvals/link/approve and /deny without an admin token, the link
+// token in the body ({"token": "..."}) being the credential; any other method gets 405, so that
+// fetching a link decides nothing.
 func (st *Store) LinkHandler() http.Handler {
 	mux := http.NewServeMux()
 	decide := func(approve bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			id, a, ok := st.DecideLink(r.PathValue("token"), approve)
+			var body struct {
+				Token string `json:"token"`
+			}
+			data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxLinkBody))
+			if err != nil || json.Unmarshal(data, &body) != nil || body.Token == "" {
+				http.Error(w, `the body must be {"token": "<link token>"}`, http.StatusBadRequest)
+				return
+			}
+			id, a, ok := st.DecideLink(body.Token, approve)
 			if !ok {
 				http.Error(w, "no pending approval for this link", http.StatusNotFound)
 				return
@@ -75,8 +88,8 @@ func (st *Store) LinkHandler() http.Handler {
 			writeJSON(w, http.StatusOK, decidedBody{ID: id, Approval: a})
 		}
 	}
-	mux.HandleFunc("POST "+LinkRoute+"{token}/approve", decide(true))
-	mux.HandleFunc("POST "+LinkRoute+"{token}/deny", decide(false))
+	mux.HandleFunc("POST "+LinkRoute+"approve", decide(true))
+	mux.HandleFunc("POST "+LinkRoute+"deny", decide(false))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(w, r)

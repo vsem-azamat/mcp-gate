@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -189,14 +192,29 @@ type softRefusal struct{ error }
 
 // approve holds a tool call that the server's approval rules name for the caller until the
 // owner decides it, and refuses it unless it is approved. It runs after every other before
-// stage, so that a hidden tool is refused as an unknown one without the owner being asked.
+// stage, so that a hidden tool is refused as an unknown one without the owner being asked. The
+// arguments of a held call are decoded strictly, and what is forwarded is the encoding of
+// exactly what the owner was shown before redaction: arguments a decoder could read two ways,
+// such as a key given twice, are refused.
 func approve(ctx context.Context, x *exchange, p *mcp.CallToolParams) error {
 	a := x.m.opts.Approval
 	if a == nil || !a.Rules.Holds(x.principal, x.entry) {
 		return nil
 	}
 	raw, _ := p.Arguments.(json.RawMessage) // as callToolAs sets it
-	q := approval.Question{Server: x.m.opts.Name, Tool: x.entry, Principal: x.principal, Arguments: x.m.shownArguments(raw)}
+	canonical, err := canonicalArguments(raw)
+	if err != nil {
+		x.approval, x.approver, x.outcome = audit.ApprovalDenied, approval.ByGate, audit.NotApproved
+		return softRefusal{fmt.Errorf("mcp-gate: the arguments of this call of %s cannot be shown for approval: %w", x.shown, err)}
+	}
+	if canonical != nil {
+		p.Arguments = canonical
+	}
+	shown, truncated := x.m.shownArguments(canonical)
+	q := approval.Question{
+		Server: x.m.opts.Name, Tool: x.entry, Principal: x.principal,
+		Arguments: shown, Size: len(canonical), Truncated: truncated,
+	}
 	d := a.Store.Ask(ctx, q, a.Settings, func(id string, n int) { x.waiting(ctx, id, n) })
 	x.approval, x.approver = d.Approval, d.By
 	switch d.Approval {
@@ -217,32 +235,186 @@ func approve(ctx context.Context, x *exchange, p *mcp.CallToolParams) error {
 	return softRefusal{fmt.Errorf("mcp-gate: the owner did not approve this call of %s", x.shown)}
 }
 
-// maxShownArguments is how much of a held call's arguments the owner is shown.
-const maxShownArguments = 4096
+// errDuplicateKey is arguments with a key given twice in one object, which decoders read
+// differently (the first or the last value), so that the owner could be shown one and the
+// server run the other.
+var errDuplicateKey = errors.New("a key is given twice in one object")
 
-// shownArguments returns a held call's arguments as the owner is shown them: redacted with the
-// server's rules, or the default ones when its results are not redacted, findings replaced by
-// markers and never kept, on one line, and cut.
-func (m *Mirror) shownArguments(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
+// canonicalArguments decodes a held call's arguments strictly, a JSON object with no key given
+// twice at any depth, and returns their encoding with sorted keys and numbers as written; nil
+// for no arguments.
+func canonicalArguments(raw json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	v, err := strictValue(dec, 0)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := v.(map[string]any); !ok {
+		return nil, errors.New("they are not a JSON object")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("they hold more than one JSON value")
+	}
+	return encodeJSON(v)
+}
+
+// maxArgumentDepth bounds the nesting of a held call's arguments.
+const maxArgumentDepth = 64
+
+// strictValue reads one JSON value from dec, refusing a key given twice in an object.
+func strictValue(dec *json.Decoder, depth int) (any, error) {
+	if depth > maxArgumentDepth {
+		return nil, errors.New("they are nested too deep")
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, errors.New("they are not valid JSON")
+	}
+	switch t := tok.(type) {
+	case json.Delim:
+		switch t {
+		case '{':
+			obj := map[string]any{}
+			for dec.More() {
+				kt, err := dec.Token()
+				if err != nil {
+					return nil, errors.New("they are not valid JSON")
+				}
+				key, _ := kt.(string)
+				if _, dup := obj[key]; dup {
+					return nil, errDuplicateKey
+				}
+				if obj[key], err = strictValue(dec, depth+1); err != nil {
+					return nil, err
+				}
+			}
+			_, err = dec.Token() // }
+			return obj, err
+		case '[':
+			arr := []any{}
+			for dec.More() {
+				v, err := strictValue(dec, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				arr = append(arr, v)
+			}
+			_, err = dec.Token() // ]
+			return arr, err
+		}
+		return nil, errors.New("they are not valid JSON")
+	default:
+		return t, nil
+	}
+}
+
+// encodeJSON encodes v with sorted keys, without HTML escapes and without a trailing newline.
+func encodeJSON(v any) (json.RawMessage, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+}
+
+// What the owner is shown of a held call's arguments: each string value or key cut at
+// maxShownValue bytes, each array at maxShownItems items and each object at maxShownKeys keys,
+// so that every key of a usual call stays visible however long one value is.
+const (
+	maxShownValue = 512
+	maxShownItems = 64
+	maxShownKeys  = 256
+)
+
+// shownArguments returns a held call's canonical arguments as the owner is shown them: redacted
+// with the server's rules, or the default ones when its results are not redacted, findings
+// replaced by markers and never kept; every rune that is not printable or is a format
+// character, such as a bidirectional override, written as \uXXXX; long values, arrays and
+// objects cut, which truncated reports.
+func (m *Mirror) shownArguments(canonical json.RawMessage) (shown string, truncated bool) {
+	if len(canonical) == 0 {
+		return "", false
+	}
+	const unredactable = "(the arguments could not be redacted)"
 	engine := m.opts.Approval.Engine
 	if r := m.opts.Redaction; r != nil {
 		engine = r.engine
 	}
 	if engine == nil {
-		return "(the arguments could not be redacted)"
+		return unredactable, false
 	}
-	out, err := engine.RedactJSON(raw, redact.Marker{})
+	out, err := engine.RedactJSON(canonical, redact.Marker{})
 	if err != nil {
-		return "(the arguments could not be redacted)"
+		return unredactable, false
 	}
-	var compact bytes.Buffer
-	if json.Compact(&compact, out) != nil {
-		return "(the arguments could not be redacted)"
+	dec := json.NewDecoder(bytes.NewReader(out))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return unredactable, false
 	}
-	return redact.Cut(compact.String(), maxShownArguments)
+	v = shownValue(v, &truncated)
+	enc, err := encodeJSON(v)
+	if err != nil {
+		return unredactable, false
+	}
+	return string(enc), truncated
+}
+
+// shownValue makes v fit to show (see shownArguments), setting truncated when it cuts.
+func shownValue(v any, truncated *bool) any {
+	text := func(s string) string {
+		s = approval.Printable(s)
+		if len(s) > maxShownValue {
+			*truncated = true
+			s = redact.Cut(s, maxShownValue)
+		}
+		return s
+	}
+	switch t := v.(type) {
+	case string:
+		return text(t)
+	case []any:
+		if len(t) > maxShownItems {
+			*truncated = true
+			rest := len(t) - maxShownItems
+			t = append(t[:maxShownItems:maxShownItems], fmt.Sprintf("… %d more", rest))
+		}
+		for i := range t {
+			t[i] = shownValue(t[i], truncated)
+		}
+		return t
+	case map[string]any:
+		keys := slices.Sorted(maps.Keys(t))
+		more := len(keys) - maxShownKeys
+		if more > 0 {
+			*truncated = true
+			keys = keys[:maxShownKeys]
+		}
+		out := make(map[string]any, len(keys)+1)
+		put := func(k string, v any) {
+			// Two keys that read the same once escaped or cut are both shown.
+			for _, ok := out[k]; ok; _, ok = out[k] {
+				*truncated = true
+				k += " (another key)"
+			}
+			out[k] = v
+		}
+		for _, k := range keys {
+			put(text(k), shownValue(t[k], truncated))
+		}
+		if more > 0 {
+			put("…", fmt.Sprintf("%d more keys", more))
+		}
+		return out
+	}
+	return v
 }
 
 // waiting tells the caller, through its request's progress token if it has one, that its call

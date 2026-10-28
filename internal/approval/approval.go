@@ -9,11 +9,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
@@ -27,8 +30,16 @@ const (
 	ByGate = "gate"
 )
 
-// MaxPending is how many calls may wait at a time.
-const MaxPending = 64
+// Bounds of the store.
+const (
+	// MaxPending is how many calls may wait at a time, and MaxPendingPerPrincipal how many of
+	// them one token's (or the calls without a token).
+	MaxPending             = 64
+	MaxPendingPerPrincipal = 16
+	// maxNotifiers is how many notices are sent at a time; the others queue, at most
+	// MaxPending, and a notice that finds the queue full is dropped.
+	maxNotifiers = 4
+)
 
 // ProgressInterval is how often a waiting call that carries a progress token is told it waits.
 // A variable for tests.
@@ -80,11 +91,36 @@ func (r *Rules) Holds(principal, tool string) bool {
 	return r.server.Match(tool) || (principal != "" && r.tokens[principal].Match(tool))
 }
 
+// Unmatched returns the exact patterns (not ending in *) of the server's list and of every
+// token's that name no tool in listed, sorted and once each: a misspelt pattern holds nothing.
+func (r *Rules) Unmatched(listed map[string]bool) []string {
+	if r == nil {
+		return nil
+	}
+	var out []string
+	check := func(p Patterns) {
+		for _, pat := range p {
+			if !strings.HasSuffix(pat, "*") && !listed[pat] && !slices.Contains(out, pat) {
+				out = append(out, pat)
+			}
+		}
+	}
+	check(r.server)
+	for _, p := range r.tokens {
+		check(p)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Question is a held call as the owner is shown it.
 type Question struct {
 	Server, Tool, Principal string
-	// Arguments are the call's arguments as JSON text, redacted and cut.
+	// Arguments are the call's arguments as JSON text, redacted, with long values cut; Size is
+	// the length of the arguments forwarded, and Truncated reports a value that was cut.
 	Arguments string
+	Size      int
+	Truncated bool
 }
 
 // Settings say how a call is asked about: how long it waits, and who is told.
@@ -109,6 +145,8 @@ type Pending struct {
 	Tool      string    `json:"tool"`
 	Principal string    `json:"principal"`
 	Arguments string    `json:"arguments"`
+	Size      int       `json:"size"`
+	Truncated bool      `json:"truncated"`
 	Created   time.Time `json:"created"`
 	Expires   time.Time `json:"expires"`
 }
@@ -122,11 +160,26 @@ type entry struct {
 // Store holds the pending approvals.
 type Store struct {
 	logger *slog.Logger
+	// ctx ends with Close; the notices in flight are cancelled with it.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// notices queues the notices to send; Dropped counts those that found it full.
+	notices chan notice
+	dropped atomic.Int64
 
 	mu      sync.Mutex
 	pending map[string]*entry
 	links   map[[sha256.Size]byte]*entry
+	byWho   map[string]int // pending approvals by principal
 	closed  bool
+	senders int // goroutines sending notices
+}
+
+// notice is a notice waiting to be sent.
+type notice struct {
+	e  *entry
+	n  Notice
+	to Notifier
 }
 
 // NewStore returns an empty store.
@@ -134,7 +187,59 @@ func NewStore(logger *slog.Logger) *Store {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &Store{logger: logger, pending: map[string]*entry{}, links: map[[sha256.Size]byte]*entry{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Store{
+		logger: logger, ctx: ctx, cancel: cancel, notices: make(chan notice, MaxPending),
+		pending: map[string]*entry{}, links: map[[sha256.Size]byte]*entry{}, byWho: map[string]int{},
+	}
+}
+
+// Dropped counts the notices dropped because too many were waiting to be sent.
+func (st *Store) Dropped() int64 { return st.dropped.Load() }
+
+// notify queues a notice, and starts a sender when fewer than maxNotifiers run. The senders
+// skip a notice whose approval is no longer pending, and end when the queue is empty.
+func (st *Store) notify(e *entry, n Notice, to Notifier) {
+	select {
+	case st.notices <- notice{e: e, n: n, to: to}:
+	default:
+		st.dropped.Add(1)
+		st.logger.Warn("too many approval notices waiting to be sent; this one is dropped", "server", e.Server, "tool", e.Tool, "id", e.ID)
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.senders < maxNotifiers {
+		st.senders++
+		go st.send()
+	}
+}
+
+func (st *Store) send() {
+	for {
+		select {
+		case j := <-st.notices:
+			if st.isPending(j.e) && st.ctx.Err() == nil {
+				j.to.Notify(st.ctx, j.n)
+			}
+			continue
+		default:
+		}
+		st.mu.Lock()
+		if len(st.notices) == 0 {
+			st.senders--
+			st.mu.Unlock()
+			return
+		}
+		st.mu.Unlock()
+	}
+}
+
+// isPending reports whether e still waits for a decision.
+func (st *Store) isPending(e *entry) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.pending[e.ID] == e
 }
 
 // Ask holds a call until it is decided, it expires after s.Timeout, or ctx is done, and returns
@@ -148,10 +253,10 @@ func (st *Store) Ask(ctx context.Context, q Question, s Settings, waiting func(i
 	if s.Notifier != nil {
 		n := Notice{Pending: e.Pending}
 		if token != "" {
-			base := strings.TrimSuffix(s.LinkURL, "/") + LinkRoute + token
-			n.ApproveURL, n.DenyURL = base+"/approve", base+"/deny"
+			base := strings.TrimSuffix(s.LinkURL, "/") + LinkRoute
+			n.ApproveURL, n.DenyURL, n.LinkToken = base+"approve", base+"deny", token
 		}
-		go s.Notifier.Notify(n)
+		st.notify(e, n, s.Notifier)
 	}
 	timer := time.NewTimer(s.Timeout)
 	defer timer.Stop()
@@ -185,7 +290,7 @@ func (st *Store) add(q Question, timeout time.Duration, links bool) (*entry, str
 	e := &entry{
 		Pending: Pending{
 			ID: randomHex(8), Server: q.Server, Tool: q.Tool, Principal: q.Principal, Arguments: q.Arguments,
-			Created: now, Expires: now.Add(timeout),
+			Size: q.Size, Truncated: q.Truncated, Created: now, Expires: now.Add(timeout),
 		},
 		done: make(chan Decision, 1),
 	}
@@ -202,9 +307,14 @@ func (st *Store) add(q Question, timeout time.Duration, links bool) (*entry, str
 		return nil, ""
 	}
 	if len(st.pending) >= MaxPending {
-		st.logger.Warn("too many calls wait for approval; denied", "server", q.Server, "tool", q.Tool, "max", MaxPending)
+		st.logger.Warn("too many calls wait for approval; denied", "server", q.Server, "tool", q.Tool, "principal", q.Principal, "max", MaxPending)
 		return nil, ""
 	}
+	if st.byWho[q.Principal] >= MaxPendingPerPrincipal {
+		st.logger.Warn("too many calls of one token wait for approval; denied", "server", q.Server, "tool", q.Tool, "principal", q.Principal, "max", MaxPendingPerPrincipal)
+		return nil, ""
+	}
+	st.byWho[q.Principal]++
 	for st.pending[e.ID] != nil {
 		e.ID = randomHex(8)
 	}
@@ -230,6 +340,9 @@ func (st *Store) end(e *entry, d Decision) (_ Decision, ok bool) {
 // remove drops e from the maps; the caller holds mu.
 func (st *Store) remove(e *entry) {
 	delete(st.pending, e.ID)
+	if st.byWho[e.Principal]--; st.byWho[e.Principal] <= 0 {
+		delete(st.byWho, e.Principal)
+	}
 	if e.link != ([sha256.Size]byte{}) {
 		delete(st.links, e.link)
 	}
@@ -306,7 +419,31 @@ func (st *Store) Close() {
 	st.closed = true
 	st.mu.Unlock()
 	st.DenyAll()
+	st.cancel()
 }
+
+// Printable returns s with every rune that is not printable, or is a format character such as
+// a bidirectional override, written as \uXXXX (\UXXXXXXXX above the BMP), so that a terminal
+// or a chat client shows the text as it is.
+func Printable(s string) string {
+	if !strings.ContainsFunc(s, unsafeRune) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case !unsafeRune(r):
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			fmt.Fprintf(&b, "\\U%08X", r)
+		default:
+			fmt.Fprintf(&b, "\\u%04X", r)
+		}
+	}
+	return b.String()
+}
+
+func unsafeRune(r rune) bool { return !unicode.IsPrint(r) || unicode.Is(unicode.Cf, r) }
 
 func randomHex(n int) string {
 	b := make([]byte, n)

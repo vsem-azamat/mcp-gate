@@ -15,7 +15,7 @@ $ mcp-gate approvals deny 3f2a9c0d11e4b5a7
 mcp-gate approvals: no pending approval 3f2a9c0d11e4b5a7: it was decided, it expired, or the id is wrong
 ```
 
-`list` shows each pending approval, oldest first: its identifier, the server and tool, the token that made the call (`(no token)` on a public server), the time left, and the arguments, redacted and cut at 4 KiB. `approve` lets the call go to its server; `deny` answers it with a tool error. Each approval is decided once; the audit line names the admin token that decided it.
+`list` shows each pending approval, oldest first: its identifier, the server and tool, the token that made the call (`(no token)` on a public server), the time left, and the arguments: redacted, with control, format and bidirectional characters written as `\uXXXX` so they cannot drive the terminal, and long values cut, which the line marks with `(cut; <size> bytes forwarded)`. `approve` lets the call go to its server; `deny` answers it with a tool error. Each approval is decided once; the audit line names the admin token that decided it.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ The gate needs `admin.tokens`; without them `/_approvals` is 404. The endpoints 
 
 ```console
 $ curl -s -H "Authorization: Bearer $MCP_GATE_ADMIN_TOKEN" http://127.0.0.1:9090/_approvals
-{"pending":[{"id":"3f2a9c0d11e4b5a7","server":"chat","tool":"send_message","principal":"laptop","arguments":"…","created":"2026-01-02T10:00:00Z","expires":"2026-01-02T10:05:00Z"}]}
+{"pending":[{"id":"3f2a9c0d11e4b5a7","server":"chat","tool":"send_message","principal":"laptop","arguments":"…","size":61,"truncated":false,"created":"2026-01-02T10:00:00Z","expires":"2026-01-02T10:05:00Z"}]}
 $ curl -s -X POST -H "Authorization: Bearer $MCP_GATE_ADMIN_TOKEN" http://127.0.0.1:9090/_approvals/3f2a9c0d11e4b5a7/approve
 {"id":"3f2a9c0d11e4b5a7","approval":"approved"}
 ```

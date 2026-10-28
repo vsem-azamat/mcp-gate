@@ -95,7 +95,9 @@ type Gate struct {
 	toolPins   *toolpins.Store
 	// approvals holds the tool calls waiting for the owner, under every snapshot; defaultRules
 	// redacts the arguments shown of a server whose results are not redacted.
-	approvals    *approval.Store
+	approvals *approval.Store
+	// adminLimit bounds guessing of the admin tokens, across reloads.
+	adminLimit   *escrow.AuthLimit
 	defaultRules *redact.Engine
 	// startedAt is when the gate was built; file scanning keeps in the escrow only files written
 	// since then, across reloads.
@@ -153,6 +155,7 @@ func New(opts Options) (*Gate, error) {
 	g.audit = audit.Tee(audit.Log(g.logger), g.metrics)
 	g.toolPins = toolpins.New(opts.StateDir)
 	g.approvals = approval.NewStore(g.logger)
+	g.adminLimit = escrow.NewAuthLimit()
 	var err error
 	if g.defaultRules, err = redact.New(redact.Options{}); err != nil {
 		return nil, err

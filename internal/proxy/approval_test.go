@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -21,7 +23,7 @@ import (
 // notices is a notifier that keeps what it is told.
 type notices chan approval.Notice
 
-func (n notices) Notify(x approval.Notice) { n <- x }
+func (n notices) Notify(_ context.Context, x approval.Notice) { n <- x }
 
 // approvalMirror returns a mirror of down whose server holds send and delete_*, and whose token
 // phone has a policy that hides mail and holds echo.
@@ -171,14 +173,94 @@ func TestApprovalExpiresAndCancels(t *testing.T) {
 
 func TestShownArguments(t *testing.T) {
 	m, _, _, _ := approvalMirror(t, &fakeDown{}, time.Minute)
-	if got := m.shownArguments(nil); got != "" {
+	if got, cut := m.shownArguments(nil); got != "" || cut {
 		t.Errorf("no arguments: %q", got)
 	}
-	long := `{"text":"` + strings.Repeat("a", 2*maxShownArguments) + `"}`
-	if got := m.shownArguments(json.RawMessage(long)); len(got) > maxShownArguments+len("…") {
-		t.Errorf("cut to %d bytes", len(got))
+	// A long value is cut by itself: every key stays visible.
+	long := `{"note":"` + strings.Repeat("a", 5000) + `","to":"alice@example.com"}`
+	got, cut := m.shownArguments(json.RawMessage(long))
+	if !cut || !strings.Contains(got, `"to":"alice@example.com"`) || len(got) > maxShownValue+100 {
+		t.Errorf("long value: %v %q", cut, got)
 	}
-	if got := m.shownArguments(json.RawMessage(`{"key":"` + ghToken + `"}`)); strings.Contains(got, ghToken) {
+	if got, cut := m.shownArguments(json.RawMessage(`{"key":"` + ghToken + `"}`)); strings.Contains(got, ghToken) || cut {
 		t.Errorf("not redacted: %s", got)
+	}
+	// Format and C1 characters are written out, not passed to the relay.
+	got, _ = m.shownArguments(json.RawMessage(`{"path":"/srv/safe` + "\u202e" + `dwssap","c":"x` + "\u009b" + `2J","k` + "\u200b" + `":1}`))
+	if strings.ContainsAny(got, "\u202e\u009b\u200b") || !strings.Contains(got, `\\u202E`) || !strings.Contains(got, `\\u009B`) || !strings.Contains(got, `"k\\u200B"`) {
+		t.Errorf("format characters: %q", got)
+	}
+	// Big arrays and objects are cut, and say so.
+	var items []string
+	for i := range 100 {
+		items = append(items, fmt.Sprintf(`"k%03d":%d`, i, i))
+	}
+	big := `{"list":[` + strings.Repeat("1,", 99) + `1],` + strings.Join(items, ",") + `}`
+	if got, cut := m.shownArguments(json.RawMessage(big)); !cut || !strings.Contains(got, "36 more") {
+		t.Errorf("big array: %q", got)
+	}
+}
+
+func TestCanonicalArguments(t *testing.T) {
+	for _, c := range []struct{ in, want, err string }{
+		{in: ``, want: ``},
+		{in: ` {"b": 1.50, "a": [true, null, "<x>"]} `, want: `{"a":[true,null,"<x>"],"b":1.50}`},
+		{in: `{"to":"alice","to":"mallory"}`, err: "a key is given twice"},
+		{in: `{"a":{"x":1,"x":2}}`, err: "a key is given twice"},
+		{in: `{"a":[{"x":1,"x":2}]}`, err: "a key is given twice"},
+		{in: `[1]`, err: "not a JSON object"},
+		{in: `{"a":1} {"a":2}`, err: "more than one JSON value"},
+		{in: `{"a":`, err: "not valid JSON"},
+		{in: strings.Repeat(`{"a":`, 70) + `1` + strings.Repeat(`}`, 70), err: "nested too deep"},
+	} {
+		got, err := canonicalArguments(json.RawMessage(c.in))
+		switch {
+		case c.err != "":
+			if err == nil || !strings.Contains(err.Error(), c.err) {
+				t.Errorf("%.40s: %v, want %q", c.in, err, c.err)
+			}
+		case err != nil || string(got) != c.want:
+			t.Errorf("%.40s: %s %v, want %s", c.in, got, err, c.want)
+		}
+	}
+}
+
+// TestHeldArgumentsAsShown checks that the server gets exactly the arguments the owner saw, and
+// that arguments with a key given twice are refused without asking.
+func TestHeldArgumentsAsShown(t *testing.T) {
+	down := &fakeDown{tool: textResult("sent")}
+	m, rec, store, n := approvalMirror(t, down, time.Minute)
+	got := callAsync(m, "send", "send", `{ "to" : "alice@example.com", "n": 1e2 }`, nil)
+	notice := <-n
+	if notice.Arguments != `{"n":1e2,"to":"alice@example.com"}` || notice.Size != len(`{"n":1e2,"to":"alice@example.com"}`) || notice.Truncated {
+		t.Errorf("notice %+v", notice)
+	}
+	store.Decide(notice.ID, true, "owner")
+	<-got
+	if len(down.tools) != 1 || !jsonIs(down.tools[0].Arguments, `{"n":1e2,"to":"alice@example.com"}`) {
+		t.Errorf("forwarded %+v", down.tools)
+	}
+	c := <-callAsync(m, "send", "send", `{"to":"alice@example.com","note":"`+strings.Repeat("a", 5000)+`","to":"mallory@example.com"}`, nil)
+	if c.err != nil || !c.res.IsError || !strings.Contains(firstText(c.res), "a key is given twice") {
+		t.Errorf("duplicate key: %+v %q", c, firstText(c.res))
+	}
+	if len(n) != 0 || len(down.tools) != 1 {
+		t.Error("a call with a key given twice was held or forwarded")
+	}
+	if r := rec.all(); r[len(r)-1].Outcome != audit.NotApproved || r[len(r)-1].Approval != audit.ApprovalDenied || r[len(r)-1].Approver != approval.ByGate {
+		t.Errorf("record %+v", r[len(r)-1])
+	}
+}
+
+func TestUnmatchedApprovePatternWarns(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	cfg := &config.Config{Servers: map[string]*config.Server{"s": {Approve: []string{"send", "s__delete", "drop_*"}}}}
+	m, _ := fakeMirror(Options{Logger: logger, Approval: &Approval{Rules: approval.NewRules(cfg, "s"), Store: approval.NewStore(nil)}}, &fakeDown{})
+	m.checkApprove([]*mcp.Tool{{Name: "send"}})
+	m.checkApprove([]*mcp.Tool{{Name: "send"}})
+	out := logs.String()
+	if strings.Count(out, "names no tool") != 1 || !strings.Contains(out, "pattern=s__delete") || strings.Contains(out, "drop_") {
+		t.Errorf("warnings: %s", out)
 	}
 }

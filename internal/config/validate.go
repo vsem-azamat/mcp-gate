@@ -38,8 +38,10 @@ const (
 	// The bounds of approvals.timeout.
 	MinApprovalTimeout = time.Second
 	MaxApprovalTimeout = time.Hour
-	// MinWebhookSecret is the shortest approvals.webhook.secret.
+	// MinWebhookSecret is the shortest approvals.webhook.secret, MinAdminToken the shortest
+	// admin token.
 	MinWebhookSecret = 16
+	MinAdminToken    = 16
 )
 
 // ServerNameRE is the form of a server name: it becomes the path /<name>/mcp.
@@ -98,6 +100,7 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 	}
 	validateTokens("auth.tokens", c.Auth.Tokens, add)
 	validateTokens("admin.tokens", c.Admin.Tokens, add)
+	c.validateAdmin(add)
 	c.validateMetrics(add)
 	if c.Escrow.TTL != nil && c.Escrow.TTL.D() == 0 {
 		add("escrow.ttl", "must be positive")
@@ -231,6 +234,33 @@ func (f *PolicyFilter) validate(path, noun, prefix string, add func(path, format
 			add(p, "names the %s as the aggregate endpoint does; write the server's own name for it, without %q", noun, prefix+AggregateSeparator)
 		}
 		seen[v] = true
+	}
+}
+
+// validateAdmin checks that every admin token is long enough to resist guessing and is not also
+// a client token: an agent holding it could otherwise approve its own held calls or read
+// /_status.
+func (c *Config) validateAdmin(add func(path, format string, args ...any)) {
+	clients := map[string]bool{}
+	for _, v := range c.Auth.Tokens {
+		clients[v] = true
+	}
+	for _, s := range c.Servers {
+		if s != nil {
+			for _, v := range s.Auth.Tokens {
+				clients[v] = true
+			}
+		}
+	}
+	for _, name := range sortedKeys(c.Admin.Tokens) {
+		v := c.Admin.Tokens[name]
+		switch {
+		case v == "":
+		case len(v) < MinAdminToken:
+			add("admin.tokens."+name, "must be at least %d characters", MinAdminToken)
+		case clients[v]:
+			add("admin.tokens."+name, "has the value of a client token in auth.tokens or a server's auth.tokens; an admin token must be the owner's alone")
+		}
 	}
 }
 
@@ -597,7 +627,7 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	s.Prompts.validate(path+".prompts", add)
 
 	s.Resources.validate(path+".resources", add)
-	validateApprove(path+".approve", s.Approve, "", add)
+	validateApprove(path+".approve", s.Approve, path[strings.LastIndexByte(path, '.')+1:], add)
 	seen := map[string]bool{}
 	for i, k := range s.ForwardMeta {
 		p := fmt.Sprintf("%s.forwardMeta[%d]", path, i)

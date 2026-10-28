@@ -3,12 +3,15 @@ package approval
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,11 +154,15 @@ func TestMaxPending(t *testing.T) {
 	st := NewStore(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	for range MaxPending {
-		wg.Go(func() { st.Ask(ctx, question, Settings{Timeout: time.Minute}, nil) })
+	for i := range MaxPending {
+		q := question
+		q.Principal = fmt.Sprintf("token-%d", i%(MaxPending/MaxPendingPerPrincipal))
+		wg.Go(func() { st.Ask(ctx, q, Settings{Timeout: time.Minute}, nil) })
 	}
 	waitPending(t, st, MaxPending)
-	if d := st.Ask(context.Background(), question, Settings{Timeout: time.Minute}, nil); d != (Decision{Approval: audit.ApprovalDenied, By: ByGate}) {
+	q := question
+	q.Principal = "fresh"
+	if d := st.Ask(context.Background(), q, Settings{Timeout: time.Minute}, nil); d != (Decision{Approval: audit.ApprovalDenied, By: ByGate}) {
 		t.Errorf("one too many: %+v", d)
 	}
 	cancel()
@@ -193,7 +200,7 @@ func TestProgressWhileWaiting(t *testing.T) {
 // recorder is a notifier that keeps what it is told.
 type recorder chan Notice
 
-func (r recorder) Notify(n Notice) { r <- n }
+func (r recorder) Notify(_ context.Context, n Notice) { r <- n }
 
 func TestLinks(t *testing.T) {
 	st := NewStore(nil)
@@ -201,40 +208,64 @@ func TestLinks(t *testing.T) {
 	got := ask(st, Settings{Timeout: time.Minute, Notifier: rec, LinkURL: "https://gate.example.com/base/"})
 	n := <-rec
 	const prefix = "https://gate.example.com/base" + LinkRoute
-	if !strings.HasPrefix(n.ApproveURL, prefix) || !strings.HasSuffix(n.ApproveURL, "/approve") ||
-		strings.TrimSuffix(n.ApproveURL, "/approve") != strings.TrimSuffix(n.DenyURL, "/deny") {
-		t.Fatalf("links %q %q", n.ApproveURL, n.DenyURL)
+	if n.ApproveURL != prefix+"approve" || n.DenyURL != prefix+"deny" || len(n.LinkToken) != 43 {
+		t.Fatalf("links %q %q, token of %d characters", n.ApproveURL, n.DenyURL, len(n.LinkToken))
 	}
-	token := strings.TrimSuffix(strings.TrimPrefix(n.ApproveURL, prefix), "/approve")
-	if len(token) != 43 {
-		t.Errorf("token of %d characters", len(token))
+	if strings.Contains(n.ApproveURL, n.LinkToken) {
+		t.Error("the token is in the URL")
 	}
 	h := st.LinkHandler()
-	path := LinkRoute + token
-	if rr := serve(h, http.MethodGet, path+"/approve", ""); rr.Code != http.StatusMethodNotAllowed {
+	body := `{"token":"` + n.LinkToken + `"}`
+	if rr := serveBody(h, http.MethodGet, LinkRoute+"approve", body); rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET: %d", rr.Code)
 	}
-	rr := serve(h, http.MethodPost, path+"/approve", "")
+	if rr := serveBody(h, http.MethodPost, LinkRoute+"approve", "token="+n.LinkToken); rr.Code != http.StatusBadRequest {
+		t.Errorf("not JSON: %d", rr.Code)
+	}
+	rr := serveBody(h, http.MethodPost, LinkRoute+"approve", body)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"approval":"approved"`) || rr.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("approve: %d %s", rr.Code, rr.Body)
 	}
 	if d := <-got; d != (Decision{Approval: audit.Approved, By: ByLink}) {
 		t.Errorf("decision %+v", d)
 	}
-	if rr := serve(h, http.MethodPost, path+"/deny", ""); rr.Code != http.StatusNotFound {
+	if rr := serveBody(h, http.MethodPost, LinkRoute+"deny", body); rr.Code != http.StatusNotFound {
 		t.Errorf("a second use: %d", rr.Code)
 	}
-	if rr := serve(h, http.MethodPost, LinkRoute+"nope/deny", ""); rr.Code != http.StatusNotFound {
+	if rr := serveBody(h, http.MethodPost, LinkRoute+"deny", `{"token":"nope"}`); rr.Code != http.StatusNotFound {
 		t.Errorf("unknown token: %d", rr.Code)
 	}
 
 	// Without links the notice carries none.
 	got = ask(st, Settings{Timeout: time.Minute, Notifier: rec})
-	if n := <-rec; n.ApproveURL != "" || n.DenyURL != "" {
+	if n := <-rec; n.ApproveURL != "" || n.DenyURL != "" || n.LinkToken != "" {
 		t.Errorf("links without linkURL: %+v", n)
 	}
 	st.DenyAll()
 	<-got
+}
+
+// TestConcurrentLink checks that a link decides once however many use it at once.
+func TestConcurrentLink(t *testing.T) {
+	st := NewStore(nil)
+	defer st.Close()
+	rec := make(recorder, 1)
+	got := ask(st, Settings{Timeout: time.Minute, Notifier: rec, LinkURL: "https://gate.example.com"})
+	token := (<-rec).LinkToken
+	var ok atomic.Int64
+	var wg sync.WaitGroup
+	for i := range 100 {
+		wg.Go(func() {
+			if _, _, k := st.DecideLink(token, i%2 == 0); k {
+				ok.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	<-got
+	if ok.Load() != 1 {
+		t.Errorf("%d decisions", ok.Load())
+	}
 }
 
 func serve(h http.Handler, method, path, auth string) *httptest.ResponseRecorder {
@@ -245,6 +276,147 @@ func serve(h http.Handler, method, path, auth string) *httptest.ResponseRecorder
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, r)
 	return rr
+}
+
+func serveBody(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequestWithContext(context.Background(), method, path, strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	return rr
+}
+
+// slowNotifier counts its notices and holds each until ctx ends or release is closed.
+type slowNotifier struct {
+	n       atomic.Int64
+	running atomic.Int64
+	most    atomic.Int64
+	release chan struct{}
+}
+
+func (s *slowNotifier) Notify(ctx context.Context, _ Notice) {
+	s.n.Add(1)
+	r := s.running.Add(1)
+	for m := s.most.Load(); r > m && !s.most.CompareAndSwap(m, r); m = s.most.Load() {
+	}
+	defer s.running.Add(-1)
+	select {
+	case <-ctx.Done():
+	case <-s.release:
+	}
+}
+
+// TestNoticesBounded checks that held calls that are cancelled at once cannot pile up notices:
+// at most maxNotifiers are sent at a time, those of approvals no longer pending are skipped, a
+// full queue drops, and Close ends what is in flight.
+func TestNoticesBounded(t *testing.T) {
+	st := NewStore(nil)
+	sn := &slowNotifier{release: make(chan struct{})}
+	for range 500 {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { st.Ask(ctx, question, Settings{Timeout: time.Minute, Notifier: sn}, nil); close(done) }()
+		waitPending(t, st, 1)
+		cancel()
+		<-done
+	}
+	if most := sn.most.Load(); most > maxNotifiers {
+		t.Errorf("%d notices at once", most)
+	}
+	// What was queued while the senders were busy is skipped once they free up.
+	close(sn.release)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st.mu.Lock()
+		idle := st.senders == 0
+		st.mu.Unlock()
+		if idle {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("senders still running")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if sent := sn.n.Load(); sent > maxNotifiers {
+		t.Errorf("%d notices sent for calls no longer pending", sent)
+	}
+	if st.Dropped() == 0 {
+		t.Error("a full queue dropped nothing")
+	}
+
+	// Close cancels a notice in flight.
+	sn2 := &slowNotifier{release: make(chan struct{})}
+	got := ask(st, Settings{Timeout: time.Minute, Notifier: sn2})
+	for sn2.running.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	st.Close()
+	<-got
+	for deadline := time.Now().Add(5 * time.Second); sn2.running.Load() != 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("the notice outlived Close")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestPendingPerPrincipal(t *testing.T) {
+	st := NewStore(nil)
+	defer st.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent := Question{Server: "s", Tool: "send", Principal: "agent"}
+	for range MaxPendingPerPrincipal {
+		go st.Ask(ctx, agent, Settings{Timeout: time.Minute}, nil)
+	}
+	waitPending(t, st, MaxPendingPerPrincipal)
+	if d := st.Ask(context.Background(), agent, Settings{Timeout: time.Minute}, nil); d != (Decision{Approval: audit.ApprovalDenied, By: ByGate}) {
+		t.Errorf("one more of agent: %+v", d)
+	}
+	// Another token still gets through.
+	out := make(chan Decision, 1)
+	go func() {
+		out <- st.Ask(context.Background(), Question{Server: "s", Tool: "send", Principal: "phone"}, Settings{Timeout: time.Minute}, nil)
+	}()
+	waitPending(t, st, MaxPendingPerPrincipal+1)
+	for _, p := range st.List() {
+		if p.Principal == "phone" {
+			st.Decide(p.ID, true, "owner")
+		}
+	}
+	if d := <-out; d.Approval != audit.Approved {
+		t.Errorf("phone: %+v", d)
+	}
+	// A slot frees once a call ends.
+	cancel()
+	waitPending(t, st, 0)
+}
+
+func TestPrintable(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain text, ünïcode 😀": "plain text, ünïcode 😀",
+		"a\u202eb":              `a\u202Eb`,
+		"x\u009b2J":             `x\u009B2J`,
+		"\x1b]0;t\x07\n":        `\u001B]0;t\u0007\u000A`,
+		"z\U000E0001":           `z\U000E0001`,
+	} {
+		if got := Printable(in); got != want {
+			t.Errorf("Printable(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestUnmatched(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]*config.Server{"a": {Approve: []string{"send", "delete_*", "a__send"}}},
+		Policies: map[string]*config.TokenPolicy{
+			"phone": {Servers: map[string]*config.ServerPolicy{"a": {Approve: []string{"echo", "send"}}}},
+		},
+	}
+	got := NewRules(cfg, "a").Unmatched(map[string]bool{"send": true, "delete_x": true})
+	if !slices.Equal(got, []string{"a__send", "echo"}) {
+		t.Errorf("unmatched %v", got)
+	}
 }
 
 func TestAdminHandler(t *testing.T) {
@@ -302,7 +474,7 @@ func TestWebhook(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	n := Notice{Pending: Pending{ID: "0123456789abcdef", Server: "s", Tool: "send"}, ApproveURL: "https://gate.example.com/a"}
 	const secret = "0123456789abcdef-secret"
-	NewWebhook(srv.URL+"/hook", secret, logger).Notify(n)
+	NewWebhook(srv.URL+"/hook", secret, logger).Notify(context.Background(), n)
 	h := <-hits
 	var back Notice
 	if err := json.Unmarshal(h.body, &back); err != nil || back != n || h.ctype != "application/json" {
@@ -314,7 +486,7 @@ func TestWebhook(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Errorf("logged: %s", logs.String())
 	}
-	NewWebhook(srv.URL+"/redirect", "", logger).Notify(n)
+	NewWebhook(srv.URL+"/redirect", "", logger).Notify(context.Background(), n)
 	if h := <-hits; h.signature != "" {
 		t.Error("signed without a secret")
 	}
@@ -323,15 +495,36 @@ func TestWebhook(t *testing.T) {
 	}
 	logs.Reset()
 	status = http.StatusInternalServerError
-	NewWebhook(srv.URL+"/secret-path-token", "", logger).Notify(n)
+	NewWebhook(srv.URL+"/secret-path-token", "", logger).Notify(context.Background(), n)
 	<-hits
 	if !strings.Contains(logs.String(), "answered 500") || strings.Contains(logs.String(), "secret-path-token") {
 		t.Errorf("failure log: %s", logs.String())
 	}
 	logs.Reset()
 	// A link-local address is refused; the log does not quote the URL.
-	NewWebhook("http://169.254.169.254/latest/secret-path-token", "", logger).Notify(n)
+	NewWebhook("http://169.254.169.254/latest/secret-path-token", "", logger).Notify(context.Background(), n)
 	if !strings.Contains(logs.String(), "link-local or metadata") || strings.Contains(logs.String(), "secret-path-token") {
 		t.Errorf("metadata log: %s", logs.String())
+	}
+	// A failure is logged by its class, without the relay's host.
+	for _, c := range []struct{ url, class string }{
+		{"https://private-relay-name.invalid/bot123:SECRET/send", "error=dns"},
+		{"http://127.0.0.1:1/hook", "error=connect"},
+	} {
+		logs.Reset()
+		NewWebhook(c.url, "", logger).Notify(context.Background(), n)
+		if out := logs.String(); !strings.Contains(out, c.class) || strings.Contains(out, "private-relay-name") ||
+			strings.Contains(out, "SECRET") || strings.Contains(out, "127.0.0.1") {
+			t.Errorf("%s: %s", c.url, out)
+		}
+	}
+	tlsSrv := httptest.NewUnstartedServer(http.NotFoundHandler())
+	tlsSrv.Config.ErrorLog = slog.NewLogLogger(slog.DiscardHandler, slog.LevelError) // the handshake fails on purpose
+	tlsSrv.StartTLS()
+	defer tlsSrv.Close()
+	logs.Reset()
+	NewWebhook(tlsSrv.URL, "", logger).Notify(context.Background(), n)
+	if !strings.Contains(logs.String(), "error=tls") {
+		t.Errorf("tls: %s", logs.String())
 	}
 }

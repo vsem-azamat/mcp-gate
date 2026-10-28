@@ -115,7 +115,7 @@ func runApprovals(ctx context.Context, args []string, env lookupEnv, stdout, std
 		if err := json.Unmarshal(body, &d); err != nil {
 			return fail("cannot read the answer: %v", err)
 		}
-		_, _ = fmt.Fprintf(stdout, "%s: %s\n", d.ID, d.Approval)
+		_, _ = fmt.Fprintf(stdout, "%s: %s\n", approval.Printable(d.ID), approval.Printable(d.Approval))
 		return exitOK
 	}
 	var list struct {
@@ -129,15 +129,22 @@ func runApprovals(ctx context.Context, args []string, env lookupEnv, stdout, std
 		return exitOK
 	}
 	now := time.Now()
+	// Everything printed comes from the gate, and some of it from agents and servers: what a
+	// terminal would act on, such as escape sequences or bidirectional overrides, is written out.
+	safe := approval.Printable
 	for _, p := range list.Pending {
-		by := p.Principal
+		by := safe(p.Principal)
 		if by == "" {
 			by = "(no token)"
 		}
 		left := max(p.Expires.Sub(now), 0).Truncate(time.Second)
-		_, _ = fmt.Fprintf(stdout, "%s  %s/%s  by %s  %s left\n", p.ID, p.Server, p.Tool, by, left)
+		_, _ = fmt.Fprintf(stdout, "%s  %s/%s  by %s  %s left\n", safe(p.ID), safe(p.Server), safe(p.Tool), by, left)
 		if p.Arguments != "" {
-			_, _ = fmt.Fprintf(stdout, "  %s\n", p.Arguments)
+			args := safe(p.Arguments)
+			if p.Truncated {
+				args += fmt.Sprintf("  (cut; %d bytes forwarded)", p.Size)
+			}
+			_, _ = fmt.Fprintf(stdout, "  %s\n", args)
 		}
 	}
 	return exitOK

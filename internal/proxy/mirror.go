@@ -134,6 +134,11 @@ type Mirror struct {
 	lastSync  time.Time
 	held      map[string]bool // the tools the tool pins hold
 
+	// approveMu guards approveWarned, the exact approve patterns already reported as matching
+	// no listed tool.
+	approveMu     sync.Mutex
+	approveWarned map[string]bool
+
 	watchMu  sync.Mutex
 	watchers map[int]func()
 	nextW    int
@@ -449,6 +454,7 @@ func (m *Mirror) filter(kinds kindSet, l *listing) *filtered {
 	f := &filtered{}
 	if kinds.has(audit.Tool) {
 		tools := m.uniqueTools(l.tools)
+		m.checkApprove(tools)
 		f.held = m.checkPins(tools)
 		f.tools = m.filterTools(tools, f.held)
 	}
@@ -638,6 +644,31 @@ func (m *Mirror) uniqueTools(list []*mcp.Tool) []*mcp.Tool {
 		m.logger.Warn("the server lists tool names more than once; serving the first of each", "duplicates", dups, "first", m.logText(first))
 	}
 	return out
+}
+
+// checkApprove warns, once per mirror, about each exact approve pattern that names no tool the
+// server lists: a misspelt pattern, or one written as the aggregate endpoint names the tool,
+// holds nothing.
+func (m *Mirror) checkApprove(tools []*mcp.Tool) {
+	a := m.opts.Approval
+	if a == nil {
+		return
+	}
+	listed := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		listed[t.Name] = true
+	}
+	m.approveMu.Lock()
+	defer m.approveMu.Unlock()
+	if m.approveWarned == nil {
+		m.approveWarned = map[string]bool{}
+	}
+	for _, pat := range a.Rules.Unmatched(listed) {
+		if !m.approveWarned[pat] {
+			m.approveWarned[pat] = true
+			m.logger.Warn("an approve pattern names no tool the server lists, so it holds nothing until the server lists one", "pattern", m.logText(pat))
+		}
+	}
 }
 
 // checkPins is the tool pins step: it compares the listed tools with the server's pins, writes
