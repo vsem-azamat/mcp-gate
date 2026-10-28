@@ -318,19 +318,22 @@ func methodNotFound(err error) bool {
 }
 
 // Bounds of one listing of a kind, so that a server whose cursor never ends, or whose catalog
-// keeps growing, fails its listing instead of growing the gate's memory until listTimeout.
+// keeps growing, fails its listing instead of growing the gate's memory until listTimeout. The
+// bytes are those of the entries encoded as JSON; a page itself is bounded by maxMessageBytes.
 const (
 	maxListPages   = 1000
 	maxListEntries = 50000
+	maxListBytes   = 64 << 20
 )
 
-// errListTooLong is the error of a listing over maxListPages or maxListEntries.
-var errListTooLong = fmt.Errorf("the listing has more than %d pages or %d entries", maxListPages, maxListEntries)
+// errListTooLong is the error of a listing over one of its bounds.
+var errListTooLong = fmt.Errorf("the listing has more than %d pages, %d entries or %d MiB", maxListPages, maxListEntries, maxListBytes>>20)
 
 // collect reads every page of a listing: list returns the entries of the page at cursor and the
 // next cursor, empty after the last page.
 func collect[T any](ctx context.Context, list func(ctx context.Context, cursor string) ([]*T, string, error)) ([]*T, error) {
 	var out []*T
+	size := 0
 	cursor := ""
 	for range maxListPages {
 		items, next, err := list(ctx, cursor)
@@ -339,6 +342,15 @@ func collect[T any](ctx context.Context, list func(ctx context.Context, cursor s
 		}
 		if len(out)+len(items) > maxListEntries {
 			return nil, errListTooLong
+		}
+		for _, item := range items {
+			data, err := json.Marshal(item)
+			if err != nil {
+				return nil, err
+			}
+			if size += len(data); size > maxListBytes {
+				return nil, errListTooLong
+			}
 		}
 		out = append(out, items...)
 		if next == "" {

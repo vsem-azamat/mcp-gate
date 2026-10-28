@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -121,6 +122,19 @@ func TestCollectBounds(t *testing.T) {
 	}
 	if _, err := collect(t.Context(), big); !errors.Is(err, errListTooLong) {
 		t.Errorf("too many entries: %v", err)
+	}
+	type text struct{ T string }
+	pageOf := strings.Repeat("x", 1<<20)
+	heavyPages := 0
+	heavy := func(context.Context, string) ([]*text, string, error) { // 100 pages of 1 MiB
+		heavyPages++
+		if heavyPages == 100 {
+			return []*text{{T: pageOf}}, "", nil
+		}
+		return []*text{{T: pageOf}}, "more", nil
+	}
+	if _, err := collect(t.Context(), heavy); !errors.Is(err, errListTooLong) {
+		t.Errorf("too many bytes: %v", err)
 	}
 	two := func(_ context.Context, c string) ([]*entry, string, error) {
 		if c == "" {
