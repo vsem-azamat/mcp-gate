@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func loadPins(dir string) (*pinStore, error) {
 	}
 	var doc pinsDoc
 	if err := json.Unmarshal(data, &doc); err != nil || doc.Version != pinsVersion {
-		return s, errors.New(s.path + ": not a pins file of version 2")
+		return s, fmt.Errorf("%s: not a pins file of version %d", s.path, pinsVersion)
 	}
 	for name, p := range doc.Pins {
 		if slices.Contains(mcp.SupportedProtocolVersions(), p.Version) && p.Transport != "" {

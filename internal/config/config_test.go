@@ -808,6 +808,16 @@ func TestDecodeErrorsWithTheRest(t *testing.T) {
 		t.Errorf("the policy filter is reported twice: %v", err)
 	}
 
+	// A filter of the wrong form is reported once, by its field, and the decoder's other errors
+	// on its line are kept.
+	doc = "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x}\n" +
+		"policies: {t: {servers: {a: {tools: {allow: [x], deny: [y], other: 1}, bogus: 1}}}}\n"
+	_, err = Parse([]byte(doc), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "field bogus not found") ||
+		strings.Count(err.Error(), "policies.t.servers.a.tools") != 1 || strings.Contains(err.Error(), "policy filter") {
+		t.Errorf("filter of the wrong form: %v", err)
+	}
+
 	// A duplicate key drops its whole mapping, so only the decoder's errors are reported.
 	doc = "version: 1\nlogLevel: loud\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x}\n" +
 		"    disabled: true\n    disabled: false\n    callTimeout: 30\n"
@@ -849,5 +859,16 @@ func TestServerTransport(t *testing.T) {
 	}
 	if h := parse("    http: {url: 'https://${HOST}/mcp', headers: {X-Key: '${KEY}'}}\n"); h != `{"url":"https://${HOST}/mcp"}` {
 		t.Errorf("http transport = %s", h)
+	}
+}
+
+// TestDecodeErrorHidesValueWithBacktick checks that a value with a backtick in it does not end
+// the part of a decoder error that is hidden.
+func TestDecodeErrorHidesValueWithBacktick(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x}\n    disabled: \"a`hunter2-long-secret`b\"\n"
+	_, err := Parse([]byte(doc), noEnv)
+	if err == nil || strings.Contains(err.Error(), "hunt") || !strings.Contains(err.Error(), "value not shown") {
+		t.Errorf("error = %v", err)
 	}
 }

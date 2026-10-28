@@ -63,12 +63,12 @@ var reservedHeaders = []string{
 	"Transfer-Encoding", "Upgrade",
 }
 
-// validate records every problem in c, except at the paths in skip (whose values did not
-// expand, and so are already reported). home is the home directory of the gate's environment,
+// validate records every problem in c, except at the paths in skip and under them (values that
+// did not expand, and policy filters of the wrong form, which are already reported). home is the home directory of the gate's environment,
 // or empty.
 func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 	add := func(path, format string, args ...any) {
-		if skip[path] {
+		if skipped(skip, path) {
 			return
 		}
 		*errs = append(*errs, fmt.Errorf("%s: %s", path, fmt.Sprintf(format, args...)))
@@ -741,6 +741,16 @@ func ReservedMetaKey(k string) bool {
 	}
 	for label := range strings.SplitSeq(prefix, ".") {
 		if label == "modelcontextprotocol" || label == "mcp" {
+			return true
+		}
+	}
+	return false
+}
+
+// skipped reports whether path is in skip or under a path in skip.
+func skipped(skip map[string]bool, path string) bool {
+	for p := range skip {
+		if path == p || strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[") {
 			return true
 		}
 	}

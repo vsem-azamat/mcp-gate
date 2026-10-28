@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -122,6 +123,9 @@ type PolicyFilter struct {
 	Deny  []string `yaml:"deny"`
 }
 
+// policyFilterError names a policy filter in the errors of PolicyFilter.UnmarshalYAML.
+const policyFilterError = "a policy filter"
+
 // UnmarshalYAML decodes PolicyNone or a mapping with the keys allow and deny, strictly. Parse
 // checks the form first, naming the field; these errors are a fallback with the line only.
 func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
@@ -143,10 +147,10 @@ func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
 			case "deny":
 				list = &f.Deny
 			default:
-				return decodeError("line %d: field %s not found in a policy filter", k.Line, k.Value)
+				return decodeError("line %d: field %s not found in "+policyFilterError, k.Line, k.Value)
 			}
 			if seen[k.Value] {
-				return decodeError("line %d: %s is set twice in a policy filter", k.Line, k.Value)
+				return decodeError("line %d: %s is set twice in "+policyFilterError, k.Line, k.Value)
 			}
 			seen[k.Value] = true
 			if err := v.Decode(list); err != nil {
@@ -159,7 +163,7 @@ func (f *PolicyFilter) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	case yaml.DocumentNode, yaml.SequenceNode, yaml.AliasNode:
 	}
-	return decodeError("line %d: a policy filter is %q or a mapping with allow or deny", n.Line, PolicyNone)
+	return decodeError("line %d: "+policyFilterError+" is %q or a mapping with allow or deny", n.Line, PolicyNone)
 }
 
 // ServerPolicy returns the policy of the token named token on server; nil when it has none.
@@ -464,7 +468,7 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	if err := rejectNullAggregate(data); err != nil {
 		errs = append(errs, err)
 	}
-	policyErrs, policyLines := checkPolicyFilters(data)
+	policyErrs, policyLines, policyPaths := checkPolicyFilters(data)
 	errs = append(errs, policyErrs...)
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -480,8 +484,8 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 		dropped := false
 		for _, e := range typeErr.Errors {
 			dropped = dropped || strings.Contains(e, "already defined at line")
-			if !policyLines[errorLine(e)] { // a policy filter already reported by its field
-				errs = append(errs, fmt.Errorf("config: %s", quotedRE.ReplaceAllString(e, "(value not shown)")))
+			if !policyLines[errorLine(e)] || !strings.Contains(e, policyFilterError) { // already reported by its field
+				errs = append(errs, fmt.Errorf("config: %s", scrubValues(e)))
 			}
 		}
 		if dropped {
@@ -494,7 +498,7 @@ func Parse(data []byte, lookup LookupFunc) (*Config, error) {
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.Join(append(errs, errors.New("config: holds more than one YAML document"))...)
 	}
-	skip := map[string]bool{}
+	skip := maps.Clone(policyPaths) // reported filters are not validated again
 	keyHashVars := varNames(c.Escrow.KeyHash)
 	transports := map[string]string{} // as written; set after expansion, which would expand them
 	for name, srv := range c.Servers {
@@ -559,20 +563,22 @@ func rejectPartial(data []byte) error {
 var policyKinds = map[string]string{"tools": "tool", "prompts": "prompt", "resources": "resource"}
 
 // checkPolicyFilters checks the form of every token policy filter before the file is decoded,
-// so that each problem names its field; lines are those of the filters it reports, whose own
-// decoder errors Parse leaves out: a filter written without a value, which would decode
+// so that each problem names its field; lines and paths are those of the filters it reports,
+// whose own decoder errors (policyFilterError) and validation Parse leaves out: a filter written without a value, which would decode
 // to no filter and narrow nothing, a value other than PolicyNone or a mapping, and a mapping
 // with keys other than allow and deny, or one of them twice. Anything else malformed is left to
 // the decoder.
-func checkPolicyFilters(data []byte) (errs []error, lines map[int]bool) {
-	lines = map[int]bool{}
+func checkPolicyFilters(data []byte) (errs []error, lines map[int]bool, paths map[string]bool) {
+	lines, paths = map[int]bool{}, map[string]bool{}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil || len(doc.Content) == 0 {
-		return nil, lines // the decoder reports a malformed file with its own error
+		return nil, lines, paths // the decoder reports a malformed file with its own error
 	}
 	var at *yaml.Node // the filter being checked
+	var atPath string
 	add := func(path, format string, args ...any) {
 		errs = append(errs, fmt.Errorf("%s: %s", path, fmt.Sprintf(format, args...)))
+		paths[atPath] = true
 		lines[at.Line] = true
 		for _, k := range at.Content {
 			lines[k.Line] = true
@@ -588,7 +594,7 @@ func checkPolicyFilters(data []byte) (errs []error, lines map[int]bool) {
 				}
 				path := "policies." + token + ".servers." + server + "." + kind
 				f = resolveAlias(f)
-				at = f
+				at, atPath = f, path
 				switch {
 				case f.Tag == "!!null":
 					add(path, "has no value; write `%s: %s` to hide every %s, or remove the key", kind, PolicyNone, noun)
@@ -612,7 +618,7 @@ func checkPolicyFilters(data []byte) (errs []error, lines map[int]bool) {
 			}
 		}
 	}
-	return errs, lines
+	return errs, lines, paths
 }
 
 // resolveAlias returns the node an alias names, or n itself.
@@ -671,12 +677,21 @@ func rejectNullAggregate(data []byte) error {
 	return nil
 }
 
-// quotedRE matches the values the YAML decoder quotes in its errors.
-var quotedRE = regexp.MustCompile("`[^`]*`")
+// quotedRE matches a value the YAML decoder quotes in a type error, "`<value>` into <type>":
+// greedy, so that a backtick in the value does not end the match early.
+var quotedRE = regexp.MustCompile("`.*` into ")
 
 // withoutValues returns the decoder's error text with the values it quotes removed.
-func withoutValues(err error) string {
-	return quotedRE.ReplaceAllString(err.Error(), "(value not shown)")
+func withoutValues(err error) string { return scrubValues(err.Error()) }
+
+// scrubValues removes the values the decoder quotes from one of its messages. Whatever follows a
+// backtick left after the quoted values is dropped too, so that no part of a value is shown.
+func scrubValues(msg string) string {
+	msg = quotedRE.ReplaceAllString(msg, "(value not shown) into ")
+	if i := strings.IndexByte(msg, '`'); i >= 0 {
+		msg = msg[:i] + "(value not shown)"
+	}
+	return msg
 }
 
 func (c *Config) applyDefaults() {
