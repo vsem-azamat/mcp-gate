@@ -136,7 +136,7 @@ func TestHeldToolsAreUnknownEverywhere(t *testing.T) {
 	}
 
 	// Accepting echo and applying the listing again serves it; fresh stays held.
-	if _, err := pins.Accept("s", map[string]string{"echo": ""}); err != nil {
+	if _, err := pins.Accept("s", map[string]string{"echo": pendingHash(t, pins, "s", "echo")}); err != nil {
 		t.Fatal(err)
 	}
 	m.Source().Recheck()
@@ -188,7 +188,17 @@ func TestDuplicateNameDecoy(t *testing.T) {
 	if got := pinLines(t, logs.String()); len(got) != 1 || got[0]["action"] != "held" {
 		t.Errorf("toolPin lines %v", got)
 	}
-	if !strings.Contains(logs.String(), "lists a tool name more than once") {
+	if !strings.Contains(logs.String(), "lists tool names more than once") {
 		t.Error("the duplicate is not logged")
 	}
+}
+
+// pendingHash returns the hash of a tool's pending definition.
+func pendingHash(t *testing.T, pins *toolpins.Store, server, tool string) string {
+	t.Helper()
+	f, err := pins.Load(server)
+	if err != nil || f.Tools[tool] == nil || f.Tools[tool].Pending == nil {
+		t.Fatalf("%s: %v", tool, err)
+	}
+	return f.Tools[tool].Pending.Hash
 }

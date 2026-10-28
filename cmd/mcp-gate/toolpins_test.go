@@ -128,3 +128,22 @@ func TestToolpinsRefusesForeignStateDir(t *testing.T) {
 		t.Errorf("%d %q", r.code, r.stderr)
 	}
 }
+
+// TestToolpinsAcceptEscapedName checks that a name diff shows with \u{XXXX} escapes is accepted as
+// the server lists it.
+func TestToolpinsAcceptEscapedName(t *testing.T) {
+	dir := t.TempDir()
+	s := toolpins.New(dir)
+	name := "echo\u200b"
+	s.Check("notes", true, []*mcp.Tool{{Name: "sleep", InputSchema: map[string]any{"type": "object"}}})
+	s.Check("notes", true, []*mcp.Tool{{Name: "sleep", InputSchema: map[string]any{"type": "object"}}, {Name: name, InputSchema: map[string]any{"type": "object"}}})
+	r := runCmd(t, noEnv, "toolpins", "diff", "-state-dir", dir, "notes")
+	line := r.stdout[strings.LastIndex(r.stdout, "  accept: ")+len("  accept: "):]
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, `echo\u{200B}=sha256:`) {
+		t.Fatalf("diff: %q", r.stdout)
+	}
+	if r := runCmd(t, noEnv, "toolpins", "accept", "-state-dir", dir, "notes", line); r.code != exitOK {
+		t.Errorf("accept %q: %d %q", line, r.code, r.stderr)
+	}
+}

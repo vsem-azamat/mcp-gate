@@ -98,16 +98,22 @@ func TestCheckLifecycle(t *testing.T) {
 	if len(f.Pending()) != 0 || f.Tools["fresh"] != nil || f.Accepted() != 2 {
 		t.Errorf("after revert %+v", f.Tools)
 	}
-	// A change after a revert is reported again; a tool no longer listed is forgotten, and
-	// when it is listed again it is added.
+	// A change after a revert is reported again; a tool no longer listed keeps its accepted
+	// pin, so a listing without it does not turn it into a new tool.
 	if res = s.Check("srv", false, changed[:1]); len(res.Changes) != 1 {
 		t.Errorf("second change: %+v", res)
 	}
 	f, _ = s.Load("srv")
-	if f.Tools["sleep"] != nil {
-		t.Errorf("sleep kept its pin: %+v", f.Tools["sleep"])
+	if f.Tools["sleep"] == nil || f.Tools["sleep"].Accepted == nil {
+		t.Errorf("sleep lost its pin: %+v", f.Tools["sleep"])
 	}
-	if res = s.Check("srv", true, []*mcp.Tool{tool("sleep", "Sleep.")}); !res.Held["sleep"] || res.Changes[0].Kind != Added {
+	if res = s.Check("srv", true, nil); res.Held != nil {
+		t.Errorf("empty listing: %+v", res)
+	}
+	if f, _ = s.Load("srv"); f.Accepted() != 2 || len(f.Pending()) != 0 {
+		t.Errorf("an empty listing changed the accepted pins: %+v", f.Tools)
+	}
+	if res = s.Check("srv", true, []*mcp.Tool{tool("sleep", "Sleep.")}); res.Held != nil || res.Changes != nil {
 		t.Errorf("sleep listed again: %+v", res)
 	}
 
@@ -125,7 +131,7 @@ func TestAccept(t *testing.T) {
 	s.Check("srv", true, []*mcp.Tool{tool("echo", "a")})
 	s.Check("srv", true, []*mcp.Tool{tool("echo", "b"), tool("fresh", "")})
 
-	if _, err := s.Accept("srv", map[string]string{"echo": "", "nosuch": ""}); err == nil || !strings.Contains(err.Error(), "nosuch") {
+	if _, err := s.Accept("srv", map[string]string{"echo": "sha256:x", "nosuch": "sha256:x"}); err == nil || !strings.Contains(err.Error(), "nosuch") {
 		t.Errorf("accept of nosuch: %v", err)
 	}
 	if f, _ := s.Load("srv"); len(f.Pending()) != 2 {
@@ -136,6 +142,9 @@ func TestAccept(t *testing.T) {
 		!strings.Contains(err.Error(), "not the one given") {
 		t.Errorf("accept of another hash: %v", err)
 	}
+	if _, err := s.Accept("srv", nil); err == nil {
+		t.Error("an accept of no tool accepted")
+	}
 	got, err := s.Accept("srv", map[string]string{"echo": f.Tools["echo"].Pending.Hash})
 	if err != nil || !slices.Equal(got, []string{"echo"}) {
 		t.Fatalf("accept echo: %v %v", got, err)
@@ -144,13 +153,13 @@ func TestAccept(t *testing.T) {
 	if res.Held["echo"] || !res.Held["fresh"] {
 		t.Errorf("after accepting echo: %+v", res)
 	}
-	if got, err = s.Accept("srv", nil); err != nil || !slices.Equal(got, []string{"fresh"}) {
+	if got, err = s.AcceptAll("srv"); err != nil || !slices.Equal(got, []string{"fresh"}) {
 		t.Errorf("accept all: %v %v", got, err)
 	}
 	if res = s.Check("srv", true, []*mcp.Tool{tool("echo", "b"), tool("fresh", "")}); res.Held != nil {
 		t.Errorf("after accepting all: %+v", res)
 	}
-	if _, err := s.Accept("nope", nil); !errors.Is(err, ErrNoPins) {
+	if _, err := s.AcceptAll("nope"); !errors.Is(err, ErrNoPins) {
 		t.Errorf("accept on a server without pins: %v", err)
 	}
 }
@@ -246,38 +255,57 @@ func TestFirstWriteFailureHolds(t *testing.T) {
 	}
 }
 
-// TestChurn checks that a server whose tool changes on every listing is reported at most
-// ReportLimit times per ReportWindow, and that its pins are rewritten at most once per
-// RewriteGap for the new definitions alone.
+// TestChurn checks that a server over ReportLimit changes in a ReportWindow has the rest of its
+// changes left unreported, summarized once with their names, and reported by name in a later
+// window, and that its pins always hold the definition it lists.
 func TestChurn(t *testing.T) {
-	dir := t.TempDir()
-	s := New(dir)
+	s := New(t.TempDir())
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	s.now = func() time.Time { return at }
-	s.Check("srv", false, []*mcp.Tool{tool("echo", "0")})
-	reported, suppressed := 0, 0
-	path := filepath.Join(dir, Dir, "srv.json")
-	var writes int
-	var last time.Time
-	for i := range 3 * ReportLimit {
-		at = at.Add(100 * time.Millisecond)
-		res := s.Check("srv", false, []*mcp.Tool{tool("echo", strconv.Itoa(i+1))})
-		reported += len(res.Changes)
-		suppressed += res.Suppressed
-		if fi, err := os.Stat(path); err == nil && !fi.ModTime().Equal(last) {
-			last = fi.ModTime()
-			writes++
+	listing := func(echo string) []*mcp.Tool {
+		tools := []*mcp.Tool{tool("echo", echo)}
+		for i := range ReportLimit {
+			tools = append(tools, tool("a"+strconv.Itoa(i), "x")) // before echo, sorted
 		}
+		return tools
 	}
-	if reported != ReportLimit || suppressed != 2*ReportLimit {
-		t.Errorf("reported %d, suppressed %d", reported, suppressed)
+	s.Check("srv", false, listing("0"))
+	// At 1s echo changes to P1: reported and recorded.
+	at = at.Add(time.Second)
+	res := s.Check("srv", false, append(listing("P1")[:1], listing("0")[1:]...))
+	if len(res.Changes) != 1 || res.Changes[0].Tool != "echo" {
+		t.Fatalf("P1: %+v", res)
 	}
-	// The first change is written at once; the replacements of 6s of listings wait for the gap.
-	if writes > 2 {
-		t.Errorf("%d writes", writes)
+	// At 2s every other tool changes, which takes the rest of the limit, and echo changes to P2.
+	at = at.Add(time.Second)
+	churned := func(echo string) []*mcp.Tool {
+		tools := listing(echo)
+		for _, t := range tools[1:] {
+			t.Description = "y"
+		}
+		return tools
 	}
+	res = s.Check("srv", false, churned("P2"))
+	if len(res.Changes) != ReportLimit-1 || res.Suppressed != 2 || len(res.SuppressedTools) != 2 {
+		t.Fatalf("over the limit: %d changes, %d suppressed %v", len(res.Changes), res.Suppressed, res.SuppressedTools)
+	}
+	if !slices.Contains(res.SuppressedTools, "echo") {
+		t.Errorf("the summary does not name echo: %v", res.SuppressedTools)
+	}
+	// The pins hold P2, the definition served, so that diff shows it.
+	f, _ := s.Load("srv")
+	if p := f.Tools["echo"].Pending; p == nil || !strings.Contains(string(p.Definition), "P2") {
+		t.Errorf("pending echo %+v", p)
+	}
+	// Within the window the summary is not repeated.
+	at = at.Add(time.Second)
+	if res = s.Check("srv", false, churned("P2")); res.Suppressed != 0 || res.Changes != nil {
+		t.Errorf("again in the window: %+v", res)
+	}
+	// After the window, echo and the other tool left out are reported by name.
 	at = at.Add(ReportWindow)
-	if res := s.Check("srv", false, []*mcp.Tool{tool("echo", "again")}); len(res.Changes) != 1 {
+	res = s.Check("srv", false, churned("P2"))
+	if len(res.Changes) != 2 || !slices.ContainsFunc(res.Changes, func(c Change) bool { return c.Tool == "echo" }) {
 		t.Errorf("after the window: %+v", res)
 	}
 }

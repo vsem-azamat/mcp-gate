@@ -33,13 +33,12 @@ const (
 
 // Limits on a server whose tools keep changing.
 const (
-	// ReportLimit is how many changes of one server are reported per ReportWindow; the rest
-	// are counted in Result.Suppressed.
+	// ReportLimit is how many changes of one server are reported per ReportWindow. The rest
+	// stay unreported, and are reported by a listing after the window, while still listed.
 	ReportLimit  = 20
 	ReportWindow = time.Minute
-	// RewriteGap is the least time between two writes of a server's pins that only replace a
-	// pending definition with another; such a write is left to a later listing.
-	RewriteGap = 10 * time.Second
+	// suppressedNamed is how many of the changes left unreported a summary names.
+	suppressedNamed = 3
 )
 
 // tmpPrefix starts the name of a temporary pins file: .tmp+<server>+<random>. Server names hold
@@ -69,12 +68,12 @@ type serverState struct {
 	mu sync.Mutex
 	// reported holds, by tool, the hash and action of the change last reported, so that a
 	// change is reported once per process and action.
-	reported  map[string]string
-	lastWrite time.Time
-	// window is when the current report window began, and reports how many changes were
-	// reported in it.
-	window  time.Time
-	reports int
+	reported map[string]string
+	// window is when the current report window began, reports how many changes were reported
+	// in it, and summarized whether the changes left unreported in it were summarized.
+	window     time.Time
+	reports    int
+	summarized bool
 }
 
 // New returns the store under a state directory; with an empty one it keeps the pins in memory.
@@ -118,8 +117,10 @@ type Result struct {
 	Held map[string]bool
 	// Changes are the changes to report, sorted by tool.
 	Changes []Change
-	// Suppressed counts the changes not reported because the server went over ReportLimit.
-	Suppressed int
+	// Suppressed, set once per ReportWindow, counts the changes this listing leaves unreported
+	// because the server went over ReportLimit, and SuppressedTools names a few of them.
+	Suppressed      int
+	SuppressedTools []string
 	// Pinned is how many tools a first listing pinned.
 	Pinned int
 	// Err is why the pins could not be read or written; under hold every listed tool is then
@@ -130,7 +131,8 @@ type Result struct {
 // Check compares a listing of the server's tools with its pins and records what differs: a
 // server without pins has every listed tool pinned; a tool whose definition differs from its
 // accepted one, or that has none, gets the listed definition as pending; a pending definition of
-// a tool listed as accepted again is dropped, and a tool no longer listed is forgotten. With
+// a tool listed as accepted again or no longer listed is dropped, and a tool no longer listed
+// with nothing accepted is forgotten. With
 // hold, the changed and added tools are held. A name listed more than once counts once, as
 // first listed.
 func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
@@ -177,7 +179,6 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 			// Nothing was pinned: trusting the listing would trust every later one too.
 			return holdAll(err)
 		}
-		st.lastWrite = now
 		res.Pinned = len(listed)
 		return res
 	}
@@ -188,14 +189,18 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 	if hold {
 		action = "hold"
 	}
-	lasting, churn := false, false // a write that must be made, or one that may wait
+	if now.Sub(st.window) >= ReportWindow {
+		st.window, st.reports, st.summarized = now, 0, false
+	}
+	dirty := false
+	var suppressed []string
 	for _, name := range slices.Sorted(maps.Keys(listed)) {
 		p := listed[name]
 		e := f.Tools[name]
 		if e != nil && e.Accepted != nil && e.Accepted.Hash == p.Hash {
 			if e.Pending != nil {
 				e.Pending = nil
-				lasting = true
+				dirty = true
 			}
 			delete(st.reported, name)
 			continue
@@ -204,13 +209,9 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 			e = &Entry{}
 			f.Tools[name] = e
 		}
-		switch {
-		case e.Pending == nil:
+		if e.Pending == nil || e.Pending.Hash != p.Hash {
 			e.Pending = p
-			lasting = true
-		case e.Pending.Hash != p.Hash:
-			e.Pending = p
-			churn = true
+			dirty = true
 		}
 		if hold {
 			if res.Held == nil {
@@ -219,14 +220,11 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 			res.Held[name] = true
 		}
 		if key := p.Hash + " " + action; st.reported[name] != key {
-			st.reported[name] = key
-			if now.Sub(st.window) >= ReportWindow {
-				st.window, st.reports = now, 0
-			}
 			if st.reports >= ReportLimit {
-				res.Suppressed++
+				suppressed = append(suppressed, name)
 				continue
 			}
+			st.reported[name] = key
 			st.reports++
 			c := Change{Tool: name, Kind: e.Change(), Listed: p.Hash}
 			if e.Accepted != nil {
@@ -235,17 +233,25 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 			res.Changes = append(res.Changes, c)
 		}
 	}
-	for name := range f.Tools {
-		if listed[name] == nil {
+	if len(suppressed) > 0 && !st.summarized {
+		st.summarized = true
+		res.Suppressed, res.SuppressedTools = len(suppressed), suppressed[:min(len(suppressed), suppressedNamed)]
+	}
+	for name, e := range f.Tools {
+		if listed[name] != nil {
+			continue
+		}
+		delete(st.reported, name)
+		if e.Pending != nil {
+			e.Pending = nil
+			dirty = true
+		}
+		if e.Accepted == nil {
 			delete(f.Tools, name)
-			delete(st.reported, name)
-			lasting = true
 		}
 	}
-	if lasting || (churn && now.Sub(st.lastWrite) >= RewriteGap) {
-		if res.Err = s.write(server, f); res.Err == nil {
-			st.lastWrite = now
-		}
+	if dirty {
+		res.Err = s.write(server, f)
 	}
 	return res
 }
@@ -285,11 +291,22 @@ func (s *Store) Servers() ([]string, error) {
 	return out, nil
 }
 
-// Accept makes the pending definition of the tools in want their accepted one, each only when
-// its pending hash is the one given ("" takes any), and returns the tools accepted, sorted. An
-// empty want accepts every pending tool. A tool with nothing pending, or with another pending
-// hash, fails it, and nothing is accepted.
+// Accept makes the pending definition of the tools in want, by name, their accepted one, each
+// only when its pending hash is the one given, and returns the tools accepted, sorted. A tool
+// with nothing pending, or with another pending hash, fails it, and nothing is accepted.
 func (s *Store) Accept(server string, want map[string]string) ([]string, error) {
+	if len(want) == 0 {
+		return nil, errors.New("no tool named")
+	}
+	return s.accept(server, want)
+}
+
+// AcceptAll makes the pending definition of every pending tool its accepted one, and returns
+// the tools accepted, sorted.
+func (s *Store) AcceptAll(server string) ([]string, error) { return s.accept(server, nil) }
+
+// accept is Accept with want nil taking every pending tool as it is.
+func (s *Store) accept(server string, want map[string]string) ([]string, error) {
 	st := s.state(server)
 	defer st.mu.Unlock()
 	unlock, err := s.lock(server)
@@ -301,7 +318,8 @@ func (s *Store) Accept(server string, want map[string]string) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
-	if len(want) == 0 {
+	all := want == nil
+	if all {
 		want = map[string]string{}
 		for _, name := range f.Pending() {
 			want[name] = ""
@@ -314,7 +332,7 @@ func (s *Store) Accept(server string, want map[string]string) ([]string, error) 
 		switch {
 		case e == nil || e.Pending == nil:
 			missing = append(missing, name)
-		case want[name] != "" && want[name] != e.Pending.Hash:
+		case !all && want[name] != e.Pending.Hash:
 			moved = append(moved, name)
 		}
 	}
@@ -340,7 +358,6 @@ func (s *Store) Accept(server string, want map[string]string) ([]string, error) 
 	if err := s.write(server, f); err != nil {
 		return nil, err
 	}
-	st.lastWrite = now
 	return names, nil
 }
 

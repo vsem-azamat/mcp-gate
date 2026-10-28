@@ -4,7 +4,7 @@
 
 `mcp-gate toolpins` shows and accepts the tool definitions the gate pins. The behaviour is specified in [`openspec/specs/tool-pins/spec.md`](../../openspec/specs/tool-pins/spec.md); the setting is a server's `toolPins` (see [Configuration](../configuration/README.md#tool-pins)).
 
-The gate pins every tool a server lists the first time it lists any, and from then on compares each listing with the pins: a tool whose name, title, description, schemas, annotations, icons or `_meta` differ is `changed`, a tool it has not listed before, or had stopped listing, is `added`. Either is logged as a `toolPin` line (see [serve](serve.md#logs)) and kept as pending; under `toolPins: hold` it is also hidden until accepted, as if the server did not have it.
+The gate pins every tool a server lists the first time it lists any, and from then on compares each listing with the pins: a tool whose name, title, description, schemas, annotations, icons or `_meta` differ is `changed`, a tool it has not listed before is `added`. Either is logged as a `toolPin` line (see [serve](serve.md#logs)) and kept as pending; under `toolPins: hold` it is also hidden until accepted, as if the server did not have it.
 
 The pins live in the `toolpins` directory of the gate's state directory, one `<server>.json` per server. Run the commands as the gate's user and point `-state-dir` at the directory `serve` uses; it defaults to `$STATE_DIRECTORY`. They refuse a state directory another user owns, since a lock file they created there, owned by root say, would lock the gate out, which then holds every tool. They need no config and no network.
 
@@ -49,7 +49,7 @@ Exit status: 0 when nothing is pending, 1 when a pending tool is shown, 2 on an 
 
 ## accept
 
-`mcp-gate toolpins accept <server> <tool>=<hash>...` makes the listed definition of each named tool the accepted one, if its hash is still the one `diff` showed: a server under `hold` could otherwise swap the definition between the review and the accept. A named tool with nothing pending, or with another pending hash, fails the command and nothing is accepted; run `diff` again. `mcp-gate toolpins accept -all <server>` accepts every pending tool as it is listed now, unseen.
+`mcp-gate toolpins accept <server> <tool>=<hash>...` makes the listed definition of each named tool the accepted one, if its hash is still the one `diff` showed: a server under `hold` could otherwise swap the definition between the review and the accept. A named tool with nothing pending, or with another pending hash, fails the command and nothing is accepted; run `diff` again. Copy the name as `diff` prints it: its `\u{XXXX}` escapes are undone. `mcp-gate toolpins accept -all <server>` accepts every pending tool as it is listed now, unseen.
 
 ```console
 $ mcp-gate toolpins accept -state-dir /var/lib/mcp-gate notes read_note=sha256:41ab…

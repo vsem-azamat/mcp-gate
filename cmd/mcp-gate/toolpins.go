@@ -41,6 +41,21 @@ Exit status: 0 done (for diff, nothing pending), 1 diff shows a pending tool, 2 
 // acceptRE is the form of a tool to accept: its name and the hash of its pending definition.
 var acceptRE = regexp.MustCompile(`^(.+)=(sha256:[0-9a-f]{64})$`)
 
+// escapeRE is a character toolpins.Visible wrote as \u{XXXX}.
+var escapeRE = regexp.MustCompile(`\\u\{([0-9A-F]{4,6})\}`)
+
+// unescapeName undoes toolpins.Visible, so that a name diff shows with escapes is accepted as
+// the server lists it.
+func unescapeName(name string) string {
+	return escapeRE.ReplaceAllStringFunc(name, func(esc string) string {
+		var r rune
+		if _, err := fmt.Sscanf(escapeRE.FindStringSubmatch(esc)[1], "%X", &r); err != nil {
+			return esc
+		}
+		return string(r)
+	})
+}
+
 func runToolpins(args []string, env lookupEnv, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		_, _ = io.WriteString(stderr, toolpinsUsage)
@@ -102,7 +117,7 @@ func runToolpins(args []string, env lookupEnv, stdout, stderr io.Writer) int {
 			if m == nil {
 				return usage("%q is not <tool>=sha256:<hex>, as diff shows it", toolpins.Visible(arg))
 			}
-			want[m[1]] = m[2]
+			want[unescapeName(m[1])] = m[2]
 		}
 	}
 	if *stateDir == "" {
@@ -121,7 +136,7 @@ func runToolpins(args []string, env lookupEnv, stdout, stderr io.Writer) int {
 	case "diff":
 		code, err = toolpinsDiff(store, rest[0], rest[1:], stdout)
 	case "accept":
-		err = toolpinsAccept(store, rest[0], want, stdout)
+		err = toolpinsAccept(store, rest[0], *all, want, stdout)
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%s: %v\n", prefix, err)
@@ -223,8 +238,14 @@ func toolpinsDiff(store *toolpins.Store, server string, tools []string, stdout i
 	return exitDrift, nil
 }
 
-func toolpinsAccept(store *toolpins.Store, server string, want map[string]string, stdout io.Writer) error {
-	accepted, err := store.Accept(server, want)
+func toolpinsAccept(store *toolpins.Store, server string, all bool, want map[string]string, stdout io.Writer) error {
+	var accepted []string
+	var err error
+	if all {
+		accepted, err = store.AcceptAll(server)
+	} else {
+		accepted, err = store.Accept(server, want)
+	}
 	if err != nil {
 		return fmt.Errorf("%s: %w", server, err)
 	}

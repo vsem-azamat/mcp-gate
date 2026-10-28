@@ -595,20 +595,29 @@ func syncSet[T any](logger *slog.Logger, logText func(string) string, what entry
 }
 
 // uniqueTools returns the listed tools with each name once, as first listed, so that the pins
-// check and the server filter see the same definition of a name; the others are logged.
+// check and the server filter see the same definition of a name; the others are logged, in one
+// line per listing.
 func (m *Mirror) uniqueTools(list []*mcp.Tool) []*mcp.Tool {
 	seen := make(map[string]bool, len(list))
 	out := make([]*mcp.Tool, 0, len(list))
+	var dups int
+	var first string
 	for _, t := range list {
 		if t == nil {
 			continue
 		}
 		if seen[t.Name] {
-			m.logger.Warn("the server lists a tool name more than once; serving the first", "tool", m.logText(t.Name))
+			if dups == 0 {
+				first = t.Name
+			}
+			dups++
 			continue
 		}
 		seen[t.Name] = true
 		out = append(out, t)
+	}
+	if dups > 0 {
+		m.logger.Warn("the server lists tool names more than once; serving the first of each", "duplicates", dups, "first", m.logText(first))
 	}
 	return out
 }
@@ -628,8 +637,12 @@ func (m *Mirror) checkPins(tools []*mcp.Tool) map[string]bool {
 		m.logger.Error("cannot read or write the tool pins", "error", res.Err.Error(), "hold", m.opts.HoldTools, "held", len(res.Held))
 	}
 	if res.Suppressed > 0 {
-		m.logger.Warn("the server changes its tools too often; not every change is logged",
-			"suppressed", res.Suppressed, "limit", toolpins.ReportLimit, "per", toolpins.ReportWindow.String())
+		names := make([]string, len(res.SuppressedTools))
+		for i, n := range res.SuppressedTools {
+			names[i] = m.logText(n)
+		}
+		m.logger.Warn("the server changes its tools too often; these changes are logged after the limit's window, if still listed",
+			"suppressed", res.Suppressed, "tools", names, "limit", toolpins.ReportLimit, "per", toolpins.ReportWindow.String())
 	}
 	for _, c := range res.Changes {
 		audit.LogToolPin(m.opts.Logger, audit.PinRecord{

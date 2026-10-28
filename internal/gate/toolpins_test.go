@@ -79,7 +79,7 @@ func TestHeldToolAcceptedOnReload(t *testing.T) {
 		t.Fatalf("toolPin lines %v", lines)
 	}
 
-	if _, err := toolpins.New(stateDir).Accept("alpha", map[string]string{"echo": ""}); err != nil {
+	if _, err := toolpins.New(stateDir).AcceptAll("alpha"); err != nil {
 		t.Fatal(err)
 	}
 	beforeRoute, beforeAgg := routeChanged.Load(), aggChanged.Load()
