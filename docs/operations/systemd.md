@@ -172,7 +172,7 @@ Learned protocol pins and OAuth grants stay in the state directory. Without the 
 
 ## Hardening and its trade-offs
 
-Every sandboxing setting of the unit also applies to the stdio children, which may be Node, Python or a headless browser. Both units therefore leave out settings that common servers do not tolerate, and the user unit those a user manager cannot apply:
+Every sandboxing setting of the unit also applies to the stdio children, which may be Node, Python or a headless browser. Both units therefore leave out settings that common servers do not tolerate, and the user unit also leaves out those a user manager cannot apply:
 
 | Setting | Why it is not set |
 | --- | --- |

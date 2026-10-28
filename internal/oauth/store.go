@@ -226,7 +226,8 @@ func (s *Store) Save(name string, g *Grant) error {
 	return s.syncDir()
 }
 
-// Delete removes a server's grant. It reports whether there was one.
+// Delete removes a server's grant. It reports whether there was one; with an error, true means
+// the file is removed but the directory could not be synced.
 func (s *Store) Delete(name string) (bool, error) {
 	err := os.Remove(s.path(name))
 	if errors.Is(err, os.ErrNotExist) {

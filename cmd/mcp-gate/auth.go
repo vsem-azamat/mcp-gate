@@ -266,16 +266,19 @@ func authLogout(ctx context.Context, store *oauth.Store, name string, s *config.
 		return exitTrouble
 	}
 	g, loadErr := store.Load(name)
-	ok, err := store.Delete(name)
+	ok, delErr := store.Delete(name)
 	unlock()
 	switch {
-	case err != nil:
-		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", err)
+	case delErr != nil && !ok: // the file is still there
+		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", delErr)
 		return exitTrouble
 	case !ok:
 		_, _ = fmt.Fprintf(stdout, "%s was not logged in.\n", name)
 		return exitOK
 	}
+	// The file is removed. A failed sync of the directory may bring it back after a crash, but
+	// the tokens are revoked all the same: once the grant is gone they could not be revoked from
+	// here any more.
 	revoked := "The authorization server offers no revocation endpoint, so it keeps the grant until it expires; revoke it there to end it sooner."
 	if loadErr != nil {
 		revoked = "The grant could not be read, so it was not revoked; revoke it at the authorization server to end it sooner."
@@ -291,5 +294,9 @@ func authLogout(ctx context.Context, store *oauth.Store, name string, s *config.
 		}
 	}
 	_, _ = fmt.Fprintf(stdout, "Logged out of %s: its grant is deleted. %s\n", name, revoked)
+	if delErr != nil {
+		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", delErr)
+		return exitTrouble
+	}
 	return exitOK
 }

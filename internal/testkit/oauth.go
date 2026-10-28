@@ -61,8 +61,12 @@ type OAuthOptions struct {
 	TrailingSlash bool
 	// Revocation serves a token revocation endpoint (RFC 7009) and names it in the metadata.
 	Revocation bool
-	// RevokeRefreshOnly answers a revocation of an access token with unsupported_token_type.
-	RevokeRefreshOnly bool
+	// UnsupportedTokenType, if set to access_token or refresh_token, answers a revocation of a
+	// token of that type with unsupported_token_type.
+	UnsupportedTokenType string
+	// HoldRevocation, if set, makes the revocation endpoint wait until it is closed; each
+	// request first signals RevocationArrived.
+	HoldRevocation chan struct{}
 	// RevocationEndpoint, if set, is the revocation endpoint the metadata names, in place of
 	// the served one.
 	RevocationEndpoint string
@@ -91,6 +95,7 @@ type OAuthServer struct {
 	revocations   []url.Values // the forms of the revocation requests, client secrets removed
 	refuseRevoke  int          // the status the revocation endpoint answers with, if not zero
 	brokenMeta    bool         // the authorization server metadata answers 500
+	arrived       chan struct{}
 }
 
 type oauthClient struct {
@@ -106,7 +111,8 @@ type oauthCode struct {
 func NewOAuthServer(t testing.TB, opts OAuthOptions) *OAuthServer {
 	t.Helper()
 	s := &OAuthServer{
-		opts: opts, clients: map[string]oauthClient{}, codes: map[string]oauthCode{},
+		arrived: make(chan struct{}, 16),
+		opts:    opts, clients: map[string]oauthClient{}, codes: map[string]oauthCode{},
 		access: map[string]time.Time{}, refresh: map[string]string{},
 	}
 	stop := make(chan struct{})
@@ -226,6 +232,9 @@ func (s *OAuthServer) RefuseRevocation(status int) {
 	defer s.mu.Unlock()
 	s.refuseRevoke = status
 }
+
+// RevocationArrived receives once for every revocation request, before HoldRevocation is waited for.
+func (s *OAuthServer) RevocationArrived() <-chan struct{} { return s.arrived }
 
 // BreakMetadata makes the authorization server metadata answer 500.
 func (s *OAuthServer) BreakMetadata() {
@@ -434,6 +443,17 @@ func (s *OAuthServer) revoke(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
+	select {
+	case s.arrived <- struct{}{}:
+	default:
+	}
+	if s.opts.HoldRevocation != nil {
+		select {
+		case <-s.opts.HoldRevocation:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := url.Values{}
@@ -453,7 +473,9 @@ func (s *OAuthServer) revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok := r.PostForm.Get("token")
-	if _, access := s.access[tok]; access && s.opts.RevokeRefreshOnly {
+	_, access := s.access[tok]
+	_, refresh := s.refresh[tok]
+	if (access && s.opts.UnsupportedTokenType == "access_token") || (refresh && s.opts.UnsupportedTokenType == "refresh_token") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported_token_type"})
 		return
 	}

@@ -787,10 +787,22 @@ func TestRevoke(t *testing.T) {
 		return oauth.Revoke(t.Context(), oauth.RevokeOptions{Grant: g, Config: conf, HTTPClient: httpClient(t)})
 	}
 
-	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true, RevokeRefreshOnly: true})
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true, UnsupportedTokenType: "access_token"})
 	g := login(t, srv, config.OAuth{}, nil)
 	if has, err := revoke(srv, g, config.OAuth{}); !has || err != nil || srv.Valid(g.RefreshToken) {
 		t.Errorf("refresh-only revocation = %v, %v", has, err)
+	}
+	// Without a refresh token, the access token is all there is to revoke.
+	srv = testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true, UnsupportedTokenType: "access_token", NoRefreshToken: true})
+	g = login(t, srv, config.OAuth{}, nil)
+	if has, err := revoke(srv, g, config.OAuth{}); !has || err == nil || !strings.Contains(err.Error(), "unsupported_token_type") {
+		t.Errorf("access-only grant, access token not revocable = %v, %v", has, err)
+	}
+	// A refresh token the server will not revoke is a failure.
+	srv = testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true, UnsupportedTokenType: "refresh_token"})
+	g = login(t, srv, config.OAuth{}, nil)
+	if has, err := revoke(srv, g, config.OAuth{}); !has || err == nil || !strings.Contains(err.Error(), "revoking the refresh_token") {
+		t.Errorf("refresh token not revocable = %v, %v", has, err)
 	}
 
 	srv = testkit.NewOAuthServer(t, testkit.OAuthOptions{RevocationEndpoint: "http://auth.example.com/revoke"})
@@ -812,8 +824,16 @@ func TestRevoke(t *testing.T) {
 	if !srv.Valid(g.RefreshToken) || len(srv.Revocations()) != 0 {
 		t.Error("a revocation was sent")
 	}
+	// Errors from the revocation endpoint name no token.
+	srv = testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true})
+	g = login(t, srv, config.OAuth{}, nil)
+	srv.RefuseRevocation(http.StatusBadRequest)
+	_, err := revoke(srv, g, config.OAuth{})
+	if err == nil {
+		t.Fatal("a refused revocation did not fail")
+	}
 	for _, secret := range []string{g.AccessToken, g.RefreshToken} {
-		if _, err := revoke(srv, g, config.OAuth{}); err != nil && strings.Contains(err.Error(), secret) {
+		if strings.Contains(err.Error(), secret) {
 			t.Error("an error names a token")
 		}
 	}
