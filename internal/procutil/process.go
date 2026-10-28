@@ -60,6 +60,21 @@ var managed = struct {
 	pids map[int]bool
 }{pids: map[int]bool{}}
 
+// groups holds the Processes whose process group may still have members: from Start until the
+// group is found empty, after the leader was reaped, by Stop or by the wait for the leader.
+// KillAll kills them.
+var groups = struct {
+	sync.Mutex
+	set map[*Process]struct{}
+}{set: map[*Process]struct{}{}}
+
+// forget drops p from groups once its group is empty.
+func (p *Process) forget() {
+	groups.Lock()
+	delete(groups.set, p)
+	groups.Unlock()
+}
+
 // Start starts the child described by spec. Every child of the gate must be started here, so
 // that the reaper does not take its exit status.
 func Start(spec Spec) (p *Process, err error) {
@@ -103,6 +118,9 @@ func Start(spec Spec) (p *Process, err error) {
 		pid: cmd.Process.Pid, stdin: inW, stdout: outR, stderr: errR,
 		done: make(chan struct{}), stderrDone: make(chan struct{}),
 	}
+	groups.Lock()
+	groups.set[p] = struct{}{}
+	groups.Unlock()
 	if spec.OOMScoreAdj != 0 {
 		p.oomErr = setOOMScoreAdj(p.pid, spec.OOMScoreAdj)
 	}
@@ -112,6 +130,9 @@ func Start(spec Spec) (p *Process, err error) {
 		delete(managed.pids, p.pid)
 		managed.Unlock()
 		close(p.done)
+		if groupGone(p.pid) {
+			p.forget()
+		}
 	}()
 	go func() {
 		defer close(p.stderrDone)
@@ -189,6 +210,9 @@ func (p *Process) stop(grace time.Duration) error {
 	}
 	_ = p.stderr.Close()
 	<-p.stderrDone
+	if gone {
+		p.forget()
+	}
 	if !gone {
 		return fmt.Errorf("process group %d is still running after SIGKILL", p.pid)
 	}
@@ -254,13 +278,14 @@ func groupGone(pgid int) bool {
 	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)
 }
 
-// KillAll sends SIGKILL to the process group of every child Start started that has not been
-// reaped yet, without waiting, for a forced exit. The lock keeps each leader unreaped, so its
-// PID, and with it the group ID, cannot have been reused.
+// KillAll sends SIGKILL to the process group of every child Start started whose group may still
+// have members, its leader exited or not, without waiting, for a forced exit. As Stop does, it
+// sends nothing to a group whose leader was reaped and that has no member left, whose ID may
+// have been reused.
 func KillAll() {
-	managed.Lock()
-	defer managed.Unlock()
-	for pid := range managed.pids {
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	groups.Lock()
+	defer groups.Unlock()
+	for p := range groups.set {
+		p.signal(syscall.SIGKILL)
 	}
 }

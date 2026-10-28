@@ -563,11 +563,11 @@ func rejectPartial(data []byte) error {
 var policyKinds = map[string]string{"tools": "tool", "prompts": "prompt", "resources": "resource"}
 
 // checkPolicyFilters checks the form of every token policy filter before the file is decoded,
-// so that each problem names its field; lines and paths are those of the filters it reports,
-// whose own decoder errors (policyFilterError) and validation Parse leaves out: a filter written without a value, which would decode
+// so that each problem names its field: a filter written without a value, which would decode
 // to no filter and narrow nothing, a value other than PolicyNone or a mapping, and a mapping
 // with keys other than allow and deny, or one of them twice. Anything else malformed is left to
-// the decoder.
+// the decoder. lines and paths are those of the filters it reports, whose own decoder errors
+// (policyFilterError) and validation Parse leaves out.
 func checkPolicyFilters(data []byte) (errs []error, lines map[int]bool, paths map[string]bool) {
 	lines, paths = map[int]bool{}, map[string]bool{}
 	var doc yaml.Node

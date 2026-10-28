@@ -319,11 +319,12 @@ func methodNotFound(err error) bool {
 
 // Bounds of one listing of a kind, so that a server whose cursor never ends, or whose catalog
 // keeps growing, fails its listing instead of growing the gate's memory until listTimeout. The
-// bytes are those of the entries encoded as JSON; a page itself is bounded by maxMessageBytes.
+// bytes are those of the entries encoded as JSON, not memory: decoded entries can take an order
+// of magnitude more heap. A page itself is bounded by maxMessageBytes.
 const (
 	maxListPages   = 1000
 	maxListEntries = 50000
-	maxListBytes   = 64 << 20
+	maxListBytes   = 16 << 20
 )
 
 // errListTooLong is the error of a listing over one of its bounds.

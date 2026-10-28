@@ -126,9 +126,9 @@ func TestCollectBounds(t *testing.T) {
 	type text struct{ T string }
 	pageOf := strings.Repeat("x", 1<<20)
 	heavyPages := 0
-	heavy := func(context.Context, string) ([]*text, string, error) { // 100 pages of 1 MiB
+	heavy := func(context.Context, string) ([]*text, string, error) { // 30 pages of 1 MiB
 		heavyPages++
-		if heavyPages == 100 {
+		if heavyPages == 30 {
 			return []*text{{T: pageOf}}, "", nil
 		}
 		return []*text{{T: pageOf}}, "more", nil
