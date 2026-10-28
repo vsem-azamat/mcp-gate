@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -141,15 +142,16 @@ func (c *Config) validateLimits(add func(path, format string, args ...any)) {
 			add(path, "is empty")
 			continue
 		}
-		if l.Token != "" && !c.knownToken(l.Token) {
+		accepted := l.Token != "" && c.acceptedToken(l.Token)
+		if l.Token != "" && !accepted {
 			// Names are what the operator wrote, not values, so they can be shown.
-			add(path+".token", "is not a token in auth.tokens or in a server's auth.tokens")
+			add(path+".token", "is not a token any server accepts")
 		}
 		if l.Server != "" {
 			switch s := c.Servers[l.Server]; {
 			case s == nil:
 				add(path+".server", "is not a server in servers")
-			case l.Token != "" && c.knownToken(l.Token):
+			case accepted:
 				if _, ok := c.EffectiveTokens(l.Server)[l.Token]; !ok {
 					add(path+".server", "the server does not accept the token %s", l.Token)
 				}
@@ -183,12 +185,30 @@ func (c *Config) validateLimits(add func(path, format string, args ...any)) {
 			add(path+".concurrency", "must be positive")
 		}
 		for j, prev := range c.Limits[:i] {
-			if prev != nil && *prev == *l {
+			if prev != nil && prev.same(l) {
 				add(path, "is the same as limits[%d]", j)
 				break
 			}
 		}
 	}
+}
+
+// same reports whether two limits entries, with their rates read, select and pass the same
+// requests: 60/m is 60/1m, and a burst left out is the rate's calls.
+func (l *Limit) same(o *Limit) bool {
+	burst := func(l *Limit) int { return cmp.Or(l.Burst, l.Calls) }
+	return l.Token == o.Token && l.Server == o.Server && l.Tool == o.Tool && l.Calls == o.Calls &&
+		l.Per == o.Per && burst(l) == burst(o) && l.Concurrency == o.Concurrency
+}
+
+// acceptedToken reports whether some server accepts a token named name.
+func (c *Config) acceptedToken(name string) bool {
+	for server := range c.Servers {
+		if _, ok := c.EffectiveTokens(server)[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // validatePolicies checks that every policy names a token some server accepts and only servers

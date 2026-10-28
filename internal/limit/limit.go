@@ -5,6 +5,7 @@ package limit
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -53,7 +54,8 @@ func (r *Rule) matches(req Request) bool {
 // nothing of the request or of the other rules.
 type Refusal struct {
 	Rule Rule
-	// RetryAfter is when the rule would pass the request again; 0 for a concurrency limit.
+	// RetryAfter is when the rule would pass the request again, for a rate limit; 0 for a
+	// concurrency limit, which passes once a call in flight ends.
 	RetryAfter time.Duration
 }
 
@@ -95,12 +97,12 @@ func (s *state) refill(now time.Time) {
 // refuses returns the refusal of one more call, nil when the rule passes it. The bucket is
 // refilled first.
 func (s *state) refuses() *Refusal {
-	if c := s.rule.Concurrency; c > 0 && s.inflight >= c {
-		return &Refusal{Rule: s.rule}
-	}
 	if s.rule.Rate > 0 && s.tokens < 1 {
 		wait := time.Duration(math.Ceil((1 - s.tokens) * float64(s.rule.Per) / float64(s.rule.Rate)))
 		return &Refusal{Rule: s.rule, RetryAfter: max(wait, time.Millisecond)}
+	}
+	if c := s.rule.Concurrency; c > 0 && s.inflight >= c {
+		return &Refusal{Rule: s.rule}
 	}
 	return nil
 }
@@ -121,24 +123,50 @@ func New(now func() time.Time) *Limiter {
 	return &Limiter{now: now}
 }
 
-// Set puts rules in force, in order. A rule equal to one in force keeps its state; any other
-// starts with a full bucket and nothing in flight.
+// selector is what a rule matches, which a reload carries its state by.
+type selector struct{ token, server, tool string }
+
+func (r *Rule) selector() selector { return selector{r.Token, r.Server, r.Tool} }
+
+// Set puts rules in force, in order. A rule equal to one in force keeps its state. A rule whose
+// selectors are those of one in force that is not kept takes that one's state: its calls in
+// flight, and its bucket as it is now, capped at the new burst, or full when the old rule had no
+// rate. Any other rule starts with a full bucket and nothing in flight.
 func (l *Limiter) Set(rules []Rule) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	old := make(map[Rule]*state, len(l.rules))
-	for _, s := range l.rules {
-		old[s.rule] = s
-	}
 	now := l.now()
-	next := make([]*state, 0, len(rules))
-	for _, r := range rules {
-		if s := old[r]; s != nil {
-			delete(old, r) // two equal rules get a state each
-			next = append(next, s)
+	free := slices.Clone(l.rules) // the states not taken yet, in order
+	take := func(ok func(*state) bool) *state {
+		for i, s := range free {
+			if s != nil && ok(s) {
+				free[i] = nil
+				return s
+			}
+		}
+		return nil
+	}
+	next := make([]*state, len(rules))
+	for i, r := range rules {
+		next[i] = take(func(s *state) bool { return s.rule == r })
+	}
+	for i, r := range rules {
+		if next[i] != nil {
 			continue
 		}
-		next = append(next, &state{rule: r, tokens: float64(r.Burst), last: now})
+		// The calls in flight give their places back to the state they took them from, so a
+		// changed rule keeps that state and changes in place.
+		if s := take(func(s *state) bool { return s.rule.selector() == r.selector() }); s != nil {
+			s.refill(now)
+			if s.rule.Rate == 0 {
+				s.tokens = float64(r.Burst)
+			}
+			s.tokens = min(s.tokens, float64(r.Burst))
+			s.rule, s.last = r, now
+			next[i] = s
+			continue
+		}
+		next[i] = &state{rule: r, tokens: float64(r.Burst), last: now}
 	}
 	l.rules = next
 }
@@ -146,7 +174,8 @@ func (l *Limiter) Set(rules []Rule) {
 // Acquire checks a request against every rule that matches it. When all pass, it takes a call
 // from each one's bucket and a place in flight, and returns the function that gives the places
 // back when the request ends, which may be called more than once. Otherwise it takes nothing and
-// returns the refusal of the first rule, in order, that refused.
+// returns a refusal: of the rate rule that refused with the longest wait, or, when only
+// concurrency rules refused, of the first of them, in order.
 func (l *Limiter) Acquire(req Request) (release func(), refused *Refusal) {
 	if l == nil {
 		return func() {}, nil
@@ -160,10 +189,13 @@ func (l *Limiter) Acquire(req Request) (release func(), refused *Refusal) {
 			continue
 		}
 		s.refill(now)
-		if ref := s.refuses(); ref != nil {
-			return nil, ref
+		if ref := s.refuses(); ref != nil && (refused == nil || ref.RetryAfter > refused.RetryAfter) {
+			refused = ref
 		}
 		matched = append(matched, s)
+	}
+	if refused != nil {
+		return nil, refused
 	}
 	for _, s := range matched {
 		if s.rule.Rate > 0 {

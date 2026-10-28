@@ -102,22 +102,52 @@ func TestAllMustPass(t *testing.T) {
 	}
 }
 
-func TestFirstRefusingEntry(t *testing.T) {
+// TestRefusalReported checks which refusal is reported: the rate entry with the longest wait,
+// over a shorter one and over a concurrency entry; the concurrency entry when no rate entry
+// refused.
+func TestRefusalReported(t *testing.T) {
 	l := New(newClock().now)
-	l.Set(rules(conc(1), rate(1, time.Hour)))
+	short, long := rate(1, time.Minute), rate(1, time.Hour)
+	l.Set(rules(conc(1), short, long))
 	release, _ := l.Acquire(Request{})
 	_, ref := l.Acquire(Request{})
-	if ref == nil || ref.Rule.Concurrency != 1 {
-		t.Fatalf("refusal %v, want the concurrency entry", ref)
+	if ref == nil || ref.Rule != *long || ref.RetryAfter != time.Hour {
+		t.Fatalf("refusal %+v, want the hour's", ref)
+	}
+	release()
+	release() // a second release is a no-op
+
+	l = New(newClock().now)
+	l.Set(rules(rate(5, time.Second), conc(1)))
+	release, _ = l.Acquire(Request{})
+	defer release()
+	_, ref = l.Acquire(Request{})
+	if ref == nil || ref.Rule.Concurrency != 1 || ref.RetryAfter != 0 {
+		t.Fatalf("refusal %+v, want the concurrency entry", ref)
 	}
 	if got, want := ref.Error(), "mcp-gate: concurrency limit reached: at most 1 call in flight; retry when one ends"; got != want {
 		t.Errorf("message %q, want %q", got, want)
 	}
-	release()
-	release() // a second release is a no-op
-	_, ref = l.Acquire(Request{})
-	if ref == nil || ref.Rule.Rate != 1 {
-		t.Fatalf("refusal %v, want the rate entry", ref)
+}
+
+// TestRefillCappedAtBurst checks that a long quiet spell fills the bucket only up to its burst.
+func TestRefillCappedAtBurst(t *testing.T) {
+	c := newClock()
+	l := New(c.now)
+	l.Set(rules(rate(10, time.Second).burst(2)))
+	for range 2 {
+		if _, ref := l.Acquire(Request{}); ref != nil {
+			t.Fatal(ref)
+		}
+	}
+	c.advance(time.Minute)
+	for i := range 2 {
+		if _, ref := l.Acquire(Request{}); ref != nil {
+			t.Fatalf("call %d after the spell: %v", i, ref)
+		}
+	}
+	if _, ref := l.Acquire(Request{}); ref == nil {
+		t.Error("a third call passed at once after the spell")
 	}
 }
 
@@ -167,8 +197,7 @@ func TestSetKeepsUnchanged(t *testing.T) {
 		t.Fatal(ref)
 	}
 	held, _ := l.Acquire(Request{Server: "b"})
-	defer held()
-	// Another entry changes; the unchanged ones keep their state.
+	// Another entry is added; the unchanged ones keep their state.
 	l.Set(rules(rate(5, time.Second).on("c"), other, kept))
 	if _, ref := l.Acquire(Request{Token: "phone"}); ref == nil {
 		t.Error("an unchanged entry got a full bucket")
@@ -176,13 +205,59 @@ func TestSetKeepsUnchanged(t *testing.T) {
 	if _, ref := l.Acquire(Request{Server: "b"}); ref == nil {
 		t.Error("an unchanged entry lost its calls in flight")
 	}
-	// The entry changes: a full bucket.
-	l.Set(rules(rate(2, time.Hour).of("phone")))
-	if _, ref := l.Acquire(Request{Token: "phone"}); ref != nil {
-		t.Errorf("a changed entry kept its bucket: %v", ref)
-	}
-	// A call that held a place of a dropped entry releases without harm.
 	held()
+	if _, ref := l.Acquire(Request{Server: "b"}); ref != nil {
+		t.Errorf("the place was not given back to the kept entry: %v", ref)
+	}
+	// An entry of a new selector starts full.
+	l.Set(rules(rate(1, time.Hour).of("phone").on("a")))
+	if _, ref := l.Acquire(Request{Token: "phone", Server: "a"}); ref != nil {
+		t.Errorf("a new entry started used: %v", ref)
+	}
+}
+
+// TestSetCarriesBySelector checks that an entry whose values change keeps its calls in flight,
+// which give their places back to it, and its bucket capped at the new burst.
+func TestSetCarriesBySelector(t *testing.T) {
+	c := newClock()
+	l := New(c.now)
+	l.Set(rules(rate(10, time.Hour).on("a"), conc(2).of("phone")))
+	for range 3 {
+		if _, ref := l.Acquire(Request{Server: "a"}); ref != nil {
+			t.Fatal(ref)
+		}
+	}
+	h1, _ := l.Acquire(Request{Token: "phone"})
+	h2, _ := l.Acquire(Request{Token: "phone"})
+	// 7 calls are left; the new burst of 2 caps them, and the in-flight limit drops to 1 with 2
+	// held.
+	l.Set(rules(rate(100, time.Hour).on("a").burst(2), conc(1).of("phone")))
+	for i := range 2 {
+		if _, ref := l.Acquire(Request{Server: "a"}); ref != nil {
+			t.Fatalf("call %d: %v", i, ref)
+		}
+	}
+	if _, ref := l.Acquire(Request{Server: "a"}); ref == nil {
+		t.Error("the bucket was not capped at the new burst")
+	}
+	if _, ref := l.Acquire(Request{Token: "phone"}); ref == nil {
+		t.Error("the changed entry lost its calls in flight")
+	}
+	h1()
+	if _, ref := l.Acquire(Request{Token: "phone"}); ref == nil {
+		t.Error("one call is still in flight, at the new limit of 1")
+	}
+	h2()
+	if _, ref := l.Acquire(Request{Token: "phone"}); ref != nil {
+		t.Errorf("the places were not given back to the changed entry: %v", ref)
+	}
+	// A rate added to a concurrency-only entry starts full.
+	l.Set(rules(rate(100, time.Hour).on("a").burst(2), rate(3, time.Hour).of("phone")))
+	for i := range 3 {
+		if _, ref := l.Acquire(Request{Token: "phone", Server: "b"}); ref != nil {
+			t.Fatalf("call %d of the new rate: %v", i, ref)
+		}
+	}
 }
 
 func TestNoRules(t *testing.T) {

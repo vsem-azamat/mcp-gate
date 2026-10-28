@@ -951,7 +951,8 @@ limits:
 		{"limits: [{server: a, rate: -1/m}]", "limits[0].rate: is <calls>/<period>"},
 		{"limits: [{server: a, rate: 1/m, burst: -1}]", "limits[0].burst: must be positive"},
 		{"limits: [{server: a, concurrency: -1}]", "limits[0].concurrency: must be positive"},
-		{"limits: [{token: nobody, rate: 1/s}]", "limits[0].token: is not a token in auth.tokens or in a server's auth.tokens"},
+		{"limits: [{token: nobody, rate: 1/s}]", "limits[0].token: is not a token any server accepts"},
+		{"limits: [{rate: 60/m}, {rate: 60/1m, burst: 60}]", "limits[1]: is the same as limits[0]"},
 		{"limits: [{server: nope, rate: 1/s}]", "limits[0].server: is not a server in servers"},
 		{"limits: [{token: phone, server: b, rate: 1/s}]", "limits[0].server: the server does not accept the token phone"},
 		{"limits: [{token: phone, server: pub, rate: 1/s}]", "limits[0].server: the server does not accept the token phone"},
@@ -965,6 +966,19 @@ limits:
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%q: err = %v, want %q", c.doc, err, c.want)
 		}
+	}
+}
+
+// A global token that every server opts out of is accepted nowhere, so a limit on it is refused.
+func TestLimitOnTokenNoServerAccepts(t *testing.T) {
+	_, err := Parse([]byte(`version: 1
+auth: {tokens: {lost: secret-lost}}
+limits: [{token: lost, rate: 1/s}]
+servers:
+  a: {stdio: {command: /bin/a}, auth: {inherit: false, tokens: {bot: secret-bot}}}
+`), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "limits[0].token: is not a token any server accepts") {
+		t.Errorf("err = %v", err)
 	}
 }
 

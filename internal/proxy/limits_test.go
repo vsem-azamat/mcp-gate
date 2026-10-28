@@ -76,6 +76,19 @@ func TestLimitsStage(t *testing.T) {
 	}
 }
 
+// TestLimitsToolEntryNotPrompt checks that an entry of a tool does not count a prompt of the
+// same name.
+func TestLimitsToolEntryNotPrompt(t *testing.T) {
+	limits := limit.New(nil)
+	limits.Set([]limit.Rule{{Server: "s", Tool: "greet", Rate: 1, Per: time.Hour, Burst: 1}})
+	m, _ := fakeMirror(Options{Limits: limits}, &fakeDown{prompt: &mcp.GetPromptResult{}})
+	for i := range 3 {
+		if _, err := m.getPrompt(t.Context(), &mcp.GetPromptRequest{Params: &mcp.GetPromptParams{Name: "greet"}}); err != nil {
+			t.Fatalf("get %d: %v", i, err)
+		}
+	}
+}
+
 // blockingDown answers a tool call once release is closed.
 type blockingDown struct {
 	fakeDown

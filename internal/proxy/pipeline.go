@@ -191,7 +191,9 @@ func tokenPolicy[P any](_ context.Context, x *exchange, _ P) error {
 const CodeLimited = -32029
 
 // limits refuses a request over a rate or concurrency limit, and holds the places in flight of
-// one it passes until the request ends. A tool call is matched by the server's own tool name.
+// one it passes until the pipeline ends: once the gate stops waiting for the server, which a
+// cancelled or timed-out call does before the server has finished. A tool call is matched by
+// the server's own tool name; a prompt get or resource read matches no tool entry.
 func limits[P any](_ context.Context, x *exchange, _ P) error {
 	req := limit.Request{Token: x.principal, Server: x.m.opts.Name}
 	if x.kind == audit.Tool {
@@ -202,7 +204,7 @@ func limits[P any](_ context.Context, x *exchange, _ P) error {
 		x.outcome = audit.Limited
 		e := &jsonrpc.Error{Code: CodeLimited, Message: refused.Error()}
 		if refused.RetryAfter > 0 {
-			e.Data = json.RawMessage(fmt.Sprintf(`{"retryAfterMs":%d}`, refused.RetryAfter.Milliseconds()))
+			e.Data = json.RawMessage(fmt.Sprintf(`{"retryAfterMs":%d}`, (refused.RetryAfter+time.Millisecond-1)/time.Millisecond))
 		}
 		return e
 	}
