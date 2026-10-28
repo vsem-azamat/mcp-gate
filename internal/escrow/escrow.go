@@ -181,13 +181,37 @@ type Replacer struct {
 	batch   *batch
 
 	mu      sync.Mutex
-	handles []string // the handles it returned
+	handles []string          // the handles it returned, each once
+	issued  map[string]string // the marker it returned, by kind and value
 }
 
-// Replace implements redact.Replacer.
+// Replace implements redact.Replacer. A value it has replaced before gets the same marker
+// again, without a second insert.
 func (r *Replacer) Replace(f redact.Finding) string {
+	key := f.Kind + "\x00" + f.Value
+	r.mu.Lock()
+	marker, seen := r.issued[key]
+	r.mu.Unlock()
+	if seen {
+		return marker
+	}
+	marker, handle := r.keep(f)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.issued == nil {
+		r.issued = map[string]string{}
+	}
+	if _, seen := r.issued[key]; !seen && handle != "" {
+		r.handles = append(r.handles, handle)
+	}
+	r.issued[key] = marker
+	return marker
+}
+
+// keep inserts a finding and returns its marker, and its handle when it was kept.
+func (r *Replacer) keep(f redact.Finding) (marker, handle string) {
 	if len(f.Value) > MaxValueBytes {
-		return redact.MarkerText(f.Kind)
+		return redact.MarkerText(f.Kind), ""
 	}
 	sum := sha256.Sum256([]byte(f.Value))
 	handle, err := r.e.store.insert(&entry{
@@ -198,15 +222,26 @@ func (r *Replacer) Replace(f redact.Finding) string {
 	}, r.src.TTL)
 	if err != nil {
 		r.e.logger.Error("escrow insert failed", "error", err.Error())
-		return redact.MarkerText(f.Kind)
+		return redact.MarkerText(f.Kind), ""
 	}
-	r.mu.Lock()
-	r.handles = append(r.handles, handle)
-	r.mu.Unlock()
 	// The tool is not logged: for a resource read it is the client's URI, which the audit
 	// line logs redacted.
 	r.e.logger.Info("escrowed secret", "handle", handle, "type", f.Kind, "server", r.src.Server)
-	return Marker(f.Kind, handle)
+	return Marker(f.Kind, handle), handle
+}
+
+// Issued returns a replacer that only looks up: a finding this replacer has replaced gets the
+// same marker, and any other finding is left as it is. It keeps nothing, so it can redact a text
+// that is not part of the result, to see how the result wrote it.
+func (r *Replacer) Issued() redact.Replacer {
+	return redact.ReplacerFunc(func(f redact.Finding) string {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if marker, ok := r.issued[f.Kind+"\x00"+f.Value]; ok {
+			return marker
+		}
+		return f.Value
+	})
 }
 
 // Discard drops the entries this replacer kept that no other result has used since, because
@@ -215,7 +250,7 @@ func (r *Replacer) Replace(f redact.Finding) string {
 func (r *Replacer) Discard() {
 	r.mu.Lock()
 	handles := r.handles
-	r.handles = nil
+	r.handles, r.issued = nil, nil
 	r.mu.Unlock()
 	if n := r.e.store.discard(r.batch, handles); n > 0 {
 		r.e.logger.Info("dropped the escrowed secrets of a withheld result", "entries", n, "server", r.src.Server)

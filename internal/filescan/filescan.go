@@ -124,6 +124,11 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 	if downstream == nil || redacted == nil || downstream.IsError || !s.tools[tool] {
 		return redacted, 0, nil
 	}
+	if len(downstream.Content) != len(redacted.Content) {
+		// Mentions are matched block for block; without that, one could stay visible.
+		s.o.Logger.Warn("file not scanned; withholding the result", "tool", tool, "reason", "the redacted result has other content blocks")
+		return nil, 0, fmt.Errorf("%w (the redacted result does not match the server's)", ErrUnscannable)
+	}
 	defer func() {
 		if v := recover(); v != nil {
 			s.o.Logger.Error("file scan panicked", "tool", tool, "type", fmt.Sprintf("%T", v))
@@ -202,16 +207,24 @@ func (s *Scanner) Scan(ctx context.Context, tool string, args func() map[string]
 		name := s.o.Engine.RedactText(f.name, redact.Marker{})
 		notice := fmt.Sprintf("%s file_name=%s size=%d bytes; contains: %s. The file is withheld from this conversation%s.",
 			marker, name, f.size, strings.Join(h.kinds, ", "), release)
-		files = append(files, mention{paths: s.forms([]string{c.path, f.resolved, c.raw}, rep), marker: marker, notice: notice})
+		files = append(files, mention{paths: s.forms([]string{c.path, f.resolved, c.raw}, rep), blocks: c.blocks, marker: marker, notice: notice})
 		s.o.Logger.Info("downloaded file withheld", "tool", tool, "kinds", h.kinds, "size", f.size)
 	}
 	return withhold(downstream, redacted, files), len(hits), nil
 }
 
+// issuer is a replacer that can tell the markers it issued without keeping anything new; see
+// escrow.Replacer.Issued.
+type issuer interface{ Issued() redact.Replacer }
+
 // forms returns paths and, where redaction changes them, their redacted forms: what a mention
 // of each looks like in the redacted result. rep is the call's replacer, so a finding gets the
-// marker it got there.
+// marker it got there; a replacer that keeps findings is asked only for the markers it issued,
+// so that redacting a path keeps nothing the result did not show.
 func (s *Scanner) forms(paths []string, rep redact.Replacer) []string {
+	if is, ok := rep.(issuer); ok {
+		rep = is.Issued()
+	}
 	out := slices.Clone(paths)
 	for _, p := range paths {
 		if r := s.o.Engine.RedactText(p, rep); r != p {

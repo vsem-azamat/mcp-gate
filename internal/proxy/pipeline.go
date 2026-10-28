@@ -201,7 +201,7 @@ func scanFiles(ctx context.Context, x *exchange, res *mcp.CallToolResult) (*mcp.
 	}
 	downstream, ok := x.downstream.(*mcp.CallToolResult)
 	if !ok {
-		downstream = res
+		return nil, x.withheld(errors.New("the server's result is missing for the file scan"))
 	}
 	out, n, err := f.Scan(ctx, x.entry, x.req.Arguments, downstream, res, x.forwarded, x.resultReplacer())
 	if err != nil {

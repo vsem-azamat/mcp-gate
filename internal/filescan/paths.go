@@ -64,6 +64,9 @@ type candidate struct {
 	raw  string // as written, for withholding
 	// fromArguments is set when only the arguments name it, not the result.
 	fromArguments bool
+	// blocks are the indexes of the content blocks that name it, however they write it (a
+	// JSON text may escape it).
+	blocks []int
 }
 
 // candidates collects the absolute paths a file tool reported in its result (path members of
@@ -88,6 +91,7 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 		}
 	}
 	full := func() bool { return overflow || len(out) > maxCandidates }
+	block := -1 // the content block being read, if any
 	add := func(raw string) {
 		if full() {
 			return
@@ -105,14 +109,21 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 			return
 		}
 		c = filepath.Clean(c)
+		var blocks []int
+		if block >= 0 {
+			blocks = []int{block}
+		}
 		for i := range out {
 			if out[i].path == c {
 				// Reported by the tool as well: not the caller's alone.
 				out[i].fromArguments = out[i].fromArguments && fromArguments
+				if block >= 0 && !slices.Contains(out[i].blocks, block) {
+					out[i].blocks = append(out[i].blocks, block)
+				}
 				return
 			}
 		}
-		out = append(out, candidate{path: c, raw: strings.TrimRight(strings.TrimSpace(raw), ".,;"), fromArguments: fromArguments})
+		out = append(out, candidate{path: c, raw: strings.TrimRight(strings.TrimSpace(raw), ".,;"), fromArguments: fromArguments, blocks: blocks})
 	}
 	var walk func(key string, value any, depth int)
 	walk = func(key string, value any, depth int) {
@@ -137,10 +148,11 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 	if res.StructuredContent != nil {
 		walk("", res.StructuredContent, 0)
 	}
-	for _, c := range res.Content {
+	for i, c := range res.Content {
 		if full() {
 			break
 		}
+		block = i
 		if uri := contentURI(c); uri != "" {
 			add(uri)
 		}
@@ -175,6 +187,7 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 			}
 		}
 	}
+	block = -1
 	fromArguments = true
 	if args != nil {
 		walk("", args, 0)
@@ -238,13 +251,15 @@ func contentMeta(c mcp.Content) []map[string]any {
 // mention is a withheld file: the forms of its path that mark a mention of it, and what
 // replaces one.
 type mention struct {
-	paths          []string
+	paths []string
+	// blocks are the indexes of the content blocks that named the file.
+	blocks         []int
 	marker, notice string
 }
 
 // withhold returns redacted with every mention of a file in files removed: a content block whose
-// text, URI or _meta names one of its paths, or whose block in downstream (the result redacted
-// was made from, block for block) does, becomes its notice, and a string in structured content
+// text, URI or _meta names one of its paths, whose block in downstream (the result redacted was
+// made from, block for block) does, or that the file was found in, becomes its notice, and a string in structured content
 // or in the result's _meta that names one becomes its marker (a string, so that an output schema
 // requiring the member still validates). Where a block or string names several files, it gets
 // the notice or marker of one of them. Neither result is modified.
@@ -321,14 +336,18 @@ func withhold(downstream, redacted *mcp.CallToolResult, files []mention) *mcp.Ca
 		}
 		return m
 	}
+	foundIn := func(i int) *mention {
+		for k := range files {
+			if slices.Contains(files[k].blocks, i) {
+				return &files[k]
+			}
+		}
+		return nil
+	}
 	out := *redacted
 	out.Content = slices.Clone(redacted.Content)
-	aligned := len(downstream.Content) == len(redacted.Content)
 	for i, c := range out.Content {
-		m := blockMentions(c)
-		if aligned {
-			m = cmp.Or(m, blockMentions(downstream.Content[i]))
-		}
+		m := cmp.Or(foundIn(i), blockMentions(c), blockMentions(downstream.Content[i]))
 		if m != nil {
 			out.Content[i] = &mcp.TextContent{Text: m.notice}
 		}

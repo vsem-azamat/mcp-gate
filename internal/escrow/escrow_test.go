@@ -274,6 +274,28 @@ func TestDiscardDropsOnlyTheWithheldResultsEntries(t *testing.T) {
 	withheld.Discard() // a second call is harmless
 }
 
+func TestIssuedKeepsNothing(t *testing.T) {
+	t.Parallel()
+	e := New(Options{KeyHash: testHash()})
+	r := e.Replacer(Source{Server: "chat"})
+	seen := redact.Finding{Kind: "password", Value: "Seen-In-Result-1"}
+	marker := r.Replace(seen)
+	if again := r.Replace(seen); again != marker || len(r.handles) != 1 {
+		t.Fatalf("a repeated value = %q, %d handles", again, len(r.handles))
+	}
+	is := r.Issued()
+	if got := is.Replace(seen); got != marker {
+		t.Errorf("Issued for a replaced value = %q, want %q", got, marker)
+	}
+	unseen := redact.Finding{Kind: "github_token", Value: "Never-In-Result-2"}
+	if got := is.Replace(unseen); got != unseen.Value {
+		t.Errorf("Issued for another value = %q", got)
+	}
+	if len(e.store.entries) != 1 || len(r.handles) != 1 {
+		t.Errorf("%d entries, %d handles after Issued", len(e.store.entries), len(r.handles))
+	}
+}
+
 func TestHTTPContract(t *testing.T) {
 	t.Parallel()
 	e := New(Options{KeyHash: testHash()})
