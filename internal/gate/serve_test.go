@@ -195,7 +195,14 @@ func TestCancellation(t *testing.T) {
 }
 
 func TestListChanged(t *testing.T) {
-	r := startGate(t, configDoc("", map[string]string{"s": stdioServer(t, testkit.Fake{}, "")}), gateOpts{})
+	legacy := testkit.NewFakeHTTP(t, testkit.Fake{ProtocolVersions: []string{"2024-11-05"}}, testkit.FakeHTTPOptions{SSE: true}).URL()
+	for name, server := range map[string]string{"stdio": stdioServer(t, testkit.Fake{}, ""), "sse": sseServer(legacy, "")} {
+		t.Run(name, func(t *testing.T) { testListChanged(t, server) })
+	}
+}
+
+func testListChanged(t *testing.T, server string) {
+	r := startGate(t, configDoc("", map[string]string{"s": server}), gateOpts{})
 	r.waitReady(t, "s")
 	var changed atomic.Int32
 	watcher := r.connect(t, "s", clientOpts{version: "2026-07-28", changed: func() { changed.Add(1) }})

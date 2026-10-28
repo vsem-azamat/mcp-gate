@@ -212,7 +212,6 @@ func TestImportUnimplemented(t *testing.T) {
 	want := []string{
 		"mcpServers.files.oauth.pkceDisabled (true): mcp-gate always uses PKCE",
 		"mcpServers.files.oauth.tokenUrl",
-		"mcpServers.legacy (sse transport)",
 	}
 	if !slices.Equal(unimpl.Keys, want) {
 		t.Errorf("unimplemented =\n  %s\nwant\n  %s", strings.Join(unimpl.Keys, "\n  "), strings.Join(want, "\n  "))
@@ -224,13 +223,37 @@ func TestImportUnimplemented(t *testing.T) {
 	}
 }
 
+// TestImportSSE maps mcp-proxy's SSE servers, named or by default for a url, to the legacy
+// transport.
+func TestImportSSE(t *testing.T) {
+	t.Parallel()
+	res, err := Import([]byte(`{
+  "mcpProxy": {"type": "streamable-http", "options": {"authTokens": ["${HUB_TOKEN_A}"]}},
+  "mcpServers": {
+    "named": {"url": "https://a.example.com/sse", "transportType": "sse", "headers": {"X-Key": "${A_KEY}"}, "timeout": "5s"},
+    "implied": {"url": "https://b.example.com/sse", "oauth": {}, "timeout": "5s"}
+  }
+}`), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Parse(res.YAML, anyValue)
+	if err != nil {
+		t.Fatalf("the import does not load: %v\n%s", err, res.YAML)
+	}
+	named, implied := c.Servers["named"].HTTP, c.Servers["implied"].HTTP
+	if !named.SSE() || named.Headers["X-Key"] == "" || !implied.SSE() || implied.OAuth == nil {
+		t.Errorf("named = %+v, implied = %+v", named, implied)
+	}
+}
+
 func TestImportPartial(t *testing.T) {
 	t.Parallel()
 	res, err := Import([]byte(unimplementedDoc), Options{Partial: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Unimplemented) != 3 || !strings.Contains(string(res.YAML), config.PartialMarker+": mcpServers.files.oauth.tokenUrl") {
+	if len(res.Unimplemented) != 2 || !strings.Contains(string(res.YAML), config.PartialMarker+": mcpServers.files.oauth.tokenUrl") {
 		t.Errorf("unimplemented keys = %v\n%s", res.Unimplemented, res.YAML)
 	}
 	if _, err := config.Parse(res.YAML, anyValue); err == nil || !strings.Contains(err.Error(), "--partial") {

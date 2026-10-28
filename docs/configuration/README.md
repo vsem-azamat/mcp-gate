@@ -111,8 +111,9 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `stdio.cwd` | the gate's | Absolute working directory |
 | `stdio.env` | none | Variables set for the child; they win over inherited ones |
 | `stdio.inheritEnv` | `PATH HOME LANG LC_* TZ USER XDG_RUNTIME_DIR` | The gate's variables the child inherits; `*` at the end matches a prefix; `[]` inherits nothing |
-| `http.url` | required | Streamable HTTP endpoint, `http` or `https`, without user information or fragment |
+| `http.url` | required | The server's endpoint, `http` or `https`, without user information or fragment: the streamable HTTP endpoint, or with `transport: sse` the URL of the event stream (often ending in `/sse`) |
 | `http.headers` | none | Headers sent with every request, such as an API key. Headers mcp-gate sets (`Accept`, `Accept-Encoding`, `Content-Type`, every `Mcp-` header and the like) cannot be set |
+| `http.transport` | `streamable` | `streamable` for streamable HTTP, or `sse` for a server that speaks only the HTTP+SSE transport of protocol `2024-11-05`: a GET opens the event stream and messages are POSTed to the endpoint its first event names, which must be on the origin (scheme, host and port) of `url`. Such a server is offered `2025-11-25` and negotiates down; `protocolVersion` must be earlier than `2026-07-28`. Headers, OAuth, size limits, probes and restarts work as on streamable HTTP. A change restarts the server |
 | `http.oauth` | none | Authorize the requests with an OAuth grant obtained by [`mcp-gate auth login`](../commands/auth.md). The `url` must then be https, or http on a loopback address, and `headers` cannot set `Authorization`. Every key below is optional |
 | `oauth.clientID` | registered at login | A client registered with the authorization server in advance; without it the login registers one dynamically |
 | `oauth.clientSecret` | none | The secret of `clientID`, for a confidential client; put it in the environment |

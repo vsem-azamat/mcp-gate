@@ -19,16 +19,17 @@ const errorBodyLimit = 64 << 10
 
 // newHTTPClient returns the HTTP client for one server: it adds the configured headers, follows
 // no redirects (they would carry the headers elsewhere), and limits every response body and
-// event to limit bytes so that an oversized response fails only its own request. accepted, if
-// set, is called with each request that gets a 2xx answer.
-func newHTTPClient(headers map[string]string, limit int, logger *slog.Logger, accepted func(*http.Request)) (*http.Client, *http.Transport) {
+// event to limit bytes so that an oversized response fails only its own request. pending, set
+// for the legacy HTTP+SSE transport, holds the requests that the events of its one stream answer.
+// accepted, if set, is called with each request that gets a 2xx answer.
+func newHTTPClient(headers map[string]string, limit int, pending *pendingCalls, logger *slog.Logger, accepted func(*http.Request)) (*http.Client, *http.Transport) {
 	base := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the standard library's default transport
 	h := http.Header{}
 	for k, v := range headers {
 		h.Set(k, v)
 	}
 	return &http.Client{
-		Transport: &limitTransport{base: base, headers: h, limit: limit, logger: logger, accepted: accepted},
+		Transport: &limitTransport{base: base, headers: h, limit: limit, pending: pending, logger: logger, accepted: accepted},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -39,6 +40,7 @@ type limitTransport struct {
 	base     http.RoundTripper
 	headers  http.Header
 	limit    int
+	pending  *pendingCalls // nil on streamable HTTP, where an event answers the request that opened its stream
 	logger   *slog.Logger
 	accepted func(*http.Request)
 }
@@ -65,9 +67,16 @@ func (t *limitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	case mediaType == "application/json":
 		t.limitJSON(resp, call)
 	case mediaType == "text/event-stream":
+		answers := func(id jsonrpc.ID) bool {
+			want, isCall := call()
+			return isCall && id == want
+		}
+		if t.pending != nil {
+			answers = t.pending.has
+		}
 		resp.Body = &eventLimiter{
 			src: resp.Body, br: bufio.NewReaderSize(resp.Body, 64<<10), limit: t.limit,
-			call: call, logger: t.logger, lineStart: true,
+			answers: answers, logger: t.logger, lineStart: true,
 		}
 	}
 	return resp, nil
@@ -152,15 +161,15 @@ func (r errReader) Read([]byte) (int, error) {
 }
 
 // eventLimiter passes a server-sent event stream through one event at a time. An event over the
-// limit is dropped; if it was the response to the call that opened the stream, an event holding
-// a JSON-RPC error for that call takes its place. A complete event is handed to Read without a
+// limit is dropped; if it was the response to a request the stream answers, an event holding a
+// JSON-RPC error for that request takes its place. A complete event is handed to Read without a
 // copy, so the limiter holds it once.
 type eventLimiter struct {
-	src    io.ReadCloser
-	br     *bufio.Reader
-	limit  int
-	call   func() (jsonrpc.ID, bool) // the id of the request that opened the stream, if it is a call
-	logger *slog.Logger
+	src     io.ReadCloser
+	br      *bufio.Reader
+	limit   int
+	answers func(jsonrpc.ID) bool // whether the stream answers the request of this id
+	logger  *slog.Logger
 
 	out       []byte // bytes ready for Read, from off on
 	off       int
@@ -232,17 +241,16 @@ func dataStart(event []byte) []byte {
 	return nil
 }
 
-// replace writes the error event for a dropped event that answered the call.
+// replace writes the error event for a dropped event that answered a request.
 func (l *eventLimiter) replace() {
 	id, ok := frameID(l.big)
-	want, isCall := l.call()
-	if !ok || !isCall || id != want {
+	if !ok || !l.answers(id) {
 		l.logger.Warn("dropped an event over maxMessageBytes that answers no pending request",
 			"bytes", l.big.size, "limit", l.limit)
 		return
 	}
 	l.logger.Warn("dropped an event over maxMessageBytes; its request fails", "bytes", l.big.size, "limit", l.limit)
 	l.out = append(l.out, "event: message\ndata: "...)
-	l.out = append(l.out, oversizedResponse(want, l.limit)...)
+	l.out = append(l.out, oversizedResponse(id, l.limit)...)
 	l.out = append(l.out, '\n')
 }

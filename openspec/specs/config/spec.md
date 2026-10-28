@@ -17,7 +17,7 @@ The config SHALL be one YAML document decoded strictly: an unknown key, a duplic
 
 #### Scenario: Unknown key
 
-- **WHEN** a server has a key the build does not implement, such as `sse`
+- **WHEN** a server has a key the build does not implement, such as `websocket`
 - **THEN** loading fails and names the key
 
 #### Scenario: Bare number
@@ -46,7 +46,9 @@ After decoding, every string value SHALL be expanded: `${NAME}` SHALL be replace
 
 ### Requirement: Servers
 
-The config SHALL have at least one server under `servers`. A server name SHALL match `[a-z0-9][a-z0-9._-]{0,62}`. Each server SHALL have exactly one of `stdio` (with a required `command`, and optional `args`, `cwd`, `env` and `inheritEnv`) and `http` (with a required `url` and optional `headers`), and MAY set `callTimeout` (default `0s`, no bound), `maxMessageBytes` (default `16MiB`, between `4KiB` and `1GiB`), `protocolVersion` (one of the versions the SDK supports), `probeInterval` (default `30s`, at least `1s`), `restart.maxBackoff` (default `30s`, between `1s` and `5m`) and `disabled`.
+The config SHALL have at least one server under `servers`. A server name SHALL match `[a-z0-9][a-z0-9._-]{0,62}`. Each server SHALL have exactly one of `stdio` (with a required `command`, and optional `args`, `cwd`, `env` and `inheritEnv`) and `http` (with a required `url` and optional `headers` and `transport`), and MAY set `callTimeout` (default `0s`, no bound), `maxMessageBytes` (default `16MiB`, between `4KiB` and `1GiB`), `protocolVersion` (one of the versions the SDK supports), `probeInterval` (default `30s`, at least `1s`), `restart.maxBackoff` (default `30s`, between `1s` and `5m`) and `disabled`.
+
+`transport` SHALL be `streamable` (the default, streamable HTTP) or `sse` (the legacy HTTP+SSE transport of protocol `2024-11-05`); with `sse`, `protocolVersion` SHALL be a version before `2026-07-28`, which that transport does not carry.
 
 An `http` server MAY have an `oauth` block (see the oauth spec), whose keys are all optional: `clientID`, `clientSecret`, which SHALL need `clientID`, `redirectURL` (default `http://localhost:8090/oauth/callback`), `scopes` and `authServerMetadataURL`. With `oauth`, the server's `url`, `redirectURL` and `authServerMetadataURL` SHALL be https URLs, or http URLs on a loopback address; `scopes` SHALL be distinct, non-empty printable ASCII without spaces, quotes or backslashes; and `headers` SHALL NOT set `Authorization`.
 
@@ -56,6 +58,16 @@ An `http` server MAY have an `oauth` block (see the oauth spec), whose keys are 
 
 - **WHEN** a server has both `stdio` and `http`
 - **THEN** loading fails
+
+#### Scenario: Legacy SSE with a stateless version
+
+- **WHEN** a server has `transport: sse` and `protocolVersion: 2026-07-28`
+- **THEN** loading fails naming `servers.<name>.protocolVersion`
+
+#### Scenario: Unknown transport
+
+- **WHEN** a server has `transport: websocket`
+- **THEN** loading fails naming `servers.<name>.http.transport`
 
 #### Scenario: Credentials in the URL
 
@@ -170,7 +182,7 @@ A YAML syntax or type error SHALL be reported with its line. Every expansion and
 `mcp-gate import <config.json>` SHALL convert an mcp-proxy config into an mcp-gate config on stdout. Keys SHALL be matched without regard to case, as mcp-proxy matched them, and two keys of one object that differ only in case SHALL be an error. The conversion SHALL map:
 
 - `mcpProxy.name` to `name`;
-- a server's `command`, `args` and `env` to `stdio`, and `url` and `headers` with `transportType: streamable-http` to `http`;
+- a server's `command`, `args` and `env` to `stdio`, `url` and `headers` with `transportType: streamable-http` to `http`, and with `transportType: sse`, or a `url` without `transportType`, to `http` with `transport: sse`;
 - `timeout` to `callTimeout`; a server without `timeout` SHALL get `callTimeout: 0s` with a comment that mcp-proxy had none;
 - `options.disabled` to `disabled`;
 - `options.pingInterval` to `probeInterval` and `options.reconnectInterval` to `restart.maxBackoff`, a server inheriting the values in `mcpProxy.options` as mcp-proxy did; values below the minimum are raised and a reconnect interval above `5m` is lowered, with a warning;
@@ -181,17 +193,17 @@ A YAML syntax or type error SHALL be reported with its line. Every expansion and
 - `options.redact` to `redact` with `ru: true`, since mcp-proxy always ran the Russian rules, and `highEntropy` and `disableRules`; a server whose effective options have no `redact` block SHALL get `redact.enabled: false` with a comment;
 - `mcpProxy.options.redact.escrowTTL` and `escrowMaxEntries` to `escrow.ttl` and `escrow.maxEntries` (lowered to the maximum with a warning); a server's own `escrowTTL` to `redact.escrowTTL`, and a server's own `escrowMaxEntries`, which mcp-proxy did not read, SHALL be dropped with a warning;
 - `fileTools`, `fileRoots` and `fileMaxBytes` of a server's effective `redact` block to `redact.files` `tools`, `roots` and `maxBytes`, a size outside the bounds moved inside them with a warning; roots that are not absolute paths, which mcp-proxy ignored, or are `/`, SHALL be dropped with a warning, and file tools left without a root, or roots without tools, SHALL be dropped with a warning, since mcp-proxy scanned nothing then;
-- a streamable HTTP server's `oauth` block to `http.oauth`: `clientId` to `clientID`, `clientSecret` (warned about when written out rather than a `${VAR}`), `redirectUri` to `redirectURL`, `scopes`, and `authServerMetadataUrl` to `authServerMetadataURL`; an empty block to `oauth: {}`, with a comment naming the login command. `pkceDisabled: false` SHALL be dropped; `pkceDisabled: true` and every other key of the block SHALL be unimplemented, since mcp-gate always uses PKCE and an OAuth setting silently lost could change whom the server trusts. A redirect or metadata URL that is not https or loopback, a server URL that is not https or loopback, and a block that is not an object SHALL fail the import. A stdio server's `oauth`, which mcp-proxy ignored, SHALL be dropped with a warning;
+- an HTTP server's `oauth` block to `http.oauth`: `clientId` to `clientID`, `clientSecret` (warned about when written out rather than a `${VAR}`), `redirectUri` to `redirectURL`, `scopes`, and `authServerMetadataUrl` to `authServerMetadataURL`; an empty block to `oauth: {}`, with a comment naming the login command. `pkceDisabled: false` SHALL be dropped; `pkceDisabled: true` and every other key of the block SHALL be unimplemented, since mcp-gate always uses PKCE and an OAuth setting silently lost could change whom the server trusts. A redirect or metadata URL that is not https or loopback, a server URL that is not https or loopback, and a block that is not an object SHALL fail the import. A stdio server's `oauth`, which mcp-proxy ignored, SHALL be dropped with a warning;
 - `$VAR` and `${VAR}` in string values to `${VAR}`, and any other `$` to `$$`.
 
 A command that runs `env` with `-i`, `-u NAME`, `-C DIR` and `NAME=VALUE` before the command SHALL be unwrapped into `command`, `args`, `cwd` and `env`, the assignments winning over `env`. Names unset with `-u` SHALL be removed from `inheritEnv` when they are in its default, and otherwise dropped with a comment, since a stdio child inherits only `inheritEnv` and `env`, in which, and in warnings, a name that is not a valid variable name SHALL be quoted as a Go string, so that line breaks, control characters and terminal escapes in it stay readable and inert; `-i` SHALL give `inheritEnv: []`. An `env` command line the importer does not understand SHALL be kept as it is, with a note.
 
-mcp-proxy passed each request's `_meta` on as it was; the import SHALL write no `forwardMeta` and SHALL say so in a comment. `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid` and `autoReconnect` SHALL be dropped with a comment, since they have no effect in mcp-gate. Every other key that changes behaviour (a `baseURL` with a path, the OAuth keys above, the SSE transport) SHALL make the import fail with exit status 2, listing the keys by path and writing nothing to stdout. With `-partial` the config SHALL be written anyway, each dropped key listed in a comment carrying `NOT IMPLEMENTED IN THIS BUILD`, and loading SHALL reject a file with such a comment until the comments are removed. Notes and errors SHALL name keys but never values.
+mcp-proxy passed each request's `_meta` on as it was; the import SHALL write no `forwardMeta` and SHALL say so in a comment. `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid` and `autoReconnect` SHALL be dropped with a comment, since they have no effect in mcp-gate. Every other key that changes behaviour (a `baseURL` with a path, the OAuth keys above, serving SSE to clients, which `mcpProxy.type` absent or other than `streamable-http` asks for) SHALL make the import fail with exit status 2, listing the keys by path and writing nothing to stdout. With `-partial` the config SHALL be written anyway, each dropped key listed in a comment carrying `NOT IMPLEMENTED IN THIS BUILD`, and loading SHALL reject a file with such a comment until the comments are removed. Notes and errors SHALL name keys but never values.
 
 #### Scenario: Unimplemented keys
 
 - **WHEN** one server's `oauth` has `pkceDisabled: true` and an unknown key, and another uses the SSE transport
-- **THEN** the import fails, listing the three, and writes nothing
+- **THEN** the import fails, listing the two `oauth` keys, and writes nothing; the SSE server is not listed
 
 #### Scenario: Partial import
 

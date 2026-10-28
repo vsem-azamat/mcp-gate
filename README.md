@@ -33,7 +33,7 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 ## Key features
 
 - **A URL per server**<br>
-  Local (stdio) and remote (Streamable HTTP) servers are served at `/<server>/mcp`. The gate starts local servers, checks that they respond and restarts them when they crash. While a server restarts, agents can still list its tools.
+  Local (stdio) and remote (Streamable HTTP or legacy SSE) servers are served at `/<server>/mcp`. The gate starts local servers, checks that they respond and restarts them when they crash. While a server restarts, agents can still list its tools.
 
 - **Or one URL for all of them**<br>
   Optional. With `aggregate: {}` in the config, `/mcp` serves the tools of many servers at once, named `<server>__<tool>`, so a client needs one entry. Each token sees only the servers that accept it, plus the public ones.
@@ -71,9 +71,9 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 | Different tools for different agents | ✅ | ❌ | ❌ | ✅ | ✅ |
 | Web UI | ❌ | ❌ | ➖ | ✅ | ✅ |
 | SSO and roles | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Legacy SSE transport | [🔜](https://github.com/vsem-azamat/mcp-gate/issues/37) | ✅ | ❔ | ✅ | ✅ |
+| Legacy SSE transport | ➖ [🔜](https://github.com/vsem-azamat/mcp-gate/issues/77) | ✅ | ❔ | ✅ | ✅ |
 
-<sub>🔜 planned, links to the issue. ➖ partly: tools only; Docker blocks the whole call instead of hiding the secret; ContextForge and agentgateway hide secrets through plugins; agentgateway's OAuth is token exchange. ❔ not documented. Checked against each project's docs in October 2026, corrections welcome.</sub>
+<sub>🔜 planned, links to the issue. ➖ partly: tools only; mcp-gate reaches servers over legacy SSE but serves clients only streamable HTTP; Docker blocks the whole call instead of hiding the secret; ContextForge and agentgateway hide secrets through plugins; agentgateway's OAuth is token exchange. ❔ not documented. Checked against each project's docs in October 2026, corrections welcome.</sub>
 
 mcp-gate suits a handful of MCP servers on one machine. If you need what the lower rows list, look at ContextForge, agentgateway, [MetaMCP](https://github.com/metatool-ai/metamcp) or [MCPJungle](https://github.com/mcpjungle/MCPJungle).
 

@@ -284,6 +284,11 @@ func httpServer(url, extra string) string {
 	return fmt.Sprintf("    http:\n      url: %q\n%s", url, indent(extra))
 }
 
+// sseServer returns the YAML of a server at url on the legacy HTTP+SSE transport.
+func sseServer(url, extra string) string {
+	return fmt.Sprintf("    http:\n      url: %q\n      transport: sse\n%s", url, indent(extra))
+}
+
 func indent(s string) string {
 	if s == "" {
 		return ""

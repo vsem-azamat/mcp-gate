@@ -127,7 +127,7 @@ func TestEventLimiter(t *testing.T) {
 		{"unfinished event", "data: {}", iotest.OneByteReader},
 	} {
 		l := &eventLimiter{
-			src: io.NopCloser(strings.NewReader(stream + c.tail)), limit: 1024, call: func() (jsonrpc.ID, bool) { return id, true },
+			src: io.NopCloser(strings.NewReader(stream + c.tail)), limit: 1024, answers: func(got jsonrpc.ID) bool { return got == id },
 			logger: slog.New(slog.DiscardHandler), lineStart: true,
 		}
 		l.br = bufio.NewReaderSize(l.src, 64)

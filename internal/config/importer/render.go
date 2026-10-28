@@ -119,6 +119,9 @@ func (s *server) node(d *document) *yaml.Node {
 		if len(h.Headers) > 0 {
 			add(m, "headers", strMap(h.Headers), "")
 		}
+		if h.Transport != "" {
+			add(m, "transport", str(string(h.Transport)), "")
+		}
 		if a := h.OAuth; a != nil {
 			add(m, "oauth", oauthNode(a), "")
 			m.Content[len(m.Content)-2].HeadComment = "# log in with: mcp-gate auth login <config> " + s.name

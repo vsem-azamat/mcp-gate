@@ -490,8 +490,11 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	if s.MaxMessageBytes != nil && (*s.MaxMessageBytes < MinMaxMessageBytes || *s.MaxMessageBytes > MaxMaxMessageBytes) {
 		add(path+".maxMessageBytes", "must be between %s and %s", ByteSize(MinMaxMessageBytes), ByteSize(MaxMaxMessageBytes))
 	}
-	if s.ProtocolVersion != "" && !slices.Contains(mcp.SupportedProtocolVersions(), s.ProtocolVersion) {
+	switch {
+	case s.ProtocolVersion != "" && !slices.Contains(mcp.SupportedProtocolVersions(), s.ProtocolVersion):
 		add(path+".protocolVersion", "must be one of %s", strings.Join(mcp.SupportedProtocolVersions(), ", "))
+	case s.ProtocolVersion >= StatelessVersion && s.HTTP != nil && s.HTTP.SSE():
+		add(path+".protocolVersion", "must be earlier than %s, which the sse transport does not carry", StatelessVersion)
 	}
 	if s.ProbeInterval != nil && s.ProbeInterval.D() < MinProbeInterval {
 		add(path+".probeInterval", "must be at least %s", MinProbeInterval)
@@ -615,9 +618,18 @@ func (s *Stdio) validate(path string, add func(path, format string, args ...any)
 	}
 }
 
+// StatelessVersion is the first protocol version negotiated by server/discover, which only stdio
+// and streamable HTTP carry; downstream.StatelessVersion is the same, as a gate test checks.
+const StatelessVersion = "2026-07-28"
+
 func (h *HTTP) validate(path string, add func(path, format string, args ...any)) {
 	if err := CheckURL(h.URL); err != nil {
 		add(path+".url", "%v", err)
+	}
+	switch h.Transport {
+	case "", TransportStreamable, TransportSSE:
+	default:
+		add(path+".transport", "must be %s or %s", TransportStreamable, TransportSSE)
 	}
 	seen := map[string]bool{}
 	for _, k := range sortedKeys(h.Headers) {

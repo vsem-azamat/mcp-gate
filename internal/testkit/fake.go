@@ -24,8 +24,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Fake describes a scriptable fake MCP server, served over stdio (StdioCommand) or streamable
-// HTTP (NewFakeHTTP). Every fake serves these tools:
+// Fake describes a scriptable fake MCP server, served over stdio (StdioCommand), or over
+// streamable HTTP or the legacy HTTP+SSE transport (NewFakeHTTP). Every fake serves these tools:
 //
 //   - echo {"text": string}: returns the text;
 //   - sleep {"ms": number}: waits, then returns "slept";
@@ -181,22 +181,32 @@ type FakeHTTPOptions struct {
 	JSONResponse bool
 	// Gzip compresses responses for clients that accept gzip.
 	Gzip bool
+	// SSE serves the legacy HTTP+SSE transport of 2024-11-05 instead of streamable HTTP: a GET
+	// opens a session's event stream, whose first event names the endpoint to POST messages to.
+	SSE bool
 }
 
-// FakeHTTP serves a fake over stateless streamable HTTP. It is closed when the test ends.
+// FakeHTTP serves a fake over stateless streamable HTTP, or over the legacy HTTP+SSE transport.
+// It is closed when the test ends.
 type FakeHTTP struct {
 	srv  *httptest.Server
+	sse  bool
 	down atomic.Bool
 }
 
 // NewFakeHTTP starts serving f at URL().
 func NewFakeHTTP(t testing.TB, f Fake, opts FakeHTTPOptions) *FakeHTTP {
 	t.Helper()
-	h := &FakeHTTP{}
+	h := &FakeHTTP{sse: opts.SSE}
 	stop := make(chan struct{})
 	s := newFakeServer(f, nil, 0, stop)
-	var handler http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s },
-		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: opts.JSONResponse})
+	var handler http.Handler
+	if opts.SSE {
+		handler = mcp.NewSSEHandler(func(*http.Request) *mcp.Server { return s }, nil)
+	} else {
+		handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s },
+			&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: opts.JSONResponse})
+	}
 	if opts.Gzip {
 		handler = gzipHandler(handler)
 	}
@@ -212,11 +222,22 @@ func NewFakeHTTP(t testing.TB, f Fake, opts FakeHTTPOptions) *FakeHTTP {
 	return h
 }
 
-// URL is the MCP endpoint.
-func (h *FakeHTTP) URL() string { return h.srv.URL + "/mcp" }
+// URL is the MCP endpoint: /sse for the legacy transport, /mcp otherwise.
+func (h *FakeHTTP) URL() string {
+	if h.sse {
+		return h.srv.URL + "/sse"
+	}
+	return h.srv.URL + "/mcp"
+}
 
-// SetDown makes the server answer every request with 503, or serve again.
-func (h *FakeHTTP) SetDown(down bool) { h.down.Store(down) }
+// SetDown makes the server answer every request with 503, or serve again. On the legacy
+// transport going down also ends the open connections, and so the sessions' event streams.
+func (h *FakeHTTP) SetDown(down bool) {
+	h.down.Store(down)
+	if down && h.sse {
+		h.srv.CloseClientConnections()
+	}
+}
 
 // newFakeServer builds the server of f. Requests it leaves unanswered return when stop closes.
 func newFakeServer(f Fake, crash func(), grandchild int, stop <-chan struct{}) *mcp.Server {

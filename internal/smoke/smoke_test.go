@@ -121,10 +121,11 @@ func (l *logLines) messages(msg string) []map[string]any {
 }
 
 // TestBinary runs the binary as systemd does (state directory from $STATE_DIRECTORY, secrets in
-// the environment) with a stdio fake that has a grandchild, an HTTP fake and a legacy stdio fake
-// that ignores server/discover behind it, then checks health and readiness, listing and calls on
-// both routes, redaction and an escrow round trip, /_status, the legacy server's learned pin in
-// the state directory, and that SIGTERM stops the gate with status 0 and leaves no child behind.
+// the environment) with a stdio fake that has a grandchild, an HTTP fake, a legacy stdio fake
+// that ignores server/discover and a fake on the legacy HTTP+SSE transport behind it, then checks
+// health and readiness, listing and calls on the routes, redaction and an escrow round trip,
+// /_status, the legacy server's learned pin in the state directory, and that SIGTERM stops the
+// gate with status 0 and leaves no child behind.
 func TestBinary(t *testing.T) {
 	bin := gateBinary(t)
 	dir := t.TempDir()
@@ -134,6 +135,7 @@ func TestBinary(t *testing.T) {
 	}
 
 	web := testkit.NewFakeHTTP(t, testkit.Fake{Name: "web"}, testkit.FakeHTTPOptions{})
+	sse := testkit.NewFakeHTTP(t, testkit.Fake{Name: "sse", ProtocolVersions: []string{"2024-11-05"}}, testkit.FakeHTTPOptions{SSE: true})
 	cmd, args := testkit.StdioCommand(t, testkit.Fake{Name: "local", Grandchild: true})
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
@@ -167,7 +169,11 @@ servers:
     stdio:
       command: %q
       args: %s
-`, cmd, argsJSON, web.URL(), legacyCmd, legacyJSON)
+  sse:
+    http:
+      url: %q
+      transport: sse
+`, cmd, argsJSON, web.URL(), legacyCmd, legacyJSON, sse.URL())
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +231,7 @@ servers:
 				ServerCount int    `json:"serverCount"`
 				Status      string `json:"status"`
 			}
-			if err := json.Unmarshal([]byte(body), &r); err != nil || r.Name != "smoke" || r.ServerCount != 3 || r.Status != "ok" {
+			if err := json.Unmarshal([]byte(body), &r); err != nil || r.Name != "smoke" || r.ServerCount != 4 || r.Status != "ok" {
 				t.Errorf("/_readyz = %s (%v)", body, err)
 			}
 			break
@@ -237,7 +243,7 @@ servers:
 	}
 
 	sessions := map[string]*mcp.ClientSession{}
-	for _, name := range []string{"local", "web"} {
+	for _, name := range []string{"local", "web", "sse"} {
 		cs := connect(t, tr, base+"/"+name+"/mcp")
 		sessions[name] = cs
 		var tools []string
@@ -296,7 +302,8 @@ servers:
 		} `json:"servers"`
 	}
 	if err := json.Unmarshal([]byte(body), &st); code != http.StatusOK || err != nil ||
-		st.Servers["local"].State != "ready" || st.Servers["local"].PID != pids.PID || st.Servers["web"].State != "ready" {
+		st.Servers["local"].State != "ready" || st.Servers["local"].PID != pids.PID || st.Servers["web"].State != "ready" ||
+		st.Servers["sse"].State != "ready" {
 		t.Errorf("/_status = %d %s", code, body)
 	}
 	if code, _ := get("/_status", clientToken); code != http.StatusUnauthorized && code != http.StatusForbidden {
