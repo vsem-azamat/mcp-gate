@@ -242,6 +242,71 @@ func TestFileKeptAfterReload(t *testing.T) {
 	}
 }
 
+// TestWithheldResultDropsItsSecrets checks that a path that redaction changes is still scanned,
+// that the secret a withheld result was redacted of leaves the escrow at once, and that one an
+// earlier result showed stays.
+func TestWithheldResultDropsItsSecrets(t *testing.T) {
+	dir := t.TempDir()
+	r := startGate(t, configDoc("", map[string]string{
+		"dl": stdioServer(t, testkit.Fake{}, fmt.Sprintf("redact:\n  files: {tools: [writefile], roots: [%q], maxBytes: 1KiB}\n", dir)),
+	}), gateOpts{escrowKey: escrowKey})
+	r.waitReady(t, "dl")
+	cs := r.connect(t, "dl", clientOpts{})
+	// Directories named like GitHub tokens: redaction turns them into markers in the result.
+	shown := filepath.Join(dir, "ghp_"+strings.Repeat("aB3", 12))
+	fresh := filepath.Join(dir, "ghp_"+strings.Repeat("xY7", 12))
+	for _, d := range []string{shown, fresh} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path string, repeat int) (*mcp.CallToolResult, error) {
+		return cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "writefile", Arguments: map[string]any{
+			"path": path, "text": "line of text\n", "repeat": repeat,
+		}})
+	}
+	meta := func(handle string) int {
+		code, _, _ := r.escrowGet(t, http.MethodGet, "/_escrow/"+handle+"/meta", "Authorization", "Bearer "+escrowKey)
+		return code
+	}
+	// A result without secrets in its file shows the first directory's marker.
+	res, err := write(filepath.Join(shown, "notes.txt"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := escrowMarkerRE.FindStringSubmatch(textOf(t, res))
+	if m == nil {
+		t.Fatalf("no marker in %q", textOf(t, res))
+	}
+	earlier := m[2]
+	// Files too large to scan withhold the results under both directories.
+	for _, d := range []string{shown, fresh} {
+		if res, err := write(filepath.Join(d, "big.log"), 200); err == nil || !strings.Contains(err.Error(), "withheld") {
+			t.Fatalf("a file too large to scan under a redacted directory = %v, %v", res, err)
+		}
+	}
+	handles := map[string]bool{}
+	for _, l := range r.logs.lines("escrowed secret") {
+		handle, _ := l["handle"].(string)
+		handles[handle] = true
+	}
+	if len(handles) != 2 || !handles[earlier] {
+		t.Fatalf("escrowed handles %v, want the two directory names", handles)
+	}
+	for handle := range handles {
+		want := http.StatusNotFound
+		if handle == earlier {
+			want = http.StatusOK
+		}
+		if code := meta(handle); code != want {
+			t.Errorf("meta of %s (earlier: %v) = %d, want %d", handle, handle == earlier, code, want)
+		}
+	}
+	if len(r.logs.lines("dropped the escrowed secrets of a withheld result")) != 1 {
+		t.Error("want one drop logged, for the directory only a withheld result named")
+	}
+}
+
 // TestEscrowPerServer checks redact.escrow: false and escrow.sourceArguments.
 func TestEscrowPerServer(t *testing.T) {
 	dir := t.TempDir()

@@ -8,7 +8,7 @@ Some tools download a file to the gate's host and report its local path instead 
 
 ### Requirement: File tools
 
-File scanning SHALL apply to the tools listed in a server's `redact.files.tools`, on a server whose results are redacted, and only to results that are not tool errors. It SHALL run after the result is redacted.
+File scanning SHALL apply to the tools listed in a server's `redact.files.tools`, on a server whose results are redacted, and only to results that are not tool errors. It SHALL run after the result is redacted: it SHALL look for paths in the result the server returned, and withhold files from the redacted result.
 
 #### Scenario: Other tools
 
@@ -17,7 +17,7 @@ File scanning SHALL apply to the tools listed in a server's `redact.files.tools`
 
 ### Requirement: Paths
 
-The paths of a call SHALL be the absolute paths in its result and arguments: string members named `path`, `file_path`, `filePath`, `outputPath`, `output_path`, `localPath`, `local_path`, `savedTo` or `saved_to` of the structured content, of text content that is JSON, and of the arguments, at a depth of at most 8; strings starting with `file://` (percent-decoded) among them; the URIs of resource links and embedded resources; and the path after `downloaded to`, `saved to` or `written to` in text content, quoted or starting with `/`. An unquoted path SHALL be the longest of the first 16 space-separated words of the rest of its line (up to a quote or angle bracket, and within 4096 bytes) that lies under a root as written and names a regular file, or its first word when none does. The budget SHALL be per call, however the result is split into content items: collecting paths SHALL stop as soon as more than 64 are found, the call's texts hold more than 64 such mentions in all, or more than 1024 files have been looked up for unquoted paths, so that the work stays bounded. Trailing `.`, `,` and `;` SHALL be dropped, and relative paths ignored. A call that exceeds this budget SHALL withhold its result (see Failing closed).
+The paths of a call SHALL be the absolute paths in its result as the server returned it, and in its arguments: string members named `path`, `file_path`, `filePath`, `outputPath`, `output_path`, `localPath`, `local_path`, `savedTo` or `saved_to` of the structured content, of text content that is JSON, and of the arguments, at a depth of at most 8; strings starting with `file://` (percent-decoded) among them; the URIs of resource links and embedded resources; and the path after `downloaded to`, `saved to` or `written to` in text content, quoted or starting with `/`. An unquoted path SHALL be the longest of the first 16 space-separated words of the rest of its line (up to a quote or angle bracket, and within 4096 bytes) that lies under a root as written and names a regular file, or its first word when none does. The budget SHALL be per call, however the result is split into content items: collecting paths SHALL stop as soon as more than 64 are found, the call's texts hold more than 64 such mentions in all, or more than 1024 files have been looked up for unquoted paths, so that the work stays bounded. Trailing `.`, `,` and `;` SHALL be dropped, and relative paths ignored. A call that exceeds this budget SHALL withhold its result (see Failing closed).
 
 A path SHALL be read only when, with every symlink resolved, it lies strictly under one of `redact.files.roots` (also resolved) and names a regular file with one link; a path that only the arguments name SHALL also have had its inode changed at or after 3 seconds before the call was forwarded, a margin for the coarse clock and the timestamp granularity of inode change times. A path the result names SHALL be read whatever its age, as a tool that caches its downloads reports the same file again, also across a restart of the gate. The file SHALL be opened through its root without following a symlink, and every check SHALL run on the opened file. Any other path SHALL be passed over: it names no file this call wrote. A path that does not exist SHALL be passed over; one written under a root whose symlinks cannot be resolved for another reason (such as a directory it cannot enter) SHALL fail.
 
@@ -57,12 +57,17 @@ A file whose name ends in `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx` or `.ppk`
 
 ### Requirement: Withholding
 
-A file with secrets SHALL be withheld: kept in the escrow when it is on, the server's `redact.escrow` is true and its inode changed at or after 3 seconds before the gate started, a moment a reload does not move (an older file is withheld without being kept), and every content block whose text, URI, embedded resource text, or `_meta` (its own or its embedded resource's, at any depth) mentions its path (as reported, cleaned or resolved) SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content and of the result's `_meta` that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
+A file with secrets SHALL be withheld: kept in the escrow when it is on and every path of the call was scanned, the server's `redact.escrow` is true and its inode changed at or after 3 seconds before the gate started, a moment a reload does not move (an older file is withheld without being kept), and every content block whose text, URI, embedded resource text, or `_meta` (its own or its embedded resource's, at any depth) mentions its path (as reported, cleaned or resolved, each also as redaction wrote it in this result, without keeping anything new, and each also as JSON may escape it: `/` as `\/`, other than ASCII as `\uXXXX`), whose block in the server's result mentions it, or in which its path was found (also in escaped JSON text), SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content and of the result's `_meta` that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
 
 #### Scenario: File with a password
 
 - **WHEN** a file tool writes `DB_PASSWORD=hunter2!x` to a file under a root and reports its path in text and in structured content
 - **THEN** the client sees neither the path nor the content, the text names the file and `contains: password` with a `[REDACTED:file #<handle>]` marker, the structured `path` is the marker, and the escrow returns the file's bytes for the handle
+
+#### Scenario: Path that redaction changes
+
+- **WHEN** a file tool writes a file with a password under a directory whose name looks like a GitHub token, and reports its path in text and as a structured `path`
+- **THEN** the file is scanned and withheld: the text block is the notice and the structured `path` is the marker
 
 #### Scenario: Without an escrow
 
@@ -76,7 +81,7 @@ A file with secrets SHALL be withheld: kept in the escrow when it is on, the ser
 
 ### Requirement: Failing closed
 
-When a file that is to be scanned cannot be, the whole result SHALL be withheld, as a result that cannot be redacted is: the client gets an error saying the result was withheld, and the audit outcome is `withheld`. That covers a call over its budget of paths, mentions or lookups (see Paths), a path under a root that cannot be resolved, a file under a root that cannot be opened (other than missing or a symlink) or checked, a text or credential-store file larger than `redact.files.maxBytes` (default `20MiB`; for a larger file only the first 8 KiB decide whether it is binary), a read error, a size that changes while it is read, text that is not valid UTF-8, the call ending before the file was read, and a panic. The error and the log SHALL NOT name the file's path or quote its content.
+When a file that is to be scanned cannot be, the whole result SHALL be withheld, as a result that cannot be redacted is: the client gets an error saying the result was withheld, and the audit outcome is `withheld`. That covers a call over its budget of paths, mentions or lookups (see Paths), a redacted result with a different number of content blocks than the server's, a path under a root that cannot be resolved, a file under a root that cannot be opened (other than missing or a symlink) or checked, a text or credential-store file larger than `redact.files.maxBytes` (default `20MiB`; for a larger file only the first 8 KiB decide whether it is binary), a read error, a size that changes while it is read, text that is not valid UTF-8, the call ending before the file was read, and a panic. The error and the log SHALL NOT name the file's path or quote its content.
 
 #### Scenario: Too large
 
@@ -87,6 +92,11 @@ When a file that is to be scanned cannot be, the whole result SHALL be withheld,
 
 - **WHEN** a file tool writes a video larger than `maxBytes`
 - **THEN** the result is unchanged
+
+#### Scenario: One of two files cannot be scanned
+
+- **WHEN** a file tool reports a file with a password and a log file over `maxBytes`
+- **THEN** the result is withheld and neither file is kept in the escrow
 
 #### Scenario: Not UTF-8
 

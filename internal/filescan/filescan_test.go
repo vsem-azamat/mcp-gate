@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/escrow"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
+	"github.com/vsem-azamat/mcp-gate/internal/redact/mcpredact"
 )
 
 const testKey = "test-escrow-key-0123456789abcdef"
@@ -59,7 +61,7 @@ func newFixture(t *testing.T, maxBytes int64, keep bool) *fixture {
 
 func (f *fixture) scan(t *testing.T, tool string, args map[string]any, res *mcp.CallToolResult) (*mcp.CallToolResult, int, error) {
 	t.Helper()
-	return f.scanner.Scan(t.Context(), tool, func() map[string]any { return args }, res, f.start)
+	return f.scanner.Scan(t.Context(), tool, func() map[string]any { return args }, res, res, f.start, nil)
 }
 
 func textResult(text string) *mcp.CallToolResult {
@@ -178,7 +180,7 @@ func TestOnlyFilesTheToolWroteAreRead(t *testing.T) {
 	}
 	for _, path := range []string{tokens, link, hard, sub, f.dir, filepath.Join(f.dir, "missing.env"), filepath.Join(f.dir, "sub", "..", "..", filepath.Base(outside), "tokens.env")} {
 		in := textResult("Media downloaded to " + path + ".")
-		res, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"file_path": path} }, in, f.start)
+		res, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"file_path": path} }, in, in, f.start, nil)
 		if err != nil || n != 0 || text(t, res) != text(t, in) {
 			t.Errorf("%s was scanned: %q, %d, %v", path, text(t, res), n, err)
 		}
@@ -187,7 +189,7 @@ func TestOnlyFilesTheToolWroteAreRead(t *testing.T) {
 	argOnly := filepath.Join(f.dir, "arg.env")
 	writeFile(t, argOnly, "ARG_PASS"+"WORD="+"arg-pass-1\n")
 	in := textResult("done")
-	if _, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"output_path": argOnly} }, in, time.Now().Add(clockSlack+time.Second)); err != nil || n != 0 {
+	if _, n, err := f.scanner.Scan(t.Context(), "download_media", func() map[string]any { return map[string]any{"output_path": argOnly} }, in, in, time.Now().Add(clockSlack+time.Second), nil); err != nil || n != 0 {
 		t.Errorf("an argument path written before the call = %d, %v", n, err)
 	}
 	if _, n, err := f.scan(t, "download_media", map[string]any{"output_path": argOnly}, in); err != nil || n != 1 {
@@ -231,7 +233,7 @@ func TestArgumentPathWrittenWithinAClockTick(t *testing.T) {
 		if c.scan {
 			want = 1
 		}
-		if _, n, err := f.scanner.Scan(t.Context(), "download_media", args, textResult("done"), c.forward); err != nil || n != want {
+		if _, n, err := f.scanner.Scan(t.Context(), "download_media", args, textResult("done"), textResult("done"), c.forward, nil); err != nil || n != want {
 			t.Errorf("%s: scan = %d, %v; want %d", c.name, n, err, want)
 		}
 	}
@@ -246,7 +248,7 @@ func TestCachedDownload(t *testing.T) {
 	writeFile(t, cached, "OLD_PASS"+"WORD="+"old-pass-1\n")
 	in := textResult("Media downloaded to " + cached + ".")
 	later := time.Now().Add(time.Minute) // the inode changed long before this call started
-	res, n, err := f.scanner.Scan(t.Context(), "download_media", nil, in, later)
+	res, n, err := f.scanner.Scan(t.Context(), "download_media", nil, in, in, later, nil)
 	if err != nil || n != 1 || strings.Contains(text(t, res), cached) {
 		t.Errorf("a cached file = %q, %d, %v", text(t, res), n, err)
 	}
@@ -256,7 +258,7 @@ func TestCachedDownload(t *testing.T) {
 	// A file that predates the gate, as a cache kept across a restart, is withheld but not kept.
 	o := f.scanner.o
 	o.Started = time.Now().Add(time.Minute)
-	res, n, err = New(o).Scan(t.Context(), "download_media", nil, in, later)
+	res, n, err = New(o).Scan(t.Context(), "download_media", nil, in, in, later, nil)
 	if got := text(t, res); err != nil || n != 1 || strings.Contains(got, cached) || markerRE.MatchString(got) ||
 		!strings.HasPrefix(got, "[REDACTED:file] ") || strings.Contains(got, "release") {
 		t.Errorf("a file older than the gate = %q, %d, %v", got, n, err)
@@ -396,6 +398,220 @@ func TestUnscannableFilesFailClosed(t *testing.T) {
 	in := textResult("Media downloaded to " + bigBinary + ".")
 	if res, n, err := f.scan(t, "download_media", nil, in); err != nil || n != 0 || text(t, res) != text(t, in) {
 		t.Errorf("a large binary file = %d, %v", n, err)
+	}
+}
+
+func TestPathRedactionChangesIsStillFound(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, true)
+	// A directory name that redaction flags turns part of the path into a marker.
+	dir := filepath.Join(f.dir, fake("ghp_", 36))
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "notes.txt")
+	writeFile(t, path, "DB_PASS"+"WORD="+"hunter2!x\n")
+	down := &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: "Media downloaded to " + path + "."}, &mcp.TextContent{Text: "done"}},
+		StructuredContent: map[string]any{"path": path},
+	}
+	rep := f.escrow.Replacer(escrow.Source{Server: "chat", Tool: "download_media"})
+	redacted, err := mcpredact.New(f.scanner.o.Engine, 1<<20).CallToolResult(down, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text(t, redacted), path) {
+		t.Fatal("the fixture's path is not changed by redaction")
+	}
+	// Looking for paths in the redacted result alone misses the file.
+	if _, n, err := f.scanner.Scan(t.Context(), "download_media", nil, redacted, redacted, f.start, rep); err != nil || n != 0 {
+		t.Fatalf("redacted alone = %d, %v", n, err)
+	}
+	res, n, err := f.scanner.Scan(t.Context(), "download_media", nil, down, redacted, f.start, rep)
+	if err != nil || n != 1 {
+		t.Fatalf("scan = %d, %v", n, err)
+	}
+	got := text(t, res)
+	if !markerRE.MatchString(got) || !strings.Contains(got, "contains: password") || strings.Contains(got, "downloaded to") {
+		t.Errorf("text = %q", got)
+	}
+	if other, ok := res.Content[1].(*mcp.TextContent); !ok || other.Text != "done" {
+		t.Errorf("an unrelated block changed: %v", res.Content[1])
+	}
+	sc, err := json.Marshal(res.StructuredContent)
+	if err != nil || !markerRE.Match(sc) || strings.Contains(string(sc), "notes.txt") {
+		t.Errorf("structured = %s, %v", sc, err)
+	}
+}
+
+func TestNoFileIsKeptWhenAnotherCannotBeScanned(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 1024, false)
+	kept := 0
+	o := f.scanner.o
+	o.Keep = func(escrow.File) (string, error) { kept++; return "kaaaaaaaaaa", nil }
+	sc := New(o)
+	secret := filepath.Join(f.dir, "a.env")
+	writeFile(t, secret, "DB_PASS"+"WORD="+"hunter2!x\n")
+	big := filepath.Join(f.dir, "b.log")
+	writeFile(t, big, strings.Repeat("line of text\n", 200))
+	in := textResult("Media downloaded to " + secret + ".\nMedia downloaded to " + big + ".")
+	if _, _, err := sc.Scan(t.Context(), "download_media", nil, in, in, f.start, nil); !errors.Is(err, ErrUnscannable) || kept != 0 {
+		t.Fatalf("err = %v, kept %d files", err, kept)
+	}
+}
+
+// freshMarkers gives every finding a marker of its own. It has no Issued, so forms cannot
+// reproduce its markers, and the blocks must be found by index.
+type freshMarkers struct{ n int }
+
+func (r *freshMarkers) Replace(f redact.Finding) string {
+	r.n++
+	return fmt.Sprintf("[REDACTED:%s #fresh%d]", f.Kind, r.n)
+}
+
+func TestBlocksAreMatchedByIndex(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, false)
+	dir := filepath.Join(f.dir, fake("ghp_", 36))
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "notes.txt")
+	writeFile(t, path, "DB_PASS"+"WORD="+"hunter2!x\n")
+	down := &mcp.CallToolResult{Content: []mcp.Content{
+		&mcp.TextContent{Text: "Media downloaded to " + path + "."},
+		&mcp.TextContent{Text: "A copy is at " + path},
+		&mcp.TextContent{Text: "done"},
+	}}
+	rep := &freshMarkers{}
+	redacted, err := mcpredact.New(f.scanner.o.Engine, 1<<20).CallToolResult(down, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, n, err := f.scanner.Scan(t.Context(), "download_media", nil, down, redacted, f.start, rep)
+	if err != nil || n != 1 {
+		t.Fatalf("scan = %d, %v", n, err)
+	}
+	for i, want := range []string{"[REDACTED:file] ", "[REDACTED:file] ", "done"} {
+		if got := res.Content[i].(*mcp.TextContent).Text; !strings.HasPrefix(got, want) { //nolint:forcetypeassert // text blocks
+			t.Errorf("block %d = %q", i, got)
+		}
+	}
+	// A redacted result with other blocks than the server's cannot be matched.
+	short := &mcp.CallToolResult{Content: redacted.Content[:2]}
+	if _, _, err := f.scanner.Scan(t.Context(), "download_media", nil, down, short, f.start, rep); !errors.Is(err, ErrUnscannable) {
+		t.Errorf("mismatched blocks = %v", err)
+	}
+}
+
+func TestEscapedJSONPathIsWithheld(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, false)
+	path := filepath.Join(f.dir, "ф-notes.txt")
+	writeFile(t, path, "DB_PASS"+"WORD="+"hunter2!x\n")
+	escaped := strings.ReplaceAll(path, "/", `\/`)
+	escaped = strings.ReplaceAll(escaped, "ф", `\u0444`)
+	in := textResult(`{"path":"` + escaped + `"}`)
+	res, n, err := f.scan(t, "download_media", nil, in)
+	if err != nil || n != 1 || !strings.HasPrefix(text(t, res), "[REDACTED:file] ") {
+		t.Fatalf("escaped JSON = %q, %d, %v", text(t, res), n, err)
+	}
+}
+
+// An escaped mention is withheld wherever it is, not only in the block the path was found in.
+func TestEscapedMentionsElsewhereAreWithheld(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, false)
+	path := filepath.Join(f.dir, "ф-notes.txt")
+	writeFile(t, path, "DB_PASS"+"WORD="+"hunter2!x\n")
+	escaped := strings.ReplaceAll(strings.ReplaceAll(path, "/", `\/`), "ф", `\u0444`)
+
+	// A JSON text names it; an embedded resource repeats it, escaped, under another member.
+	in := &mcp.CallToolResult{Content: []mcp.Content{
+		&mcp.TextContent{Text: `{"path":"` + escaped + `"}`},
+		&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{URI: "note://1", MIMEType: "application/json", Text: `{"saved":"` + escaped + `"}`}},
+	}}
+	res, n, err := f.scan(t, "download_media", nil, in)
+	if err != nil || n != 1 {
+		t.Fatalf("scan = %d, %v", n, err)
+	}
+	for i, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); !ok || !strings.HasPrefix(tc.Text, "[REDACTED:file] ") {
+			t.Errorf("block %d = %#v", i, c)
+		}
+	}
+
+	// Structured content names it; a text that is not JSON quotes it escaped.
+	in = &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: `result: {"path":"` + escaped + `"}`}},
+		StructuredContent: map[string]any{"path": path},
+	}
+	res, n, err = f.scan(t, "download_media", nil, in)
+	if err != nil || n != 1 || !strings.HasPrefix(text(t, res), "[REDACTED:file] ") {
+		t.Errorf("escaped quote in text = %q, %d, %v", text(t, res), n, err)
+	}
+}
+
+func TestJSONForms(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"/d/я.txt", []string{`\/d\/я.txt`, `/d/\u044f.txt`, `/d/\u044F.txt`, `\/d\/\u044f.txt`, `\/d\/\u044F.txt`}},
+		{"/d/😀", []string{`/d/\ud83d\ude00`, `/d/\uD83D\uDE00`, `\/d\/\ud83d\ude00`}},
+		{"/d/a<b&c", []string{`\/d\/a<b&c`, `/d/a\u003cb\u0026c`}},
+	} {
+		got := jsonForms(c.in)
+		for _, w := range c.want {
+			if !slices.Contains(got, w) {
+				t.Errorf("jsonForms(%q) = %q, missing %q", c.in, got, w)
+			}
+		}
+		if slices.Contains(got, c.in) {
+			t.Errorf("jsonForms(%q) holds the input", c.in)
+		}
+	}
+	if got := jsonForms("/plain"); len(got) != 1 || got[0] != `\/plain` {
+		t.Errorf("jsonForms of an ASCII path = %q", got)
+	}
+	// A path far longer than any real one gets no escaped forms.
+	f := newFixture(t, 0, false)
+	long := "/" + strings.Repeat("ф/../", 100000)
+	if got := f.scanner.forms([]string{long}, redact.Marker{}); len(got) != 1 {
+		t.Errorf("a long path has %d forms", len(got))
+	}
+}
+
+// keepingIssuer fails the test when the scan asks it to keep a finding.
+type keepingIssuer struct{ t *testing.T }
+
+func (r keepingIssuer) Replace(redact.Finding) string {
+	r.t.Error("the scan kept a finding of a path")
+	return "[REDACTED:x #kaaaaaaaaaa]"
+}
+
+func (keepingIssuer) Issued() redact.Replacer {
+	return redact.ReplacerFunc(func(f redact.Finding) string { return f.Value })
+}
+
+func TestFormsKeepNothing(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, false)
+	// A file reached through a link: its resolved path holds a finding no result shows.
+	target := filepath.Join(f.dir, fake("ghp_", 36))
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(f.dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(target, "notes.txt"), "DB_PASS"+"WORD="+"hunter2!x\n")
+	in := textResult("Media downloaded to " + filepath.Join(link, "notes.txt") + ".")
+	if _, n, err := f.scanner.Scan(t.Context(), "download_media", nil, in, in, f.start, keepingIssuer{t}); err != nil || n != 1 {
+		t.Fatalf("scan = %d, %v", n, err)
 	}
 }
 

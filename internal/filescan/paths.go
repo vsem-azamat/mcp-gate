@@ -1,6 +1,7 @@
 package filescan
 
 import (
+	"cmp"
 	"encoding/json"
 	"net/url"
 	"path/filepath"
@@ -63,6 +64,9 @@ type candidate struct {
 	raw  string // as written, for withholding
 	// fromArguments is set when only the arguments name it, not the result.
 	fromArguments bool
+	// blocks are the indexes of the content blocks that name it, however they write it (a
+	// JSON text may escape it).
+	blocks []int
 }
 
 // candidates collects the absolute paths a file tool reported in its result (path members of
@@ -87,6 +91,7 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 		}
 	}
 	full := func() bool { return overflow || len(out) > maxCandidates }
+	block := -1 // the content block being read, if any
 	add := func(raw string) {
 		if full() {
 			return
@@ -104,14 +109,21 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 			return
 		}
 		c = filepath.Clean(c)
+		var blocks []int
+		if block >= 0 {
+			blocks = []int{block}
+		}
 		for i := range out {
 			if out[i].path == c {
 				// Reported by the tool as well: not the caller's alone.
 				out[i].fromArguments = out[i].fromArguments && fromArguments
+				if block >= 0 && !slices.Contains(out[i].blocks, block) {
+					out[i].blocks = append(out[i].blocks, block)
+				}
 				return
 			}
 		}
-		out = append(out, candidate{path: c, raw: strings.TrimRight(strings.TrimSpace(raw), ".,;"), fromArguments: fromArguments})
+		out = append(out, candidate{path: c, raw: strings.TrimRight(strings.TrimSpace(raw), ".,;"), fromArguments: fromArguments, blocks: blocks})
 	}
 	var walk func(key string, value any, depth int)
 	walk = func(key string, value any, depth int) {
@@ -136,10 +148,11 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 	if res.StructuredContent != nil {
 		walk("", res.StructuredContent, 0)
 	}
-	for _, c := range res.Content {
+	for i, c := range res.Content {
 		if full() {
 			break
 		}
+		block = i
 		if uri := contentURI(c); uri != "" {
 			add(uri)
 		}
@@ -174,6 +187,7 @@ func candidates(args map[string]any, res *mcp.CallToolResult, isFile func(string
 			}
 		}
 	}
+	block = -1
 	fromArguments = true
 	if args != nil {
 		walk("", args, 0)
@@ -234,27 +248,45 @@ func contentMeta(c mcp.Content) []map[string]any {
 	return nil
 }
 
-// withhold returns res with every mention of a file removed: a content block whose text, URI
-// or _meta names one of paths becomes notice, and a string in structured content or in the
-// result's _meta that names one becomes marker (a string, so that an output schema requiring
-// the member still validates). res is not modified.
-func withhold(res *mcp.CallToolResult, paths []string, marker, notice string) *mcp.CallToolResult {
-	mentions := func(text string) bool {
-		for _, p := range paths {
-			if p != "" && strings.Contains(text, p) {
-				return true
+// mention is a withheld file: the forms of its path that mark a mention of it, and what
+// replaces one.
+type mention struct {
+	paths []string
+	// blocks are the indexes of the content blocks that named the file.
+	blocks         []int
+	marker, notice string
+}
+
+// withhold returns redacted with every mention of a file in files removed: a content block whose
+// text, URI or _meta names one of its paths, whose block in downstream (the result redacted was
+// made from, block for block) does, or that the file was found in, becomes its notice, and a string in structured content
+// or in the result's _meta that names one becomes its marker (a string, so that an output schema
+// requiring the member still validates). Where a block or string names several files, it gets
+// the notice or marker of one of them. Neither result is modified.
+func withhold(downstream, redacted *mcp.CallToolResult, files []mention) *mcp.CallToolResult {
+	// mentioned returns the file text names, or nil.
+	mentioned := func(text string) *mention {
+		if text == "" {
+			return nil
+		}
+		for i := range files {
+			for _, p := range files[i].paths {
+				if p != "" && strings.Contains(text, p) {
+					return &files[i]
+				}
 			}
 		}
-		return false
+		return nil
 	}
 	// Unlike the search for paths, this walk has no depth limit: a mention anywhere is removed.
-	var replace func(value any) (any, bool)
-	replace = func(value any) (any, bool) {
+	var replace func(value any) (any, *mention)
+	replace = func(value any) (any, *mention) {
+		var first *mention
 		switch v := value.(type) {
 		case map[string]any:
 			var copied map[string]any
 			for k, item := range v {
-				if updated, changed := replace(item); changed {
+				if updated, m := replace(item); m != nil {
 					if copied == nil {
 						copied = make(map[string]any, len(v))
 						for kk, vv := range v {
@@ -262,59 +294,71 @@ func withhold(res *mcp.CallToolResult, paths []string, marker, notice string) *m
 						}
 					}
 					copied[k] = updated
+					first = cmp.Or(first, m)
 				}
 			}
 			if copied == nil {
-				return v, false
+				return v, nil
 			}
-			return copied, true
+			return copied, first
 		case []any:
 			var copied []any
 			for i, item := range v {
-				if updated, changed := replace(item); changed {
+				if updated, m := replace(item); m != nil {
 					if copied == nil {
 						copied = slices.Clone(v)
 					}
 					copied[i] = updated
+					first = cmp.Or(first, m)
 				}
 			}
 			if copied == nil {
-				return v, false
+				return v, nil
 			}
-			return copied, true
+			return copied, first
 		case string:
-			if mentions(v) {
-				return marker, true
+			if m := mentioned(v); m != nil {
+				return m.marker, m
 			}
 		}
-		return value, false
+		return value, nil
 	}
-	metaMentions := func(c mcp.Content) bool {
-		for _, m := range contentMeta(c) {
-			if _, changed := replace(m); changed {
-				return true
-			}
-		}
-		return false
-	}
-	out := *res
-	out.Content = slices.Clone(res.Content)
-	for i, c := range out.Content {
+	blockMentions := func(c mcp.Content) *mention {
 		embedded := ""
 		if e, ok := c.(*mcp.EmbeddedResource); ok && e != nil && e.Resource != nil {
 			embedded = e.Resource.Text
 		}
-		if mentions(contentText(c)) || mentions(contentURI(c)) || mentions(embedded) || metaMentions(c) {
-			out.Content[i] = &mcp.TextContent{Text: notice}
+		m := cmp.Or(mentioned(contentText(c)), mentioned(contentURI(c)), mentioned(embedded))
+		for _, meta := range contentMeta(c) {
+			if _, mm := replace(meta); mm != nil {
+				m = cmp.Or(m, mm)
+			}
+		}
+		return m
+	}
+	foundIn := func(i int) *mention {
+		for k := range files {
+			if slices.Contains(files[k].blocks, i) {
+				return &files[k]
+			}
+		}
+		return nil
+	}
+	out := *redacted
+	out.Content = slices.Clone(redacted.Content)
+	for i, c := range out.Content {
+		m := cmp.Or(foundIn(i), blockMentions(c), blockMentions(downstream.Content[i]))
+		if m != nil {
+			out.Content[i] = &mcp.TextContent{Text: m.notice}
 		}
 	}
-	if res.StructuredContent != nil {
-		if updated, changed := replace(res.StructuredContent); changed {
+	if redacted.StructuredContent != nil {
+		if updated, m := replace(redacted.StructuredContent); m != nil {
 			out.StructuredContent = updated
 		}
 	}
-	if res.Meta != nil {
-		if updated, changed := replace(map[string]any(res.Meta)); changed {
+	if redacted.Meta != nil {
+		if updated, m := replace(map[string]any(redacted.Meta)); m != nil {
 			out.Meta = updated.(map[string]any) //nolint:forcetypeassert // replace returns a map for a map
 		}
 	}

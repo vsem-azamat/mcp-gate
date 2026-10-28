@@ -45,6 +45,10 @@ A server SHALL use the escrow only when its `redact.escrow` is true, the default
 
 With the escrow on, each finding in a result or a JSON-RPC error of a server with redaction and `redact.escrow` SHALL be kept and replaced by `[REDACTED:<kind> #<handle>]`, where the handle is `k` followed by ten characters of lower-case RFC 4648 base32 from a cryptographic random source. A finding whose value is over 64 KiB, or one the store cannot take, SHALL be replaced by `[REDACTED:<kind>]` and not kept. The same value from the same server under the same kind SHALL get the handle it already has while that entry lives, and seeing it again SHALL extend the entry to a full TTL from then. Texts outside results (progress messages, logged texts) SHALL get `[REDACTED:<kind>]` and SHALL NOT be kept. A token split across two JSON strings (see the redaction spec) SHALL be kept once, whole, under the handle of the marker that replaces its first part, unless its second string is a secret member's value, which keeps its own handle; its second part carries `[REDACTED:continued]`, which has no handle. A text SHALL be restored by replacing each marker with its handle's value and removing each `[REDACTED:continued]`, so the token is restored in full where it started, and what the second string loses is in the string before it. A marker whose handle is not known stays.
 
+Handles SHALL stay stable per server, kind and value, as the consumers of the frozen contract expect. The risk this leaves: a client that can make a server return a text of its choosing can tell, by the handle, whether that text equals a secret the server returned earlier, so it can confirm guesses and recover a low-entropy value (a PIN, a short password) by trying candidates. Each wrong guess is a new entry, and eviction drops the oldest by creation, so about `escrow.maxEntries` wrong guesses evict the target, after which its next sighting gets a new handle that matches no earlier marker.
+
+When a result is withheld after its findings were kept (it cannot be redacted, or a file it names cannot be scanned), the entries created for it SHALL be dropped at once, except those whose handle another result has also received since, which stay.
+
 #### Scenario: Marker in a result
 
 - **WHEN** a tool returns `the password: Summer-Blue-77! ok`
@@ -59,6 +63,11 @@ With the escrow on, each finding in a result or a JSON-RPC error of a server wit
 
 - **WHEN** one result holds the same password twice
 - **THEN** both markers carry the same handle
+
+#### Scenario: Withheld result
+
+- **WHEN** a tool returns a new password and a path to a file that cannot be scanned
+- **THEN** the result is withheld and the password's entry is gone, while an entry an earlier result received stays
 
 ### Requirement: Store
 

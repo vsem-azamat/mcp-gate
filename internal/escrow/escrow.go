@@ -161,33 +161,104 @@ type Source struct {
 }
 
 // Replacer returns a replacer that keeps each finding from src and writes its marker. A
-// finding over MaxValueBytes, or one the store cannot take, gets the plain redact marker.
-func (e *Escrow) Replacer(src Source) redact.Replacer {
+// finding over MaxValueBytes, or one the store cannot take, gets the plain redact marker. One
+// replacer serves one result; Discard drops what it kept when that result is withheld.
+func (e *Escrow) Replacer(src Source) *Replacer {
 	summary := sync.OnceValue(func() map[string]any {
 		if src.Arguments == nil {
 			return map[string]any{}
 		}
 		return e.summarize(src.Arguments())
 	})
+	return &Replacer{e: e, src: src, summary: summary, batch: &batch{}}
+}
+
+// Replacer keeps the findings of one result in the escrow; see Escrow.Replacer.
+type Replacer struct {
+	e       *Escrow
+	src     Source
+	summary func() map[string]any
+	batch   *batch
+
+	mu      sync.Mutex
+	handles []string          // the handles it returned, each once
+	issued  map[string]string // the marker it returned, by issuedKey
+}
+
+// issuedKey is the key of a finding in Replacer.issued: its kind and the SHA-256 of its value,
+// so that the memo holds no second copy of the value.
+func issuedKey(kind string, sum [sha256.Size]byte) string { return kind + "\x00" + string(sum[:]) }
+
+// Replace implements redact.Replacer. A value it has replaced before gets the same marker
+// again, without a second insert.
+func (r *Replacer) Replace(f redact.Finding) string {
+	sum := sha256.Sum256([]byte(f.Value))
+	key := issuedKey(f.Kind, sum)
+	r.mu.Lock()
+	marker, seen := r.issued[key]
+	r.mu.Unlock()
+	if seen {
+		return marker
+	}
+	marker, handle := r.keep(f, sum)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.issued == nil {
+		r.issued = map[string]string{}
+	}
+	if _, seen := r.issued[key]; !seen && handle != "" {
+		r.handles = append(r.handles, handle)
+	}
+	r.issued[key] = marker
+	return marker
+}
+
+// keep inserts a finding and returns its marker, and its handle when it was kept.
+func (r *Replacer) keep(f redact.Finding, sum [sha256.Size]byte) (marker, handle string) {
+	if len(f.Value) > MaxValueBytes {
+		return redact.MarkerText(f.Kind), ""
+	}
+	handle, err := r.e.store.insert(&entry{
+		kind: f.Kind, server: r.src.Server, tool: r.src.Tool, source: r.summary(),
+		value:    []byte(f.Value),
+		dedupKey: r.src.Server + "\x00" + f.Kind + "\x00" + hex.EncodeToString(sum[:]),
+		batch:    r.batch,
+	}, r.src.TTL)
+	if err != nil {
+		r.e.logger.Error("escrow insert failed", "error", err.Error())
+		return redact.MarkerText(f.Kind), ""
+	}
+	// The tool is not logged: for a resource read it is the client's URI, which the audit
+	// line logs redacted.
+	r.e.logger.Info("escrowed secret", "handle", handle, "type", f.Kind, "server", r.src.Server)
+	return Marker(f.Kind, handle), handle
+}
+
+// Issued returns a replacer that only looks up: a finding this replacer has replaced gets the
+// same marker, and any other finding is left as it is. It keeps nothing, so it can redact a text
+// that is not part of the result, to see how the result wrote it.
+func (r *Replacer) Issued() redact.Replacer {
 	return redact.ReplacerFunc(func(f redact.Finding) string {
-		if len(f.Value) > MaxValueBytes {
-			return redact.MarkerText(f.Kind)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if marker, ok := r.issued[issuedKey(f.Kind, sha256.Sum256([]byte(f.Value)))]; ok {
+			return marker
 		}
-		sum := sha256.Sum256([]byte(f.Value))
-		handle, err := e.store.insert(&entry{
-			kind: f.Kind, server: src.Server, tool: src.Tool, source: summary(),
-			value:    []byte(f.Value),
-			dedupKey: src.Server + "\x00" + f.Kind + "\x00" + hex.EncodeToString(sum[:]),
-		}, src.TTL)
-		if err != nil {
-			e.logger.Error("escrow insert failed", "error", err.Error())
-			return redact.MarkerText(f.Kind)
-		}
-		// The tool is not logged: for a resource read it is the client's URI, which the audit
-		// line logs redacted.
-		e.logger.Info("escrowed secret", "handle", handle, "type", f.Kind, "server", src.Server)
-		return Marker(f.Kind, handle)
+		return f.Value
 	})
+}
+
+// Discard drops the entries this replacer kept that no other result has used since, because
+// the result it replaced findings in was withheld and its markers never reached a client. An
+// entry that already held the value before, or that another result's marker carries too, stays.
+func (r *Replacer) Discard() {
+	r.mu.Lock()
+	handles := r.handles
+	r.handles, r.issued = nil, nil
+	r.mu.Unlock()
+	if n := r.e.store.discard(r.batch, handles); n > 0 {
+		r.e.logger.Info("dropped the escrowed secrets of a withheld result", "entries", n, "server", r.src.Server)
+	}
 }
 
 // File is a scanned file that holds secrets. The API serves it only while it is still the file

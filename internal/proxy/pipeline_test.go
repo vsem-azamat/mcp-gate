@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -311,17 +312,33 @@ func TestPipelineForwardsMeta(t *testing.T) {
 
 // scanner is a FileScanner that withholds n files, or fails with err.
 type scanner struct {
-	n    int
-	err  error
-	tool string
-	at   time.Time
-	args map[string]any
+	n              int
+	err            error
+	tool           string
+	at             time.Time
+	args           map[string]any
+	down, redacted string
+	rep            redact.Replacer
 }
 
-func (s *scanner) Scan(_ context.Context, tool string, args func() map[string]any, res *mcp.CallToolResult, start time.Time) (*mcp.CallToolResult, int, error) {
-	s.tool, s.at, s.args = tool, start, args()
+func (s *scanner) Scan(_ context.Context, tool string, args func() map[string]any, down, res *mcp.CallToolResult, start time.Time, rep redact.Replacer) (*mcp.CallToolResult, int, error) {
+	s.tool, s.at, s.args, s.rep = tool, start, args(), rep
+	if tc, ok := down.Content[0].(*mcp.TextContent); ok {
+		s.down = tc.Text
+	}
+	if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+		s.redacted = tc.Text
+	}
 	return res, s.n, s.err
 }
+
+// keepingReplacer is a replacer that keeps what it replaces, and records a discard.
+type keepingReplacer struct{ discarded atomic.Bool }
+
+func (*keepingReplacer) Replace(f redact.Finding) string {
+	return "[REDACTED:" + f.Kind + " #kaaaaaaaaaa]"
+}
+func (r *keepingReplacer) Discard() { r.discarded.Store(true) }
 
 // TestPipelineScansFiles checks that the files a tool call wrote are scanned after redaction,
 // that withheld files count as redactions, and that a file that cannot be scanned withholds the
@@ -342,14 +359,24 @@ func TestPipelineScansFiles(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			down := &fakeDown{tool: textResult("token " + ghToken)}
-			m, rec := fakeMirror(Options{Redaction: NewRedaction(engine, nil, 1<<20), Files: c.sc}, down)
+			rep := &keepingReplacer{}
+			m, rec := fakeMirror(Options{Redaction: NewRedaction(engine, func(Request) redact.Replacer { return rep }, 1<<20), Files: c.sc}, down)
 			before := time.Now()
 			_, _ = m.callTool(t.Context(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "dl", Arguments: json.RawMessage(`{"path":"/x"}`)}})
 			if c.sc.tool != "dl" || c.sc.args["path"] != "/x" || c.sc.at.Before(before) {
 				t.Errorf("scanned %q %v at %v", c.sc.tool, c.sc.args, c.sc.at)
 			}
+			// The paths are looked for in the server's result; the scan works on the redacted one,
+			// with the call's own replacer.
+			if !strings.Contains(c.sc.down, ghToken) || strings.Contains(c.sc.redacted, ghToken) || c.sc.rep != rep {
+				t.Errorf("scanned the server's %q and the redacted %q", c.sc.down, c.sc.redacted)
+			}
 			if last := rec.last(t); last.Outcome != c.want || last.Redactions != c.n {
 				t.Errorf("record %+v", last)
+			}
+			// What the replacer kept is discarded only when the result is withheld.
+			if rep.discarded.Load() != (c.want == audit.Withheld) {
+				t.Errorf("discarded = %v", rep.discarded.Load())
 			}
 		})
 	}

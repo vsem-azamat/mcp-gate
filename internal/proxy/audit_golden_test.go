@@ -164,7 +164,7 @@ func fullDown(t *testing.T) *sessionDown {
 // failingScanner fails every scan.
 type failingScanner struct{}
 
-func (failingScanner) Scan(context.Context, string, func() map[string]any, *mcp.CallToolResult, time.Time) (*mcp.CallToolResult, int, error) {
+func (failingScanner) Scan(context.Context, string, func() map[string]any, *mcp.CallToolResult, *mcp.CallToolResult, time.Time, redact.Replacer) (*mcp.CallToolResult, int, error) {
 	return nil, 0, errors.New("unreadable")
 }
 

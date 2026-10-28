@@ -231,6 +231,71 @@ func TestStats(t *testing.T) {
 	}
 }
 
+func TestDiscardDropsOnlyTheWithheldResultsEntries(t *testing.T) {
+	t.Parallel()
+	e := New(Options{KeyHash: testHash()})
+	handle := func(r *Replacer, value string) string {
+		t.Helper()
+		m := markerRE.FindStringSubmatch(r.Replace(redact.Finding{Kind: "password", Value: value}))
+		if m == nil {
+			t.Fatalf("no marker for %q", value)
+		}
+		return m[2]
+	}
+	shown := e.Replacer(Source{Server: "chat"})
+	old := handle(shown, "Shown-Before-1")
+
+	withheld := e.Replacer(Source{Server: "chat"})
+	own := handle(withheld, "Only-In-Withheld-2")
+	again := handle(withheld, "Only-In-Withheld-2")
+	reused := handle(withheld, "Shown-Before-1")
+	shared := handle(withheld, "Shared-Later-3")
+	if own != again || reused != old {
+		t.Fatal("dedup changed")
+	}
+	// Another result shows the third value after the withheld one kept it.
+	if handle(e.Replacer(Source{Server: "chat"}), "Shared-Later-3") != shared {
+		t.Fatal("dedup changed")
+	}
+
+	withheld.Discard()
+	if _, ok := e.store.get(own); ok {
+		t.Error("an entry only the withheld result used is still kept")
+	}
+	if _, ok := e.store.get(old); !ok {
+		t.Error("an entry kept before the withheld result was dropped")
+	}
+	if _, ok := e.store.get(shared); !ok {
+		t.Error("an entry another result used was dropped")
+	}
+	if e.store.totalBytes != len("Shown-Before-1")+len("Shared-Later-3") {
+		t.Errorf("totalBytes = %d", e.store.totalBytes)
+	}
+	withheld.Discard() // a second call is harmless
+}
+
+func TestIssuedKeepsNothing(t *testing.T) {
+	t.Parallel()
+	e := New(Options{KeyHash: testHash()})
+	r := e.Replacer(Source{Server: "chat"})
+	seen := redact.Finding{Kind: "password", Value: "Seen-In-Result-1"}
+	marker := r.Replace(seen)
+	if again := r.Replace(seen); again != marker || len(r.handles) != 1 {
+		t.Fatalf("a repeated value = %q, %d handles", again, len(r.handles))
+	}
+	is := r.Issued()
+	if got := is.Replace(seen); got != marker {
+		t.Errorf("Issued for a replaced value = %q, want %q", got, marker)
+	}
+	unseen := redact.Finding{Kind: "github_token", Value: "Never-In-Result-2"}
+	if got := is.Replace(unseen); got != unseen.Value {
+		t.Errorf("Issued for another value = %q", got)
+	}
+	if len(e.store.entries) != 1 || len(r.handles) != 1 {
+		t.Errorf("%d entries, %d handles after Issued", len(e.store.entries), len(r.handles))
+	}
+}
+
 func TestHTTPContract(t *testing.T) {
 	t.Parallel()
 	e := New(Options{KeyHash: testHash()})
