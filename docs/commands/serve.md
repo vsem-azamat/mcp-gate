@@ -137,6 +137,8 @@ Every forwarded call writes one `call` line with the server, the token name (`pr
 
 A call a token's policy hides is a line with outcome `denied` and `tokenPolicy` `deny`.
 
+When the scan of what a client sends finds a secret, the line adds `argumentSecrets` with the kinds (`"argumentSecrets":"github_token"`), and with `redact.arguments: block` the outcome is `refused`. A tool call whose escrow handles were substituted adds `substitutions`, one `<handle>:<kind>:<origin>:<argument>` per handle; a substitution the gate refuses is a `refused` line and a `substitution refused` warning with the handle and the reason (see [Argument secrets](../configuration/README.md#argument-secrets)).
+
 When a server lists a tool whose definition differs from its pin, or a tool it has not listed before, the gate writes one `toolPin` line at warn level, once per definition and action and at most 20 a minute per server: the server, the tool, the change (`changed` or `added`), the hashes of the accepted (`pinned`, empty for `added`) and the listed definition, and what the gate does (`served`, or `held` under `toolPins: hold`). Changes beyond 20 in a minute are recorded all the same and logged in a later minute, first, while the server still lists them; meanwhile one line says how many were left out and names up to three. [toolpins](toolpins.md) shows what changed and accepts it.
 
 ```json

@@ -13,9 +13,11 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -153,6 +155,9 @@ type Source struct {
 	Server string
 	// Tool is the tool or prompt name, or the resource URI.
 	Tool string
+	// Recipient identifies the caller the result goes to, as the gate names a token (see
+	// proxy.Request.Recipient): only a recipient of a handle may have its value substituted.
+	Recipient string
 	// TTL is how long entries from it stay retrievable; 0 means DefaultTTL.
 	TTL time.Duration
 	// Arguments returns the request's arguments, or nil; only the members named by
@@ -181,7 +186,7 @@ type Replacer struct {
 	batch   *batch
 
 	mu      sync.Mutex
-	handles []string          // the handles it returned, each once
+	handles []string          // the handles it returned, each once, each shown to src.Recipient
 	issued  map[string]string // the marker it returned, by issuedKey
 }
 
@@ -206,8 +211,9 @@ func (r *Replacer) Replace(f redact.Finding) string {
 	if r.issued == nil {
 		r.issued = map[string]string{}
 	}
-	if _, seen := r.issued[key]; !seen && handle != "" {
+	if handle != "" && !slices.Contains(r.handles, handle) {
 		r.handles = append(r.handles, handle)
+		r.e.store.show(handle, r.src.Recipient)
 	}
 	r.issued[key] = marker
 	return marker
@@ -218,20 +224,20 @@ func (r *Replacer) keep(f redact.Finding, sum [sha256.Size]byte) (marker, handle
 	if len(f.Value) > MaxValueBytes {
 		return redact.MarkerText(f.Kind), ""
 	}
-	handle, err := r.e.store.insert(&entry{
+	handle, kind, err := r.e.store.insert(&entry{
 		kind: f.Kind, server: r.src.Server, tool: r.src.Tool, source: r.summary(),
 		value:    []byte(f.Value),
 		dedupKey: r.src.Server + "\x00" + f.Kind + "\x00" + hex.EncodeToString(sum[:]),
 		batch:    r.batch,
-	}, r.src.TTL)
+	}, r.src.TTL, hex.EncodeToString(sum[:]))
 	if err != nil {
 		r.e.logger.Error("escrow insert failed", "error", err.Error())
 		return redact.MarkerText(f.Kind), ""
 	}
 	// The tool is not logged: for a resource read it is the client's URI, which the audit
 	// line logs redacted.
-	r.e.logger.Info("escrowed secret", "handle", handle, "type", f.Kind, "server", r.src.Server)
-	return Marker(f.Kind, handle), handle
+	r.e.logger.Info("escrowed secret", "handle", handle, "type", kind, "server", r.src.Server)
+	return Marker(kind, handle), handle
 }
 
 // Issued returns a replacer that only looks up: a finding this replacer has replaced gets the
@@ -250,13 +256,14 @@ func (r *Replacer) Issued() redact.Replacer {
 
 // Discard drops the entries this replacer kept that no other result has used since, because
 // the result it replaced findings in was withheld and its markers never reached a client. An
-// entry that already held the value before, or that another result's marker carries too, stays.
+// entry that already held the value before, or that another result's marker carries too, stays,
+// without this result counting towards its recipient.
 func (r *Replacer) Discard() {
 	r.mu.Lock()
 	handles := r.handles
 	r.handles, r.issued = nil, nil
 	r.mu.Unlock()
-	if n := r.e.store.discard(r.batch, handles); n > 0 {
+	if n := r.e.store.discard(r.batch, handles, r.src.Recipient); n > 0 {
 		r.e.logger.Info("dropped the escrowed secrets of a withheld result", "entries", n, "server", r.src.Server)
 	}
 }
@@ -281,14 +288,40 @@ func (e *Escrow) KeepFile(f File) (string, error) {
 	if f.Arguments != nil {
 		summary = e.summarize(f.Arguments())
 	}
-	handle, err := e.store.insert(&entry{
+	handle, _, err := e.store.insert(&entry{
 		kind: "file", server: f.Server, tool: f.Tool, source: summary,
 		file: &fileRef{root: f.Root, rel: f.Rel, name: f.Name, size: f.Size, hash: f.Hash, kinds: f.Kinds},
-	}, f.TTL)
+	}, f.TTL, "")
 	if err != nil {
 		e.logger.Error("escrow insert failed", "error", err.Error())
 		return "", err
 	}
 	e.logger.Info("escrowed file", "handle", handle, "server", f.Server, "tool", f.Tool, "kinds", f.Kinds, "size", f.Size)
 	return handle, nil
+}
+
+// MarkerRE matches a marker that carries a handle, "[REDACTED:<kind> #<handle>]", with the kind
+// and the handle as its groups.
+var MarkerRE = regexp.MustCompile(`\[REDACTED:([a-z0-9_]+) #(k[a-z2-7]{10})\]`)
+
+// Secret is a kept text value, as substitution reads it.
+type Secret struct {
+	// Kind is the finding's kind, and Server the server whose result it came from.
+	Kind, Server string
+	Value        string
+}
+
+// ErrNoSecret is returned by Secret for a handle that is not a live text entry the principal
+// may use.
+var ErrNoSecret = errors.New("unknown or expired handle")
+
+// Secret returns the value kept under handle for substitution into a call of recipient: only a
+// live text entry that a delivered result of that recipient carried. From then on the value,
+// found in any server's result, gets this handle and its origin (see store.insert).
+func (e *Escrow) Secret(handle, recipient string) (Secret, error) {
+	en, ok := e.store.substitute(handle, recipient)
+	if !ok {
+		return Secret{}, ErrNoSecret
+	}
+	return Secret{Kind: en.kind, Server: en.server, Value: string(en.value)}, nil
 }

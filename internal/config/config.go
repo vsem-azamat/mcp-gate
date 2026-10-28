@@ -385,7 +385,44 @@ type Redact struct {
 	EscrowTTL *Duration `yaml:"escrowTTL,omitempty"`
 	// Files configures the scanning of files the server's download tools write.
 	Files *Files `yaml:"files,omitempty"`
+	// Arguments is what a secret found in a request's arguments does: ArgumentsOff,
+	// ArgumentsLog or ArgumentsBlock; "" means ArgumentsLog.
+	Arguments string `yaml:"arguments,omitempty"`
+	// Substitute lists where escrow handles in the server's tool calls are replaced by their
+	// values; none by default.
+	Substitute []Substitution `yaml:"substitute,omitempty"`
 }
+
+// The modes of the argument scan.
+const (
+	// ArgumentsOff scans nothing.
+	ArgumentsOff = "off"
+	// ArgumentsLog forwards a request with a secret and records the kinds found.
+	ArgumentsLog = "log"
+	// ArgumentsBlock refuses a request with a secret.
+	ArgumentsBlock = "block"
+)
+
+// SubstitutionWildcard is the segment of a substitution argument path that matches any member
+// name or array element.
+const SubstitutionWildcard = "*"
+
+// Substitution is one place where escrow handles in a tool call's arguments are replaced by
+// their values.
+type Substitution struct {
+	// Tool is the server's own name of the tool.
+	Tool string `yaml:"tool"`
+	// Argument is the path of member names, joined by ".", to a string value in the arguments;
+	// SubstitutionWildcard matches any member name or element, a number the element at that
+	// index.
+	Argument string `yaml:"argument"`
+	// From maps the name of a handle's origin server to the kinds of finding from it that may
+	// be substituted here.
+	From map[string][]string `yaml:"from"`
+}
+
+// Path returns the segments of the argument path.
+func (s *Substitution) Path() []string { return strings.Split(s.Argument, ".") }
 
 // Files configures file scanning.
 type Files struct {
@@ -774,6 +811,9 @@ func (c *Config) applyDefaults() {
 		}
 		if s.Redact.Escrow == nil {
 			s.Redact.Escrow = new(true)
+		}
+		if s.Redact.Arguments == "" {
+			s.Redact.Arguments = ArgumentsLog
 		}
 		if s.Auth.Inherit == nil && !s.Auth.Public {
 			s.Auth.Inherit = new(true)

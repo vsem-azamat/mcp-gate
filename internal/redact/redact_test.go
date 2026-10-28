@@ -825,3 +825,64 @@ func TestCut(t *testing.T) {
 		}
 	}
 }
+
+func TestWithLiteralsFindsKnownValues(t *testing.T) {
+	t.Parallel()
+	base := newEngine(t, Options{})
+	e := base.WithLiterals([]Literal{{Kind: "password", Value: `plain"Words 42`}, {Kind: "secret", Value: ""}})
+	var got []Finding
+	rec := ReplacerFunc(func(f Finding) string { got = append(got, f); return MarkerText(f.Kind) })
+
+	if out := e.RedactText(`hello plain"Words 42 bye`, rec); out != "hello [REDACTED:password] bye" {
+		t.Fatalf("text: %q", out)
+	}
+	if len(got) != 1 || got[0].Value != `plain"Words 42` {
+		t.Fatalf("findings: %+v", got)
+	}
+	got = nil
+	// Escaped as a JSON string inside a text that is not itself JSON.
+	if out := e.RedactText(`log: {"x":"plain\"Words 42"`, rec); out != `log: {"x":"[REDACTED:password]"` {
+		t.Fatalf("escaped: %q", out)
+	}
+	if len(got) != 1 || got[0].Value != `plain"Words 42` {
+		t.Fatalf("escaped finding: %+v", got)
+	}
+	// Decoded inside a JSON document.
+	out, err := e.RedactJSON([]byte(`{"note":"say plain\"Words 42"}`), Marker{})
+	if err != nil || string(out) != `{"note":"say [REDACTED:password]"}` {
+		t.Fatalf("json: %s %v", out, err)
+	}
+	// The base engine is unchanged.
+	if out := base.RedactText(`hello plain"Words 42 bye`, Marker{}); out != `hello plain"Words 42 bye` {
+		t.Fatalf("base changed: %q", out)
+	}
+}
+
+func TestWithLiteralsMergesWithRules(t *testing.T) {
+	t.Parallel()
+	e := newEngine(t, Options{}).WithLiterals([]Literal{{Kind: "password", Value: "hunter22"}})
+	var got []Finding
+	rec := ReplacerFunc(func(f Finding) string { got = append(got, f); return MarkerText(f.Kind) })
+	// A rule finding that is the literal keeps the literal's value and kind.
+	if out := e.RedactText("token: hunter22", rec); out != "token: [REDACTED:password]" || got[0].Value != "hunter22" {
+		t.Fatalf("same span: %q %+v", out, got)
+	}
+	got = nil
+	// A wider rule finding that holds the literal gets the covered text and the literal's kind.
+	if out := e.RedactText("password: xhunter22y", rec); out != "password: [REDACTED:password]" || got[0].Value != "xhunter22y" {
+		t.Fatalf("merged: %q %+v", out, got)
+	}
+}
+
+func TestWithLiteralsEncodedForms(t *testing.T) {
+	t.Parallel()
+	const v = "Summer Blue/77?+"
+	e := newEngine(t, Options{}).WithLiterals([]Literal{{Kind: "password", Value: v}})
+	for _, form := range []string{
+		"U3VtbWVyIEJsdWUvNzc/Kw==", "U3VtbWVyIEJsdWUvNzc_Kw", "Summer+Blue%2F77%3F%2B", "Summer%20Blue%2F77%3F+",
+	} {
+		if out := e.RedactText("x "+form+" y", Marker{}); strings.Contains(out, strings.TrimRight(form, "=")) {
+			t.Errorf("%s not found: %q", form, out)
+		}
+	}
+}

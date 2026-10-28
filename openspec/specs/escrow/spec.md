@@ -69,6 +69,27 @@ When a result is withheld after its findings were kept (it cannot be redacted, o
 - **WHEN** a tool returns a new password and a path to a file that cannot be scanned
 - **THEN** the result is withheld and the password's entry is gone, while an entry an earlier result received stays
 
+### Requirement: Recipients
+
+Each entry SHALL record its recipients: the callers whose delivered results carried its handle. A caller SHALL be identified by the token it used: a global token (`auth.tokens`) by its name, the same on every server that inherits it, and a server's own token (its `auth.tokens`) by the server and the name, so that two servers' own tokens of one name are two callers; a request without a token is the caller `""`. Each result that carries the handle SHALL count once for its caller, and a result that is withheld SHALL take its count back, so that a caller is a recipient exactly while at least one result that reached it showed the handle. Only a recipient SHALL have an entry's value substituted into a call's arguments (see the argument-secrets spec); the value of a file entry is never substituted. Recipients SHALL NOT appear in the API's answers.
+
+Once an entry's value has been substituted, that value, found in a result of any server under any kind while the entry lives, SHALL get the entry's handle and kind instead of a new entry, so that a value sent to a server and returned by it never gains that server as its origin. Only a finding whose value is exactly the substituted one is matched; a finding that holds it with other text is a new entry.
+
+#### Scenario: Recipient of a handle
+
+- **WHEN** a result for the token `laptop` gets a handle, and later a result for `phone` shows the same value from the same server
+- **THEN** both `laptop` and `phone` are recipients of the handle; had the result for `phone` been withheld, only `laptop` would be, and had `laptop`'s been withheld, only `phone`
+
+#### Scenario: Own tokens of one name
+
+- **WHEN** the servers `vault` and `app` each have their own token `agent`, with different values, and `vault`'s result shows a handle
+- **THEN** a call on `app` with its `agent` token cannot have the handle substituted
+
+#### Scenario: Substituted value returned later
+
+- **WHEN** a handle from `vault` was substituted into a call to `app`, and a later result of `app` holds the value
+- **THEN** that result carries the same handle, and the entry's server is still `vault`
+
 ### Requirement: Store
 
 Entries SHALL live only in the process's memory, never on disk or in a log. Each SHALL record its kind (or `file`), server, tool (the tool or prompt name, or the resource URI), creation and expiry times, and a summary of the request's arguments that keeps only the members named in `escrow.sourceArguments` (by default `chat_id`, `message_id`, `message_ids`, `topic_id`, `reply_to`, `space`, `space_name`, `message_name`, `thread_name`, `attachment_name`, `conversation_id`, `conversationId`, `channel_id`, `chat`, `peer`, `messageId`, `threadId` and `account`; an empty list keeps none), when they are strings of at most 200 bytes without line breaks, numbers, booleans, or lists of at most 20 strings and numbers. An entry SHALL expire after its server's `redact.escrowTTL` (by default `escrow.ttl`, by default `24h`); expired entries SHALL be unreadable and SHALL be dropped every minute. The store SHALL hold at most `escrow.maxEntries` entries (default 1000) and 16 MiB of values: a new entry SHALL first drop expired entries when the store is full, then evict the oldest entries until it fits. A value SHALL be overwritten in memory when its entry is dropped.

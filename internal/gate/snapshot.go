@@ -314,13 +314,37 @@ func (g *Gate) newServer(cfg *config.Config, name string, s *config.Server, old 
 	}
 	mo := proxy.Options{
 		Name: name, Version: g.opts.Version, Policy: policy.New(s), Tokens: policy.NewTokens(cfg, name), ForwardMeta: s.ForwardMeta,
-		Redaction: redaction, Files: files, Logger: g.logger, Audit: g.audit, Source: rt.src,
+		OwnTokens: ownTokens(s),
+		Redaction: redaction, Files: files, Arguments: s.Redact.Arguments, Substitution: g.substitution(name, s),
+		Logger: g.logger, Audit: g.audit, Source: rt.src,
 	}
 	if s.ToolPins != config.ToolPinsOff {
 		mo.ToolPins, mo.HoldTools = g.toolPins, s.ToolPins == config.ToolPinsHold
 	}
 	mirror := proxy.New(mo)
 	return &server{name: name, cfg: s, rt: rt, sup: rt.sup, mirror: mirror, mkey: mkey, engine: engine}, true, nil
+}
+
+// ownTokens returns the names of a server's own tokens.
+func ownTokens(s *config.Server) map[string]bool {
+	out := make(map[string]bool, len(s.Auth.Tokens))
+	for name := range s.Auth.Tokens {
+		out[name] = true
+	}
+	return out
+}
+
+// substitution returns the substitution of a server's redact.substitute rules, nil without
+// rules. With the escrow off no handle can be substituted, which a warning says.
+func (g *Gate) substitution(name string, s *config.Server) *proxy.Substitution {
+	if len(s.Redact.Substitute) == 0 {
+		return nil
+	}
+	if g.escrow == nil {
+		g.logger.Warn("the escrow is off, so no handle can be substituted: calls that pass one where a rule allows it are refused", "server", name)
+		return proxy.NewSubstitution(s.Redact.Substitute, nil)
+	}
+	return proxy.NewSubstitution(s.Redact.Substitute, g.escrow)
 }
 
 // newRuntime builds the supervisor and the source of a server, not started.

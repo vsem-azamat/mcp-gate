@@ -9,9 +9,11 @@
 package redact
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -32,6 +34,78 @@ type Options struct {
 type Engine struct {
 	rules    []*rule
 	disabled map[string]bool
+	// literals are the forms of the values found whatever their shape; see WithLiterals.
+	literals []literalForm
+}
+
+// Literal is a known secret that an engine finds wherever it appears; see WithLiterals.
+type Literal struct {
+	Kind, Value string
+}
+
+// literalForm is one way a literal is written in a text: as it is, or as a JSON string escapes
+// it.
+type literalForm struct {
+	kind, value, form string
+}
+
+// literalPriority is the priority of a literal finding: lower than every rule's, so that a
+// finding that overlaps it takes its kind.
+const literalPriority = -1
+
+// WithLiterals returns an engine that runs e's rules and also finds each literal's value
+// wherever it appears in a text, as written or as the body of a JSON string literal that
+// escapes it, with the literal's kind. A finding that covers exactly one occurrence of a value
+// has that value; one merged with other findings has the covered text, as always. Empty
+// values are ignored. e is not changed.
+func (e *Engine) WithLiterals(literals []Literal) *Engine {
+	out := *e
+	out.literals = slices.Clone(e.literals)
+	for _, l := range literals {
+		if l.Value == "" {
+			continue
+		}
+		for _, form := range LiteralForms(l.Value) {
+			out.literals = append(out.literals, literalForm{kind: l.Kind, value: l.Value, form: form})
+		}
+	}
+	return &out
+}
+
+// LiteralForms returns the forms in which WithLiterals finds a value, each once: as written, as
+// the body of a JSON string literal, percent-encoded as a query value and as a path segment, and
+// in base64 with the standard and the URL alphabet, without padding (so that a padded form is
+// found too, its padding left). Base64 is found only where the value's encoding starts on a
+// group of the surrounding base64, as when the value is encoded alone. Other transformations
+// (case, a split, another encoding) are not found.
+func LiteralForms(value string) []string {
+	escaped := string(encodeJSONString(value))
+	var forms []string
+	for _, f := range []string{
+		value, escaped[1 : len(escaped)-1], url.QueryEscape(value), url.PathEscape(value),
+		base64.RawStdEncoding.EncodeToString([]byte(value)), base64.RawURLEncoding.EncodeToString([]byte(value)),
+	} {
+		if !slices.Contains(forms, f) {
+			forms = append(forms, f)
+		}
+	}
+	return forms
+}
+
+// literalSpans returns the occurrences of one form of a literal in text, in order and without
+// overlaps.
+func literalSpans(l literalForm, text string) []span {
+	var spans []span
+	for from := 0; from < len(text); {
+		i := strings.Index(text[from:], l.form)
+		if i < 0 {
+			break
+		}
+		start := from + i
+		spans = append(spans, span{start: start, end: start + len(l.form), kind: l.kind, priority: literalPriority, literal: l.value})
+		from = start + len(l.form)
+	}
+	return spans
 }
 
 // New returns an Engine for opts. It fails when DisableRules names an unknown kind.
@@ -221,6 +295,9 @@ func (e *Engine) Find(text string) []Span {
 		}
 		kept = mergeSpans(kept, e.ruleSpans(r, masked))
 	}
+	for _, l := range e.literals {
+		kept = mergeSpans(kept, literalSpans(l, text))
+	}
 	if len(kept) == 0 {
 		return nil
 	}
@@ -358,11 +435,17 @@ type span struct {
 	// priority is that of the rule that decided the kind.
 	priority    int
 	jsonEscaped bool
+	// literal is the value of a literal (see WithLiterals) whose occurrence the span covers
+	// exactly, or "".
+	literal string
 }
 
 // value returns the secret as a Replacer sees it: decoded when it was written inside a JSON
 // string literal.
 func (s span) value(text string) string {
+	if s.literal != "" {
+		return s.literal
+	}
 	raw := text[s.start:s.end]
 	if s.jsonEscaped && strings.Contains(raw, `\`) {
 		if decoded, err := decodeJSONString([]byte(`"` + raw + `"`)); err == nil {
@@ -400,7 +483,15 @@ func mergeSpans(kept, added []span) []span {
 		// A value is decoded as a JSON string only when an escaped finding covers the whole
 		// merged span; otherwise the span holds text outside the literal and is given raw.
 		escaped := (last.jsonEscaped && last.end == end) || (s.jsonEscaped && s.start == last.start && s.end == end)
-		last.end, last.kind, last.priority, last.jsonEscaped = end, winner.kind, winner.priority, escaped
+		// Likewise a literal keeps its value only when its occurrence is the whole merged span.
+		literal := ""
+		switch {
+		case last.literal != "" && last.end == end:
+			literal = last.literal
+		case s.literal != "" && s.start == last.start && s.end == end:
+			literal = s.literal
+		}
+		last.end, last.kind, last.priority, last.jsonEscaped, last.literal = end, winner.kind, winner.priority, escaped, literal
 	}
 	i, j := 0, 0
 	for i < len(kept) || j < len(added) {

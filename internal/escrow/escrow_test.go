@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -123,15 +124,15 @@ func TestStoreExpiryDedupAndEviction(t *testing.T) {
 	t.Parallel()
 	s := newStore(2, slog.New(slog.DiscardHandler))
 	clk := withClock(s)
-	a, _ := s.insert(&entry{kind: "password", value: []byte("one"), dedupKey: "d1"}, time.Hour)
-	again, _ := s.insert(&entry{kind: "password", value: []byte("one"), dedupKey: "d1"}, time.Hour)
+	a, _, _ := s.insert(&entry{kind: "password", value: []byte("one"), dedupKey: "d1"}, time.Hour, "")
+	again, _, _ := s.insert(&entry{kind: "password", value: []byte("one"), dedupKey: "d1"}, time.Hour, "")
 	if a != again {
 		t.Fatalf("the same secret got two handles: %s, %s", a, again)
 	}
 	clk.add(time.Second)
-	b, _ := s.insert(&entry{kind: "password", value: []byte("two")}, time.Hour)
+	b, _, _ := s.insert(&entry{kind: "password", value: []byte("two")}, time.Hour, "")
 	clk.add(time.Second)
-	c, _ := s.insert(&entry{kind: "password", value: []byte("three")}, time.Hour)
+	c, _, _ := s.insert(&entry{kind: "password", value: []byte("three")}, time.Hour, "")
 	if _, ok := s.get(a); ok {
 		t.Fatal("the oldest entry was not evicted")
 	}
@@ -151,9 +152,9 @@ func TestRepeatExtendsExpiry(t *testing.T) {
 	t.Parallel()
 	s := newStore(10, slog.New(slog.DiscardHandler))
 	clk := withClock(s)
-	h, _ := s.insert(&entry{kind: "password", value: []byte("one"), dedupKey: "d"}, time.Hour)
+	h, _, _ := s.insert(&entry{kind: "password", value: []byte("one"), dedupKey: "d"}, time.Hour, "")
 	clk.add(59 * time.Minute)
-	_, _ = s.insert(&entry{kind: "password", value: []byte("one"), dedupKey: "d"}, time.Hour)
+	_, _, _ = s.insert(&entry{kind: "password", value: []byte("one"), dedupKey: "d"}, time.Hour, "")
 	clk.add(30 * time.Minute)
 	if _, ok := s.get(h); !ok {
 		t.Fatal("a secret seen again must keep its handle alive")
@@ -165,7 +166,7 @@ func TestTotalBytesCap(t *testing.T) {
 	s := newStore(100000, slog.New(slog.DiscardHandler))
 	big := strings.Repeat("x", MaxValueBytes)
 	for i := range 2 * MaxTotalBytes / MaxValueBytes {
-		if _, err := s.insert(&entry{kind: "k", value: []byte(big + strconv.Itoa(i))}, 0); err != nil {
+		if _, _, err := s.insert(&entry{kind: "k", value: []byte(big + strconv.Itoa(i))}, 0, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -178,7 +179,7 @@ func TestSweep(t *testing.T) {
 	t.Parallel()
 	s := newStore(10, slog.New(slog.DiscardHandler))
 	clk := withClock(s)
-	_, _ = s.insert(&entry{kind: "k", value: []byte("v")}, time.Minute)
+	_, _, _ = s.insert(&entry{kind: "k", value: []byte("v")}, time.Minute, "")
 	clk.add(time.Minute)
 	s.sweep()
 	if len(s.entries) != 0 || s.totalBytes != 0 {
@@ -379,7 +380,7 @@ func TestFailedAuthLimit(t *testing.T) {
 	client := "203.0.113.5"
 	e := New(Options{KeyHash: testHash(), Remote: func(r *http.Request) string { return r.Header.Get("X-Client") }})
 	clk := withClock(e.store)
-	h, _ := e.store.insert(&entry{kind: "password", value: []byte("Qwerty-12345")}, 0)
+	h, _, _ := e.store.insert(&entry{kind: "password", value: []byte("Qwerty-12345")}, 0, "")
 	for i := range failBurst {
 		if rec := request(t, e, http.MethodGet, Route+h, "Bearer wrong", "X-Client", client); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("failure %d = %d, want 401", i+1, rec.Code)
@@ -439,7 +440,7 @@ func TestGlobalFailLimit(t *testing.T) {
 	t.Parallel()
 	e := New(Options{KeyHash: testHash(), Remote: func(r *http.Request) string { return r.Header.Get("X-Client") }})
 	clk := withClock(e.store)
-	h, _ := e.store.insert(&entry{kind: "password", value: []byte("Qwerty-12345")}, 0)
+	h, _, _ := e.store.insert(&entry{kind: "password", value: []byte("Qwerty-12345")}, 0, "")
 	get := func(auth, client string) int {
 		t.Helper()
 		return request(t, e, http.MethodGet, Route+h, auth, "X-Client", client).Code
@@ -588,5 +589,111 @@ func TestSourceArguments(t *testing.T) {
 	}
 	if !slices.Contains(DefaultSourceArguments, "chat_id") || len(DefaultSourceArguments) != 18 {
 		t.Errorf("DefaultSourceArguments = %v", DefaultSourceArguments)
+	}
+}
+
+func TestSecretOnlyForRecipients(t *testing.T) {
+	t.Parallel()
+	e := New(Options{KeyHash: testHash()})
+	f := redact.Finding{Kind: "password", Value: "Summer-Blue-77!"}
+	marker := e.Replacer(Source{Server: "vault", Tool: "get", Recipient: "laptop"}).Replace(f)
+	m := MarkerRE.FindStringSubmatch(marker)
+	if m == nil || m[1] != "password" {
+		t.Fatalf("marker %q does not match MarkerRE", marker)
+	}
+	handle := m[2]
+	got, err := e.Secret(handle, "laptop")
+	if err != nil || got != (Secret{Kind: "password", Server: "vault", Value: "Summer-Blue-77!"}) {
+		t.Fatalf("Secret(laptop) = %+v, %v", got, err)
+	}
+	if _, err := e.Secret(handle, "phone"); !errors.Is(err, ErrNoSecret) {
+		t.Fatalf("Secret(phone) = %v, want ErrNoSecret", err)
+	}
+	if _, err := e.Secret("kaaaaaaaaaa", "laptop"); !errors.Is(err, ErrNoSecret) {
+		t.Fatalf("unknown handle: %v", err)
+	}
+
+	// Another token's result showing the same value makes it a recipient; a withheld one does not.
+	withheld := e.Replacer(Source{Server: "vault", Tool: "get", Recipient: "phone"})
+	if withheld.Replace(f) != marker {
+		t.Fatal("same value got another handle")
+	}
+	if _, err := e.Secret(handle, "phone"); err != nil {
+		t.Fatalf("phone after its result: %v", err)
+	}
+	withheld.Discard()
+	if _, err := e.Secret(handle, "phone"); !errors.Is(err, ErrNoSecret) {
+		t.Fatalf("phone after a withheld result: %v", err)
+	}
+	if _, err := e.Secret(handle, "laptop"); err != nil {
+		t.Fatalf("laptop lost the handle: %v", err)
+	}
+
+	// A file is never a secret to substitute.
+	fh, err := e.KeepFile(File{Source: Source{Server: "vault", Recipient: "laptop"}, Name: "f", Kinds: []string{"password"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Secret(fh, "laptop"); !errors.Is(err, ErrNoSecret) {
+		t.Fatalf("file: %v", err)
+	}
+}
+
+// TestRecipientsCountDeliveredResults checks that a withheld result undoes only what it gave: its
+// creator is no recipient after it, and a recipient a delivered result showed stays one.
+func TestRecipientsCountDeliveredResults(t *testing.T) {
+	t.Parallel()
+	f := redact.Finding{Kind: "password", Value: "Summer-Blue-77!"}
+	handleOf := func(marker string) string { return MarkerRE.FindStringSubmatch(marker)[2] }
+
+	e := New(Options{KeyHash: testHash()})
+	created := e.Replacer(Source{Server: "vault", Recipient: "laptop"})
+	h := handleOf(created.Replace(f))
+	_ = e.Replacer(Source{Server: "vault", Recipient: "phone"}).Replace(f) // keeps the entry alive
+	created.Discard()
+	if _, err := e.Secret(h, "laptop"); !errors.Is(err, ErrNoSecret) {
+		t.Errorf("the creator of a withheld result is still a recipient: %v", err)
+	}
+	if _, err := e.Secret(h, "phone"); err != nil {
+		t.Errorf("phone lost the handle: %v", err)
+	}
+
+	e = New(Options{KeyHash: testHash()})
+	h = handleOf(e.Replacer(Source{Server: "vault", Recipient: "phone"}).Replace(f))
+	first := e.Replacer(Source{Server: "vault", Recipient: "laptop"})
+	first.Replace(f)
+	e.Replacer(Source{Server: "vault", Recipient: "laptop"}).Replace(f) // delivered
+	first.Discard()
+	if _, err := e.Secret(h, "laptop"); err != nil {
+		t.Errorf("a handle a delivered result showed was revoked: %v", err)
+	}
+}
+
+// TestSubstitutedValueKeepsItsOrigin checks that a substituted value found again in another
+// server's result gets its first handle and origin, not a new entry under that server.
+func TestSubstitutedValueKeepsItsOrigin(t *testing.T) {
+	t.Parallel()
+	e := New(Options{KeyHash: testHash()})
+	f := redact.Finding{Kind: "password", Value: "Summer-Blue-77!"}
+	marker := e.Replacer(Source{Server: "vault", Recipient: "laptop"}).Replace(f)
+	h := MarkerRE.FindStringSubmatch(marker)[2]
+	before := e.Stats().Entries
+	// Before substitution, another server's result gets a handle of its own.
+	if e.Replacer(Source{Server: "app", Recipient: "laptop"}).Replace(f) == marker {
+		t.Fatal("app got vault's handle before any substitution")
+	}
+	if _, err := e.Secret(h, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	// After it, under any kind, the value gets vault's handle and kind.
+	got := e.Replacer(Source{Server: "mail", Recipient: "phone"}).Replace(redact.Finding{Kind: "secret", Value: f.Value})
+	if got != marker {
+		t.Fatalf("after substitution: %q, want %q", got, marker)
+	}
+	if sec, err := e.Secret(h, "phone"); err != nil || sec.Server != "vault" {
+		t.Fatalf("phone's view: %+v %v", sec, err)
+	}
+	if n := e.Stats().Entries; n != before+1 {
+		t.Fatalf("entries = %d, want %d", n, before+1)
 	}
 }

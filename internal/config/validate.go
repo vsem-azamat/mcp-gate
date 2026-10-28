@@ -120,6 +120,7 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 			continue
 		}
 		s.validate(path, add)
+		c.validateSubstitute(path, s, add)
 		if s.Tools != nil && s.Tools.Allow != nil && len(s.Tools.Allow) == 0 {
 			c.warn(path+".tools", "an empty allow list exposes every tool, as mcp-proxy's toolFilter did; remove the key to say so")
 		}
@@ -533,6 +534,79 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 			add(path+".redact.files", "needs redact.enabled: files are scanned only on a server whose results are redacted")
 		}
 		f.validate(path+".redact.files", add)
+	}
+	redactOff := s.Redact.Enabled != nil && !*s.Redact.Enabled
+	switch s.Redact.Arguments {
+	case "", ArgumentsOff, ArgumentsLog:
+	case ArgumentsBlock:
+		if redactOff {
+			add(path+".redact.arguments", "needs redact.enabled: arguments are scanned only on a server whose results are redacted")
+		}
+	default:
+		add(path+".redact.arguments", "must be %s, %s or %s", ArgumentsOff, ArgumentsLog, ArgumentsBlock)
+	}
+	if len(s.Redact.Substitute) > 0 && redactOff {
+		add(path+".redact.substitute", "needs redact.enabled: the values substituted are redacted from the answer")
+	}
+}
+
+// validateSubstitute checks the substitution rules of the server at path: each names a tool, an
+// argument path and, for each origin server, the kinds that may go there.
+func (c *Config) validateSubstitute(path string, s *Server, add func(path, format string, args ...any)) {
+	kinds := redact.Kinds()
+	seen := map[[2]string]bool{}
+	for i, r := range s.Redact.Substitute {
+		p := fmt.Sprintf("%s.redact.substitute[%d]", path, i)
+		if strings.TrimSpace(r.Tool) == "" {
+			add(p+".tool", "cannot be empty")
+		}
+		if slices.Contains(r.Path(), "") {
+			add(p+".argument", "must be member names joined by '.', such as auth.password")
+		} else if slices.ContainsFunc(r.Path(), func(seg string) bool { return strings.TrimSpace(seg) != seg }) {
+			c.warn(p+".argument", "a member name starts or ends with a space, and matches only a name written so")
+		}
+		if before, _, ok := strings.Cut(r.Tool, AggregateSeparator); ok && c.Servers[before] != nil {
+			c.warn(p+".tool", "names the tool as /mcp does; a rule takes the server's own name, without the %q prefix", before+AggregateSeparator)
+		}
+		if key := [2]string{r.Tool, r.Argument}; seen[key] {
+			add(p, "has the same tool and argument as another rule")
+		} else {
+			seen[key] = true
+		}
+		if len(r.From) == 0 {
+			add(p+".from", "must name at least one server")
+		}
+		origins := make([]string, 0, len(r.From))
+		for name := range r.From {
+			origins = append(origins, name)
+		}
+		sort.Strings(origins)
+		for _, name := range origins {
+			fp := p + ".from." + name
+			origin := c.Servers[name]
+			if origin == nil {
+				add(fp, "is not a server in servers")
+				continue
+			}
+			if (origin.Redact.Enabled != nil && !*origin.Redact.Enabled) || (origin.Redact.Escrow != nil && !*origin.Redact.Escrow) {
+				c.warn(fp, "the server's results carry no escrow handles (redact.enabled or redact.escrow is false), so none can be substituted")
+			}
+			list := r.From[name]
+			if len(list) == 0 {
+				add(fp, "must list at least one kind; known: %s", strings.Join(kinds, ", "))
+			}
+			for j, k := range list {
+				if slices.Contains(origin.Redact.DisableRules, k) {
+					c.warn(fmt.Sprintf("%s[%d]", fp, j), "the server's redact.disableRules turns this kind off, so its results carry no handles of it")
+				}
+				switch {
+				case !slices.Contains(kinds, k):
+					add(fmt.Sprintf("%s[%d]", fp, j), "is not a redaction kind; known: %s", strings.Join(kinds, ", "))
+				case slices.Index(list, k) != j:
+					add(fmt.Sprintf("%s[%d]", fp, j), "is listed twice")
+				}
+			}
+		}
 	}
 }
 

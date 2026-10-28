@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
+	"github.com/vsem-azamat/mcp-gate/internal/redact/mcpredact"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
 
@@ -40,6 +42,16 @@ type call struct {
 	// rep replaces the findings of the call's result; set on first use, so that what it kept
 	// can be discarded when the result is withheld.
 	rep redact.Replacer
+	// argumentSecrets are the kinds the argument scan found, and substitutions the handles
+	// whose values were put into the arguments.
+	argumentSecrets []string
+	substitutions   []audit.Substitution
+	// literals are the values substituted into the call, which its answer must not show; echoes
+	// maps each to the marker the client passed for it; echoRedactor redacts the answer with
+	// them, set on first use.
+	literals     []redact.Literal
+	echoes       map[string]string
+	echoRedactor *mcpredact.Redactor
 }
 
 // begin starts the audit record of a request for the entry of the given kind and name (a tool or
@@ -60,6 +72,7 @@ func (c *call) end() {
 	c.m.emit(audit.Record{
 		Server: c.m.opts.Name, Principal: c.principal, Kind: c.kind, Name: c.name, Duration: time.Since(c.start),
 		Outcome: c.outcome, TokenPolicy: c.decision, Redactions: c.count.n.Load(),
+		ArgumentSecrets: strings.Join(c.argumentSecrets, ","), Substitutions: audit.Substitutions(c.substitutions),
 		// A name the caller's token policy hides is not listed for it: the metrics must not
 		// tell a hidden entry from a missing one.
 		Listed: c.kind != audit.Resource && c.decision != policy.Denied && c.m.mirrored(c.kind, c.entry),
@@ -96,7 +109,7 @@ func (c *call) downstreamError(ctx context.Context, err error) error {
 	}
 	var rpc *jsonrpc.Error
 	if !errors.As(err, &rpc) || rpc == nil {
-		return errors.New(c.m.src.down.ErrorText(err))
+		return errors.New(c.scrubEcho(c.m.src.down.ErrorText(err)))
 	}
 	r := c.m.opts.Redaction
 	if r == nil {
@@ -106,12 +119,17 @@ func (c *call) downstreamError(ctx context.Context, err error) error {
 	if direct, ok := err.(*jsonrpc.Error); ok && direct == rpc { //nolint:errorlint // only an unwrapped error reply carries its data to the wire
 		fresh.Data = json.RawMessage(c.m.src.down.HideURL(string(rpc.Data)))
 	}
-	return r.results.Error(fresh, c.replacer())
+	return c.results().Error(fresh, c.replacer())
 }
 
-// replacer returns the call's replacer, counting the findings it replaces.
+// replacer returns the call's replacer, counting the findings it replaces. In a call with
+// substituted values it gives each of them the marker the client passed (see echoReplacer).
 func (c *call) replacer() *countingReplacer {
-	return &countingReplacer{next: c.resultReplacer(), n: c.count}
+	next := c.resultReplacer()
+	if len(c.echoes) > 0 {
+		next = newEchoReplacer(next, c.echoes)
+	}
+	return &countingReplacer{next: next, n: c.count}
 }
 
 // resultReplacer returns the call's replacer, which does not count.

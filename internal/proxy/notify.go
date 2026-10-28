@@ -171,8 +171,12 @@ type Request struct {
 	Method string
 	// Name is the tool or prompt name, or the resource URI.
 	Name string
-	// Arguments returns the call's arguments, decoded once; nil when there are none.
+	// Arguments returns the call's arguments as the client sent them, decoded once; nil when
+	// there are none.
 	Arguments func() map[string]any
+	// Recipient identifies the caller's token across servers (see Mirror.recipient), "" for a
+	// call without a token.
+	Recipient string
 }
 
 // ReplacerFunc returns the replacer for the findings in one call's result. A replacer that is
@@ -187,9 +191,10 @@ type Discarder interface {
 
 // Redaction is the result pipeline of one server.
 type Redaction struct {
-	engine   *redact.Engine
-	results  *mcpredact.Redactor
-	replacer ReplacerFunc
+	engine       *redact.Engine
+	results      *mcpredact.Redactor
+	replacer     ReplacerFunc
+	maxTextBytes int
 }
 
 // NewRedaction returns the pipeline for engine. Findings in results are replaced by what the
@@ -200,7 +205,7 @@ func NewRedaction(engine *redact.Engine, replacer ReplacerFunc, maxTextBytes int
 	if replacer == nil {
 		replacer = func(Request) redact.Replacer { return redact.Marker{} }
 	}
-	return &Redaction{engine: engine, results: mcpredact.New(engine, maxTextBytes), replacer: replacer}
+	return &Redaction{engine: engine, results: mcpredact.New(engine, maxTextBytes), replacer: replacer, maxTextBytes: maxTextBytes}
 }
 
 // FileScanner checks the files a tool call wrote; see package filescan.
