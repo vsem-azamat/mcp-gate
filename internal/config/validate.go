@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -34,6 +35,11 @@ const (
 	MinFileMaxBytes  = 1 << 10
 	MaxFileMaxBytes  = 1 << 30
 	maxNameLen       = 64
+	// The bounds of approvals.timeout.
+	MinApprovalTimeout = time.Second
+	MaxApprovalTimeout = time.Hour
+	// MinWebhookSecret is the shortest approvals.webhook.secret.
+	MinWebhookSecret = 16
 )
 
 // ServerNameRE is the form of a server name: it becomes the path /<name>/mcp.
@@ -130,6 +136,7 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 	}
 	c.validateAggregate(add)
 	c.validatePolicies(add)
+	c.validateApprovals(add)
 }
 
 // validatePolicies checks that every policy names a token some server accepts and only servers
@@ -176,10 +183,11 @@ func (c *Config) validatePolicies(add func(path, format string, args ...any)) {
 				c.warn(sp, "the server is disabled, so the policy has no effect until it is enabled")
 			}
 			f := p.Servers[server]
-			if f == nil || f.Tools == nil && f.Prompts == nil && f.Resources == nil {
-				add(sp, "needs at least one of tools, prompts and resources")
+			if f == nil || f.Tools == nil && f.Prompts == nil && f.Resources == nil && f.Approve == nil {
+				add(sp, "needs at least one of tools, prompts, resources and approve")
 				continue
 			}
+			validateApprove(sp+".approve", f.Approve, server, add)
 			f.Tools.validate(sp+".tools", "tool", server, add)
 			f.Prompts.validate(sp+".prompts", "prompt", server, add)
 			f.Resources.validate(sp+".resources", "resource", "", add)
@@ -223,6 +231,86 @@ func (f *PolicyFilter) validate(path, noun, prefix string, add func(path, format
 			add(p, "names the %s as the aggregate endpoint does; write the server's own name for it, without %q", noun, prefix+AggregateSeparator)
 		}
 		seen[v] = true
+	}
+}
+
+// validateApprove checks an approve list of tool name patterns. prefix, if set, is the server
+// whose name the aggregate endpoint puts before the tools' names, which a policy does not use.
+func validateApprove(path string, patterns []string, prefix string, add func(path, format string, args ...any)) {
+	if patterns != nil && len(patterns) == 0 {
+		add(path, "is empty and holds nothing; remove it")
+	}
+	seen := map[string]bool{}
+	for i, v := range patterns {
+		p := fmt.Sprintf("%s[%d]", path, i)
+		switch {
+		case strings.TrimSpace(v) == "":
+			add(p, "cannot be empty")
+		case strings.TrimSpace(v) != v:
+			add(p, "cannot have surrounding space")
+		case strings.Contains(strings.TrimSuffix(v, "*"), "*"):
+			add(p, "may hold * only at its end, where it matches any rest of the name")
+		case seen[v]:
+			add(p, "is listed twice")
+		case prefix != "" && strings.HasPrefix(v, prefix+AggregateSeparator):
+			add(p, "names the tool as the aggregate endpoint does; write the server's own name for it, without %q", prefix+AggregateSeparator)
+		}
+		seen[v] = true
+	}
+}
+
+// validateApprovals checks the approvals keys, and that someone can decide when any call may be
+// held.
+func (c *Config) validateApprovals(add func(path, format string, args ...any)) {
+	a := c.Approvals
+	if a.Timeout != nil && (a.Timeout.D() < MinApprovalTimeout || a.Timeout.D() > MaxApprovalTimeout) {
+		add("approvals.timeout", "must be between %s and %s", FormatDuration(MinApprovalTimeout), FormatDuration(MaxApprovalTimeout))
+	}
+	links := false
+	if w := a.Webhook; w != nil {
+		checkApprovalURL("approvals.webhook.url", w.URL, add)
+		if w.LinkURL != "" {
+			links = true
+			checkApprovalURL("approvals.webhook.linkURL", w.LinkURL, add)
+		}
+		if w.Secret != "" && len(w.Secret) < MinWebhookSecret {
+			add("approvals.webhook.secret", "must be at least %d characters", MinWebhookSecret)
+		}
+	}
+	if len(c.Admin.Tokens) > 0 || links {
+		return
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Servers)) {
+		if s := c.Servers[name]; s != nil && len(s.Approve) > 0 {
+			add("servers."+name+".approve", "holds calls that no one can decide: set admin.tokens, for mcp-gate approvals, or approvals.webhook.linkURL")
+		}
+	}
+	for _, token := range slices.Sorted(maps.Keys(c.Policies)) {
+		p := c.Policies[token]
+		if p == nil {
+			continue
+		}
+		for _, server := range slices.Sorted(maps.Keys(p.Servers)) {
+			if sp := p.Servers[server]; sp != nil && len(sp.Approve) > 0 {
+				add("policies."+token+".servers."+server+".approve", "holds calls that no one can decide: set admin.tokens, for mcp-gate approvals, or approvals.webhook.linkURL")
+			}
+		}
+	}
+}
+
+// checkApprovalURL checks a URL of approvals.webhook: the notices carry link tokens, so it must
+// be https or loopback http, and it is used as written, without a query or a fragment.
+func checkApprovalURL(path, raw string, add func(path, format string, args ...any)) {
+	if err := CheckURL(raw); err != nil {
+		add(path, "%s", err.Error())
+		return
+	}
+	u, _ := url.Parse(raw) // CheckURL parsed it
+	switch {
+	case !SecureURL(raw):
+		add(path, "must be https, or http on a loopback address, since the notices carry the links that decide")
+	case u.RawQuery != "" || strings.Contains(raw, "?"):
+		add(path, "must not contain a query")
 	}
 }
 
@@ -509,6 +597,7 @@ func (s *Server) validate(path string, add func(path, format string, args ...any
 	s.Prompts.validate(path+".prompts", add)
 
 	s.Resources.validate(path+".resources", add)
+	validateApprove(path+".approve", s.Approve, "", add)
 	seen := map[string]bool{}
 	for i, k := range s.ForwardMeta {
 		p := fmt.Sprintf("%s.forwardMeta[%d]", path, i)

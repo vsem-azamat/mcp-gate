@@ -78,6 +78,10 @@ func alwaysRefused(a netip.Addr) bool {
 	return false
 }
 
+// AlwaysRefused reports an address that no outgoing request of the gate may reach, whoever
+// configured it (see alwaysRefused).
+func AlwaysRefused(a netip.Addr) bool { return alwaysRefused(a) }
+
 var alwaysRefusedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("fd00:ec2::254/128"),  // AWS metadata, IPv6
 	netip.MustParsePrefix("100.100.100.200/32"), // Alibaba Cloud metadata

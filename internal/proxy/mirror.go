@@ -30,8 +30,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 
+	"github.com/vsem-azamat/mcp-gate/internal/approval"
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
+	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/toolpins"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
 )
@@ -84,8 +86,10 @@ type Options struct {
 	// Redaction redacts results; nil passes them unchanged.
 	Redaction *Redaction
 	// Files, if set, scans the files tool calls write, after their results are redacted.
-	Files  FileScanner
-	Logger *slog.Logger
+	Files FileScanner
+	// Approval, if set, holds the tool calls its rules name for the owner's approval.
+	Approval *Approval
+	Logger   *slog.Logger
 	// Audit receives the audit record of every request; nil writes them as call lines to
 	// Logger.
 	Audit audit.Sink
@@ -99,6 +103,16 @@ type Options struct {
 	ToolPins *toolpins.Store
 	// HoldTools leaves the tools whose definition differs from their pin out of the catalog.
 	HoldTools bool
+}
+
+// Approval holds a server's tool calls that its rules name until the owner decides them.
+type Approval struct {
+	Rules    *approval.Rules
+	Store    *approval.Store
+	Settings approval.Settings
+	// Engine redacts the arguments shown to the owner when the server's results are not
+	// redacted.
+	Engine *redact.Engine
 }
 
 // Mirror is the upstream face of one downstream server under one config.

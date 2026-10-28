@@ -85,6 +85,21 @@ const (
 	Withheld Outcome = "withheld"
 	// InputRequired is a result that asks the client for input, which the gate does not forward.
 	InputRequired Outcome = "input_required"
+	// NotApproved is a tool call held for the owner's approval that was denied or expired.
+	NotApproved Outcome = "not_approved"
+)
+
+// Approval is what came of holding a tool call for the owner's approval.
+type Approval string
+
+// The approvals; a call that was not held has none ("").
+const (
+	Approved       Approval = "approved"
+	ApprovalDenied Approval = "denied"
+	// ApprovalExpired is a call nobody decided in time.
+	ApprovalExpired Approval = "expired"
+	// ApprovalCancelled is a call whose client gave up while it waited.
+	ApprovalCancelled Approval = "cancelled"
 )
 
 // Failed reports whether the outcome counts as a failed call: every one but ok and tool_error.
@@ -112,6 +127,10 @@ type Record struct {
 	// ended and that the caller's token policy does not hide; false for a resource read and for a
 	// request no server saw.
 	Listed bool
+	// Approval is what came of holding the call for the owner's approval, "" when it was not
+	// held; Approver is who decided it: an admin token's name, "link" or "gate".
+	Approval Approval
+	Approver string
 }
 
 // Sink receives the audit records. Write is called once per request, on the request's
@@ -133,13 +152,13 @@ func (t tee) Write(r Record) {
 
 // Log returns the sink that writes each record as one "call" line to logger, at info level:
 // server, principal, method, the entry under its Kind.Key, durMs, outcome, tokenPolicy and
-// redactions, in that order.
+// redactions, in that order, then, for a call held for approval, approval and approver.
 func Log(logger *slog.Logger) Sink { return logSink{logger} }
 
 type logSink struct{ logger *slog.Logger }
 
 func (s logSink) Write(r Record) {
-	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "call",
+	attrs := []slog.Attr{
 		slog.String("server", r.Server),
 		slog.String("principal", r.Principal),
 		slog.String("method", r.Kind.Method()),
@@ -148,7 +167,14 @@ func (s logSink) Write(r Record) {
 		slog.String("outcome", string(r.Outcome)),
 		slog.String("tokenPolicy", string(r.TokenPolicy)),
 		slog.Int64("redactions", r.Redactions),
-	)
+	}
+	if r.Approval != "" {
+		attrs = append(attrs, slog.String("approval", string(r.Approval)))
+		if r.Approver != "" {
+			attrs = append(attrs, slog.String("approver", r.Approver))
+		}
+	}
+	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "call", attrs...)
 }
 
 // PinRecord is the audit record of a tool a server lists with a definition other than the one

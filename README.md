@@ -50,6 +50,9 @@ I run about a dozen MCP servers for my own agents. I wanted secrets hidden from 
 - **Secret vault**<br>
   Optional. Hidden values stay in memory for a day, and only your own key reads them back. Agent tokens cannot.
 
+- **Ask before risky calls**<br>
+  Optional. Tools such as `send_message` or `delete_*` wait for your approval before the gate forwards them. A webhook tells you what the agent wants to do, arguments redacted, with one-time approve and deny links; `mcp-gate approvals` decides from a terminal. No answer in time means no.
+
 - **OAuth for remote servers**<br>
   `mcp-gate auth login` signs in once in any browser. The gate stores the grant and refreshes it.
 
@@ -150,6 +153,7 @@ The [configuration reference](docs/configuration/README.md) lists every key. To 
 | [`serve`](docs/commands/serve.md) | Run the gateway |
 | [`check`](docs/commands/check.md) | Validate a config; with `-connect`, also start every server once and report what it serves |
 | [`auth`](docs/commands/auth.md) | `login`, `status` and `logout` for OAuth servers |
+| [`approvals`](docs/commands/approvals.md) | List, approve and deny the tool calls a running gate holds for you |
 | [`compare`](docs/commands/compare.md) | Diff the tools, prompts and resources of two endpoints or snapshots |
 | [`import`](docs/commands/import.md) | Convert an mcp-proxy `config.json` |
 

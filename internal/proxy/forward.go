@@ -40,6 +40,10 @@ type call struct {
 	// rep replaces the findings of the call's result; set on first use, so that what it kept
 	// can be discarded when the result is withheld.
 	rep redact.Replacer
+	// approval is what came of holding the call for the owner's approval, and approver who
+	// decided it; empty for a call that was not held.
+	approval audit.Approval
+	approver string
 }
 
 // begin starts the audit record of a request for the entry of the given kind and name (a tool or
@@ -62,7 +66,8 @@ func (c *call) end() {
 		Outcome: c.outcome, TokenPolicy: c.decision, Redactions: c.count.n.Load(),
 		// A name the caller's token policy hides is not listed for it: the metrics must not
 		// tell a hidden entry from a missing one.
-		Listed: c.kind != audit.Resource && c.decision != policy.Denied && c.m.mirrored(c.kind, c.entry),
+		Listed:   c.kind != audit.Resource && c.decision != policy.Denied && c.m.mirrored(c.kind, c.entry),
+		Approval: c.approval, Approver: c.approver,
 	})
 }
 

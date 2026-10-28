@@ -1,15 +1,19 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vsem-azamat/mcp-gate/internal/approval"
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/redact"
 	"github.com/vsem-azamat/mcp-gate/internal/redact/mcpredact"
 )
 
@@ -21,7 +25,9 @@ import (
 //   - before forward: the kind's before stages, each of which may refuse the request or change
 //     what is sent: today the server's filter with the tools the tool pins hold, then the
 //     caller's token policy, each of which refuses an entry it hides with the error of an
-//     unknown one;
+//     unknown one, then, for a tool call, the owner's approval. Approval stays the last before
+//     stage: a check added here goes before it, so that the owner is asked only about a call
+//     the gate would otherwise forward;
 //   - forward: the request goes to the server through the supervisor, with the downstream
 //     _meta and progress (Mirror.forward);
 //   - outcome: the server's answer becomes a result or an error fit for the client, and what
@@ -55,7 +61,8 @@ type result interface {
 }
 
 // beforeStage checks or changes a request before it is forwarded. An error refuses the request,
-// with the outcome the stage set.
+// with the outcome the stage set; a softRefusal is answered with a soft result when the kind
+// has one.
 type beforeStage[P any] func(ctx context.Context, x *exchange, p P) error
 
 // afterStage checks or changes a result. An error withholds the result, with the outcome the
@@ -83,6 +90,9 @@ func (pl *pipeline[P, R]) run(ctx context.Context, x *exchange, p P) (R, error) 
 	var none R
 	for _, stage := range pl.before {
 		if err := stage(ctx, x, p); err != nil {
+			if soft, ok := errors.AsType[softRefusal](err); ok {
+				return pl.fail(soft.error)
+			}
 			return none, err
 		}
 	}
@@ -174,6 +184,83 @@ func tokenPolicy[P any](_ context.Context, x *exchange, _ P) error {
 	return nil
 }
 
+// softRefusal is a refusal that a tool call reports to the model in its result.
+type softRefusal struct{ error }
+
+// approve holds a tool call that the server's approval rules name for the caller until the
+// owner decides it, and refuses it unless it is approved. It runs after every other before
+// stage, so that a hidden tool is refused as an unknown one without the owner being asked.
+func approve(ctx context.Context, x *exchange, p *mcp.CallToolParams) error {
+	a := x.m.opts.Approval
+	if a == nil || !a.Rules.Holds(x.principal, x.entry) {
+		return nil
+	}
+	raw, _ := p.Arguments.(json.RawMessage) // as callToolAs sets it
+	q := approval.Question{Server: x.m.opts.Name, Tool: x.entry, Principal: x.principal, Arguments: x.m.shownArguments(raw)}
+	d := a.Store.Ask(ctx, q, a.Settings, func(id string, n int) { x.waiting(ctx, id, n) })
+	x.approval, x.approver = d.Approval, d.By
+	switch d.Approval {
+	case audit.Approved:
+		return nil
+	case audit.ApprovalCancelled:
+		x.outcome = audit.Error
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("the call was cancelled while it waited for approval")
+	case audit.ApprovalExpired:
+		x.outcome = audit.NotApproved
+		return softRefusal{fmt.Errorf("mcp-gate: the owner did not answer the approval request for %s in time", x.shown)}
+	case audit.ApprovalDenied:
+	}
+	x.outcome = audit.NotApproved
+	return softRefusal{fmt.Errorf("mcp-gate: the owner did not approve this call of %s", x.shown)}
+}
+
+// maxShownArguments is how much of a held call's arguments the owner is shown.
+const maxShownArguments = 4096
+
+// shownArguments returns a held call's arguments as the owner is shown them: redacted with the
+// server's rules, or the default ones when its results are not redacted, findings replaced by
+// markers and never kept, on one line, and cut.
+func (m *Mirror) shownArguments(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	engine := m.opts.Approval.Engine
+	if r := m.opts.Redaction; r != nil {
+		engine = r.engine
+	}
+	if engine == nil {
+		return "(the arguments could not be redacted)"
+	}
+	out, err := engine.RedactJSON(raw, redact.Marker{})
+	if err != nil {
+		return "(the arguments could not be redacted)"
+	}
+	var compact bytes.Buffer
+	if json.Compact(&compact, out) != nil {
+		return "(the arguments could not be redacted)"
+	}
+	return redact.Cut(compact.String(), maxShownArguments)
+}
+
+// waiting tells the caller, through its request's progress token if it has one, that its call
+// waits for the owner's approval; n is how many times it was told before, plus one. ctx is the
+// request's, which routes the notification to its stream.
+func (x *exchange) waiting(ctx context.Context, id string, n int) {
+	token := progressToken(x.meta)
+	if token == nil || x.session == nil {
+		return
+	}
+	err := x.session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+		ProgressToken: token, Progress: float64(n), Message: "waiting for the owner's approval (" + id + ")",
+	})
+	if err != nil {
+		x.m.logger.Debug("approval progress not delivered", "error", err.Error())
+	}
+}
+
 // The after stages.
 
 // redactWith returns the stage that redacts a result with the server's redaction, if it has
@@ -223,7 +310,8 @@ func toolErrorOutcome(_ context.Context, x *exchange, res *mcp.CallToolResult) (
 // The pipelines of the three kinds.
 
 var toolPipeline = &pipeline[*mcp.CallToolParams, *mcp.CallToolResult]{
-	before: []beforeStage[*mcp.CallToolParams]{serverFilter[*mcp.CallToolParams], tokenPolicy[*mcp.CallToolParams]},
+	// approve stays last; see the pipeline above.
+	before: []beforeStage[*mcp.CallToolParams]{serverFilter[*mcp.CallToolParams], tokenPolicy[*mcp.CallToolParams], approve},
 	send: func(ctx context.Context, d Downstream, p *mcp.CallToolParams) (*mcp.CallToolResult, error) {
 		return d.CallTool(ctx, p)
 	},

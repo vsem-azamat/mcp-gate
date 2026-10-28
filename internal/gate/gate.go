@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vsem-azamat/mcp-gate/internal/approval"
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
@@ -92,6 +93,10 @@ type Gate struct {
 	metricsSrv *upstream.Server
 	pins       *pinStore
 	toolPins   *toolpins.Store
+	// approvals holds the tool calls waiting for the owner, under every snapshot; defaultRules
+	// redacts the arguments shown of a server whose results are not redacted.
+	approvals    *approval.Store
+	defaultRules *redact.Engine
 	// startedAt is when the gate was built; file scanning keeps in the escrow only files written
 	// since then, across reloads.
 	startedAt time.Time
@@ -147,7 +152,12 @@ func New(opts Options) (*Gate, error) {
 	g.metrics = metrics.New()
 	g.audit = audit.Tee(audit.Log(g.logger), g.metrics)
 	g.toolPins = toolpins.New(opts.StateDir)
+	g.approvals = approval.NewStore(g.logger)
 	var err error
+	if g.defaultRules, err = redact.New(redact.Options{}); err != nil {
+		return nil, err
+	}
+	g.audit = audit.Tee(audit.Log(g.logger), g.metrics)
 	if g.pins, err = loadPins(opts.StateDir); err != nil {
 		g.logger.Warn("cannot read the learned protocol pins; starting without them", "error", err.Error())
 	}
@@ -485,8 +495,9 @@ func (g *Gate) awaitReady(r *http.Request, ready func(*http.Request) (ok, pendin
 // shutdown stops the listener and the servers; parent carries values only, it is never cancelled.
 // It returns only the listener's errors.
 func (g *Gate) shutdown(parent context.Context) error {
-	// A reload waiting for calls in flight stops waiting.
+	// A reload waiting for calls in flight stops waiting, and so do the calls held for approval.
 	g.stopRetiring()
+	g.approvals.Close()
 	ctx, cancel := context.WithTimeout(parent, ShutdownGrace)
 	defer cancel()
 	var errs []error

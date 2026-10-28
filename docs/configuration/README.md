@@ -28,11 +28,17 @@ escrow:
   socket: {path: /run/mcp-gate/escrow.sock, allowUIDs: [1001]}   # user 1001 needs no key
 aggregate:
   servers: [notes, mail]   # leave out to serve every enabled server
+approvals:
+  timeout: 5m
+  webhook:
+    url: https://relay.example.com/mcp-gate
+    secret: "${APPROVAL_WEBHOOK_SECRET}"
+    linkURL: https://mcp.example.com   # the gate as the relay reaches it
 policies:
   phone:                   # a token name
     servers:
       notes: {tools: {allow: [search]}, resources: none}
-      mail: {tools: {deny: [send_message, delete_message]}}
+      mail: {tools: {deny: [send_message, delete_message]}, approve: [forward_message]}
 servers:
   notes:
     stdio:
@@ -42,8 +48,9 @@ servers:
       env: {NOTES_DB: /srv/notes/db, NOTES_TOKEN: "${NOTES_TOKEN}"}
       inheritEnv: [PATH, HOME, LANG]
     callTimeout: 3m
-    tools: {allow: [search, read_note]}
+    tools: {allow: [search, read_note, delete_note]}
     prompts: {allow: []}
+    approve: [delete_*]      # wait for the owner before forwarding
     redact:
       ru: true
       escrowTTL: 1h
@@ -104,7 +111,12 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `aggregate` | none | Serve servers together at `/mcp`, tools and prompts named `<server>__<name>` (see [serve](../commands/serve.md#aggregate-endpoint)). `aggregate: {}` serves every enabled server; `aggregate:` without a value is an error |
 | `aggregate.servers` | every server | The servers served at `/mcp`; not empty, no name twice. A disabled server is left out. A server served there cannot have `__` in its name or end in `_`, and its name is at most 61 characters |
 | `aggregate.log.requests` | `false` | Log each HTTP request to `/mcp`, as `log.requests` does for a server |
-| `policies.<token>.servers.<server>` | none | The token's own filters on that server, applied after the server's (see [Token policies](#token-policies)): `tools`, `prompts` and `resources`, at least one, each a non-empty `allow` or `deny` list or `none` |
+| `policies.<token>.servers.<server>` | none | The token's own filters on that server, applied after the server's (see [Token policies](#token-policies)): `tools`, `prompts` and `resources`, each a non-empty `allow` or `deny` list or `none`, and `approve`; at least one of the four |
+| `policies.<token>.servers.<server>.approve` | none | Tool name patterns whose calls by this token wait for approval, in addition to the server's `approve` (see [Approvals](#approvals)) |
+| `approvals.timeout` | `5m` | How long a held call waits for a decision, `1s` to `1h`; then it is answered as not approved |
+| `approvals.webhook.url` | required with `webhook` | Where each held call is posted as JSON; https, or http on a loopback address, without a query |
+| `approvals.webhook.secret` | none | Key of the `X-Mcp-Gate-Signature: sha256=<hex>` HMAC of each notice, at least 16 characters; put it in the environment |
+| `approvals.webhook.linkURL` | none | The gate's base URL as the webhook's receiver reaches it; the notices then carry one-time `approveURL` and `denyURL` that decide with a `POST`. https, or http on a loopback address, without a query |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |
@@ -143,6 +155,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `redact.files.roots` | required with `files` | Absolute directories the tools write to (not `/`, not `$HOME` or a directory above it); only files under them are read, and a path only the arguments name when written during the call; without a usable `$HOME` the check is skipped with a warning |
 | `redact.files.maxBytes` | `20MiB` | Largest file scanned, `1KiB` to `1GiB`. A larger text file withholds the whole result; a larger binary file passes |
 | `toolPins` | `warn` | What the gate does when the server lists a tool whose definition differs from its pin, or a new one: `warn` logs it and serves it, `hold` logs it and hides it until [`mcp-gate toolpins accept`](../commands/toolpins.md) accepts it (needs a state directory), `off` compares nothing (see [Tool pins](#tool-pins)) |
+| `approve` | none | Tool name patterns whose calls wait for the owner's approval before they are forwarded: a name, or a prefix ending in `*` (`delete_*`; `*` alone is every tool) (see [Approvals](#approvals)) |
 | `forwardMeta` | none | `_meta` keys of a client request passed to the server, by exact name, such as `example.com/trace`. Others are dropped: they describe the client. `progressToken` and `mcp`/`modelcontextprotocol`-prefixed keys are the gate's and cannot be listed |
 
 Each server has exactly one of `stdio` and `http`. Every server that is not `public` must accept at least one token, and no two tokens a server accepts may have the same value. Token names are lower-case letters, digits, `.`, `_` and `-`; values may not contain spaces or control characters.
@@ -152,6 +165,12 @@ Each server has exactly one of `stdio` and `http`. Every server that is not `pub
 `policies.<token>.servers.<server>` narrows what one token sees and may call on one server. Its `tools`, `prompts` and `resources` are matched like a server's filters of the same name, by the same keys, and apply after them: an entry reaches the token only when both pass it. Each is a non-empty `allow` list, a non-empty `deny` list, or `none`, which hides every entry of its kind (`tools: none`). Empty lists, and a filter written without a value (`tools:` or `tools: ~`), are rejected, since a server's empty tool allow list exposes every tool and a snippet moved from one to the other would then fail open; `mcp-gate check` names `none` in its error. Entries are the server's own names, without the `<server>__` prefix of `/mcp`, and have no surrounding space. A filter left out, and a server the policy does not name, narrow nothing. The policy holds on the server's own route and on `/mcp` alike (see [serve](../commands/serve.md#token-policies)).
 
 The key under `policies` is a token name as each server knows it: a token from `auth.tokens` on the servers that inherit them, and a server's own `auth.tokens` entry on that server. Two servers with `inherit: false` may each have their own token of the same name, with different values; a policy under that name applies on each server to that server's token. Each server named must exist and accept the token; a public server takes no token, so it cannot be named. `mcp-gate check` reports a policy that breaks these rules, such as `policies.phone.servers.nope: is not a server in servers`, and warns about a policy on a disabled server, which has no effect until the server is enabled. It also warns about a server's `tools: {allow: []}`, which exposes every tool.
+
+## Approvals
+
+A server's `approve` and a token's `approve` on it name the tools whose calls wait for the owner before they are forwarded; a token's list only adds to the server's. Patterns are the server's own tool names, without the `<server>__` prefix of `/mcp`, and may end in `*` to match a prefix. The server's filter and the token's policy are checked first: a tool either hides is refused as unknown and never held. Prompts and resource reads are never held.
+
+Someone must be able to decide: a config with any `approve` list needs `admin.tokens`, for [`mcp-gate approvals`](../commands/approvals.md), or `approvals.webhook.linkURL`, for the links. What the call, the notice and the audit line look like is in [serve](../commands/serve.md#approvals). A change of `approve` or `approvals` takes effect at a reload, which also denies every pending approval.
 
 ## Values
 
