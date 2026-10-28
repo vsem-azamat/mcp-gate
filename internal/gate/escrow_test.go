@@ -212,6 +212,36 @@ func TestFileScanning(t *testing.T) {
 	}
 }
 
+// TestFileKeptAfterReload checks that a reload which rebuilds a server's mirror keeps the gate's
+// start as the moment files count as written since: a file written after the start, older than
+// the reload by more than the ctime slack, is still kept in the escrow.
+func TestFileKeptAfterReload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	doc := func(maxBytes string) string {
+		return configDoc("", map[string]string{
+			"dl": stdioServer(t, testkit.Fake{}, fmt.Sprintf("redact:\n  files: {tools: [echo], roots: [%q], maxBytes: %s}\n", dir, maxBytes)),
+		})
+	}
+	r := startGate(t, doc("1KiB"), gateOpts{escrowKey: escrowKey})
+	r.waitReady(t, "dl")
+	path := filepath.Join(dir, "cached.env")
+	if err := os.WriteFile(path, []byte("DB_PASS"+"WORD="+"hunter2!x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3500 * time.Millisecond) // past the 3 second ctime slack
+	r.reload(t, doc("2KiB"))            // a new mirror, and a new scanner
+	r.waitReady(t, "dl")
+	cs := r.connect(t, "dl", clientOpts{})
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "Media downloaded to " + path + "."}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := textOf(t, res); escrowMarkerRE.FindStringSubmatch(got) == nil {
+		t.Errorf("the file written after the start was not kept after a reload: %q", got)
+	}
+}
+
 // TestEscrowPerServer checks redact.escrow: false and escrow.sourceArguments.
 func TestEscrowPerServer(t *testing.T) {
 	dir := t.TempDir()

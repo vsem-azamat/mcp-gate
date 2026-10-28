@@ -57,7 +57,7 @@ A file whose name ends in `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx` or `.ppk`
 
 ### Requirement: Withholding
 
-A file with secrets SHALL be withheld: kept in the escrow when it is on, the server's `redact.escrow` is true and its inode changed at or after 3 seconds before the gate started (an older file is withheld without being kept), and every content block whose text, URI, embedded resource text, or `_meta` (its own or its embedded resource's, at any depth) mentions its path (as reported, cleaned or resolved) SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content and of the result's `_meta` that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
+A file with secrets SHALL be withheld: kept in the escrow when it is on, the server's `redact.escrow` is true and its inode changed at or after 3 seconds before the gate started, a moment a reload does not move (an older file is withheld without being kept), and every content block whose text, URI, embedded resource text, or `_meta` (its own or its embedded resource's, at any depth) mentions its path (as reported, cleaned or resolved) SHALL be replaced by a text block `<marker> file_name=<name> size=<n> bytes; contains: <kinds>. The file is withheld from this conversation; the owner can release it.`, and every string of the structured content and of the result's `_meta` that mentions it, at any depth, by the marker alone, so that a schema that requires the member still validates. The marker SHALL be `[REDACTED:file #<handle>]` when the file was kept and `[REDACTED:file]` otherwise, in which case the notice SHALL end after `conversation`. The file name SHALL be redacted. The result the downstream returned SHALL NOT be modified. Each withheld file SHALL count as one redaction in the audit line.
 
 #### Scenario: File with a password
 
@@ -68,6 +68,11 @@ A file with secrets SHALL be withheld: kept in the escrow when it is on, the ser
 
 - **WHEN** the same happens with the escrow off, or on a server with `redact.escrow: false`
 - **THEN** the marker is `[REDACTED:file]`
+
+#### Scenario: File written before a reload
+
+- **WHEN** a file with secrets is written after the gate started, a reload more than 3 seconds later changes the server's `redact` settings, and a file tool then reports its path
+- **THEN** the file is kept and the marker carries its handle
 
 ### Requirement: Failing closed
 

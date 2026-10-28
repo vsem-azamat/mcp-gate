@@ -38,7 +38,7 @@ mcp-proxy passed each request's `_meta` to the server as it was. The import writ
 
 ## Tokens
 
-mcp-proxy tokens are a list; mcp-gate names each token, and the name shows up in the audit log. A token written as `${VAR}` is named after its variable, lower-cased, without the prefix up to the last `_` that every token variable shares: `${HUB_TOKEN_LAPTOP}`, `${HUB_TOKEN_PHONE}` and `${HUB_TOKEN_MAIL}` become `laptop`, `phone` and `mail`. When that does not give distinct valid names, or a token is written in the file (which gives a warning), the tokens are named `token1`, `token2` and so on. Rename them freely; only the values matter to clients.
+mcp-proxy tokens are a list; mcp-gate names each token, and the name shows up in the audit log. A token written as `${VAR}` is named after its variable, lower-cased, without the prefix up to the last `_` that the global token variables share (all token variables, when there are fewer than two global tokens): `${HUB_TOKEN_LAPTOP}`, `${HUB_TOKEN_PHONE}` and `${HUB_TOKEN_MAIL}` become `laptop`, `phone` and `mail`, and a server's own `${MAIL_TOKEN}` stays `mail_token`. When that does not give distinct valid names, or a token is written in the file (which gives a warning), the tokens are named `token1`, `token2` and so on. Rename them freely; only the values matter to clients.
 
 A server whose `authTokens` are the global ones inherits them. One with its own list gets `auth.inherit: false` and its tokens, since in mcp-proxy its list replaced the global one. One left without any token gets `auth.public: true`.
 
@@ -48,7 +48,7 @@ A server whose effective options have a `redact` block keeps it, with `ru: true`
 
 The escrow keys map one to one; no key hash is written to the config. mcp-gate reads mcp-proxy's `MCP_HUB_ESCROW_KEY_SHA256` as a deprecated name of `MCP_GATE_ESCROW_KEY_SHA256` (see [serve](serve.md#escrow)). A server's own `escrowMaxEntries`, which mcp-proxy ignored, is dropped with a warning. File scanning is written only where mcp-proxy did scan: roots that are not absolute paths are dropped, and file tools left without a root, or roots without tools, are dropped with a warning.
 
-mcp-proxy children inherited the whole environment; mcp-gate children get only `inheritEnv` and `env`. A command such as `/usr/bin/env -u SECRET -u HOME MODE=fast server --stdio` is unwrapped: the command becomes `server --stdio`, `MODE=fast` goes to `env`, `HOME` is removed from `inheritEnv`, and `SECRET` is dropped with a comment, since it is not inherited anyway. `-i` gives `inheritEnv: []` and `-C dir` gives `cwd`. A form the importer does not understand is kept as it is, with a note.
+mcp-proxy children inherited the whole environment; mcp-gate children get only `inheritEnv` and `env`. A command such as `/usr/bin/env -u SECRET -u HOME MODE=fast server --stdio` is unwrapped: the command becomes `server --stdio`, `MODE=fast` goes to `env`, `HOME` is removed from `inheritEnv`, and `SECRET` is dropped with a comment, since it is not inherited anyway; a name that is not a valid variable name is quoted in that comment and in warnings, so that line breaks and control characters in it stay readable. `-i` gives `inheritEnv: []` and `-C dir` gives `cwd`. A form the importer does not understand is kept as it is, with a note.
 
 ## OAuth
 

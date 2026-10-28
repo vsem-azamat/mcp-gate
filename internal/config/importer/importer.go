@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -486,9 +487,9 @@ func (im *importer) unwrap(path string, s *server, st *config.Stdio, w envWrappe
 			inherit = slices.DeleteFunc(inherit, func(v string) bool { return v == name })
 			removed = append(removed, name)
 		case strings.HasPrefix(name, "LC_"):
-			im.warn("%s: env -u %s cannot be kept, since the child inherits LC_*; set it in env if it matters", path, name)
+			im.warn("%s: env -u %s cannot be kept, since the child inherits LC_*; set it in env if it matters", path, shownName(name))
 		default:
-			dropped = append(dropped, name)
+			dropped = append(dropped, shownName(name))
 		}
 	}
 	if len(removed) > 0 {
@@ -500,6 +501,19 @@ func (im *importer) unwrap(path string, s *server, st *config.Stdio, w envWrappe
 			" is dropped: a stdio child inherits only inheritEnv (default "+
 			strings.Join(config.DefaultInheritEnv, " ")+") and env.")
 	}
+}
+
+// varNameRE matches a valid environment variable name.
+var varNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// shownName returns a variable name from the command line as comments and warnings show it: as
+// it is when it is a valid name, else quoted as a Go string, so that a line break, a control
+// character or a terminal escape in it stays visible and harmless in the file and on stderr.
+func shownName(name string) string {
+	if varNameRE.MatchString(name) {
+		return name
+	}
+	return strconv.Quote(name)
 }
 
 func (im *importer) http(o *object, s *server, url string) error {

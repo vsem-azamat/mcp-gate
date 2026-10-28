@@ -82,6 +82,7 @@ var serverFields = map[string]fieldClass{
 	"ForwardMeta":     mirrorField,
 	"Auth":            routeField,
 	"Log":             routeField,
+	"Transport":       derivedField,
 }
 
 // pick returns the values of the fields of v (a config.Config or config.Server) that table gives
