@@ -255,22 +255,32 @@ func grantLine(store *oauth.Store, name string, s *config.Server, now time.Time)
 	return fmt.Sprintf("%s (%s, since %s): %s", state, client, g.ObtainedAt.UTC().Format(time.RFC3339), describeTokens(g, now)), usable
 }
 
-// authLogout revokes a server's grant at its authorization server, when that offers a
-// revocation endpoint, and deletes it. A grant that cannot be revoked is deleted all the same.
+// authLogout deletes a server's grant and then revokes it at its authorization server, when
+// that offers a revocation endpoint. The grant lock is held only to read and delete the file, so
+// that a refresh waiting for it is not held up by requests to the authorization server; a grant
+// that cannot be revoked is gone all the same.
 func authLogout(ctx context.Context, store *oauth.Store, name string, s *config.Server, stdout, stderr io.Writer) int {
 	unlock, err := store.Lock(ctx, name)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", err)
 		return exitTrouble
 	}
-	defer unlock()
-	revoked := "The authorization server offers no revocation endpoint, so it keeps the grant until it expires; revoke it there to end it sooner."
-	g, err := store.Load(name)
+	g, loadErr := store.Load(name)
+	ok, err := store.Delete(name)
+	unlock()
 	switch {
 	case err != nil:
-		revoked = "The grant could not be read, so it was not revoked; revoke it at the authorization server to end it sooner."
 		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", err)
-	case g != nil:
+		return exitTrouble
+	case !ok:
+		_, _ = fmt.Fprintf(stdout, "%s was not logged in.\n", name)
+		return exitOK
+	}
+	revoked := "The authorization server offers no revocation endpoint, so it keeps the grant until it expires; revoke it there to end it sooner."
+	if loadErr != nil {
+		revoked = "The grant could not be read, so it was not revoked; revoke it at the authorization server to end it sooner."
+		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", loadErr)
+	} else if g != nil {
 		has, err := oauth.Revoke(ctx, oauth.RevokeOptions{Grant: g, Config: *s.HTTP.OAuth, HTTPClient: oauth.NewHTTPClient(s.HTTP.URL)})
 		switch {
 		case err != nil:
@@ -280,15 +290,6 @@ func authLogout(ctx context.Context, store *oauth.Store, name string, s *config.
 			revoked = "The authorization server revoked it."
 		}
 	}
-	ok, err := store.Delete(name)
-	switch {
-	case err != nil:
-		_, _ = fmt.Fprintf(stderr, "mcp-gate auth logout: %v\n", err)
-		return exitTrouble
-	case !ok:
-		_, _ = fmt.Fprintf(stdout, "%s was not logged in.\n", name)
-	default:
-		_, _ = fmt.Fprintf(stdout, "Logged out of %s: its grant is deleted. %s\n", name, revoked)
-	}
+	_, _ = fmt.Fprintf(stdout, "Logged out of %s: its grant is deleted. %s\n", name, revoked)
 	return exitOK
 }

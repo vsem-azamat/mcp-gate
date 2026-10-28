@@ -172,7 +172,7 @@ Learned protocol pins and OAuth grants stay in the state directory. Without the 
 
 ## Hardening and its trade-offs
 
-Every sandboxing setting of the unit also applies to the stdio children, which may be Node, Python or a headless browser. Both units therefore leave out settings that common servers do not tolerate:
+Every sandboxing setting of the unit also applies to the stdio children, which may be Node, Python or a headless browser. Both units therefore leave out settings that common servers do not tolerate, and the user unit those a user manager cannot apply:
 
 | Setting | Why it is not set |
 | --- | --- |
@@ -183,8 +183,6 @@ Every sandboxing setting of the unit also applies to the stdio children, which m
 | `ProtectHome=yes`, `ProtectSystem=strict` (user unit) | Children of a user service keep state under `$HOME` |
 | `PrivateDevices`, `ProtectClock`, `ProtectKernelLogs`, `CapabilityBoundingSet` (user unit) | Need privileges a user manager may not have |
 | `ProtectKernelModules` (user unit) | An unprivileged user cannot load modules anyway; it fails with 218/CAPABILITIES under AppArmor-restricted user namespaces |
-
-The user unit leaves out `ProtectKernelModules`: an unprivileged user cannot load kernel modules anyway, and where AppArmor restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu default since 24.04) the namespace gets no capabilities, so the setting cannot drop its capability and the unit fails with status 218/CAPABILITIES. Without it, the shipped user unit starts on such a host (checked on Ubuntu 26.04 with systemd 259).
 
 In a user manager, `PrivateTmp`, `ProtectSystem`, `ProtectKernelTunables` and `ProtectControlGroups` are implemented with a user namespace, so the user unit runs with an implicit `PrivateUsers=yes`: files and groups of other users show up as owned by `nobody` to the gate and its children (access itself is unchanged). Where unprivileged user namespaces are turned off, systemd cannot create the namespace at all. There, or for a child that must see real owners, turn them off in a drop-in:
 

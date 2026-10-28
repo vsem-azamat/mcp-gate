@@ -61,6 +61,11 @@ type OAuthOptions struct {
 	TrailingSlash bool
 	// Revocation serves a token revocation endpoint (RFC 7009) and names it in the metadata.
 	Revocation bool
+	// RevokeRefreshOnly answers a revocation of an access token with unsupported_token_type.
+	RevokeRefreshOnly bool
+	// RevocationEndpoint, if set, is the revocation endpoint the metadata names, in place of
+	// the served one.
+	RevocationEndpoint string
 }
 
 // OAuthServer is a fake MCP server behind OAuth on one loopback listener: protected resource
@@ -85,6 +90,7 @@ type OAuthServer struct {
 	lastToken     url.Values
 	revocations   []url.Values // the forms of the revocation requests, client secrets removed
 	refuseRevoke  int          // the status the revocation endpoint answers with, if not zero
+	brokenMeta    bool         // the authorization server metadata answers 500
 }
 
 type oauthClient struct {
@@ -221,6 +227,13 @@ func (s *OAuthServer) RefuseRevocation(status int) {
 	s.refuseRevoke = status
 }
 
+// BreakMetadata makes the authorization server metadata answer 500.
+func (s *OAuthServer) BreakMetadata() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.brokenMeta = true
+}
+
 // Revocations returns the forms of the revocation requests so far, without client secrets.
 func (s *OAuthServer) Revocations() []url.Values {
 	s.mu.Lock()
@@ -324,6 +337,13 @@ func (s *OAuthServer) resourceMetadata(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *OAuthServer) serverMetadata(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	broken := s.brokenMeta
+	s.mu.Unlock()
+	if broken {
+		http.Error(w, "broken", http.StatusInternalServerError)
+		return
+	}
 	issuer := s.Issuer()
 	if s.opts.MetadataIssuer != "" {
 		issuer = s.opts.MetadataIssuer
@@ -343,6 +363,9 @@ func (s *OAuthServer) serverMetadata(w http.ResponseWriter, _ *http.Request) {
 	}
 	if s.opts.Revocation {
 		m["revocation_endpoint"] = s.Issuer() + "/revoke"
+	}
+	if s.opts.RevocationEndpoint != "" {
+		m["revocation_endpoint"] = s.opts.RevocationEndpoint
 	}
 	if s.opts.OfflineAccess {
 		m["scopes_supported"] = []string{"read", "offline_access"}
@@ -430,6 +453,10 @@ func (s *OAuthServer) revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok := r.PostForm.Get("token")
+	if _, access := s.access[tok]; access && s.opts.RevokeRefreshOnly {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported_token_type"})
+		return
+	}
 	if s.refresh[tok] == id {
 		delete(s.refresh, tok)
 	}

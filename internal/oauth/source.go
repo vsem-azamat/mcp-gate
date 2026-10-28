@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"golang.org/x/oauth2"
 )
 
@@ -152,7 +153,9 @@ func (s *Source) validLocked(g *Grant) bool {
 func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Response) error {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
+	if resp.StatusCode != http.StatusUnauthorized || insufficientScope(resp) {
+		// A 401 with error="insufficient_scope" refuses this request, not the token: like a
+		// 403, a refresh would not help and must not count against the grant.
 		return errors.New("oauth: the server refused the request (" + http.StatusText(resp.StatusCode) + "); the grant's scopes may not cover it")
 	}
 	used, _ := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
@@ -165,6 +168,9 @@ func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Re
 	case used != s.grant.AccessToken:
 		return nil // the token changed since the request was sent: retry with the new one
 	}
+	// fmu is let go during the refresh, so an Accepted for the token that got this 401 (another
+	// request with it, answered before) can reset the count meanwhile: the count then ends one
+	// lower than it might, which errs towards keeping the grant, never towards dropping it.
 	s.fmu.Lock()
 	if used == s.forced {
 		s.forcedN++
@@ -201,6 +207,20 @@ func (s *Source) Accepted(req *http.Request) {
 	if s.forced != "" && used == s.forced {
 		s.forced, s.forcedN = "", 0
 	}
+}
+
+// insufficientScope reports a 401 whose Bearer challenge names the error insufficient_scope.
+func insufficientScope(resp *http.Response) bool {
+	cs, err := oauthex.ParseWWWAuthenticate(resp.Header.Values("WWW-Authenticate"))
+	if err != nil {
+		return false
+	}
+	for _, c := range cs {
+		if c.Scheme == "bearer" && c.Params["error"] == "insufficient_scope" {
+			return true
+		}
+	}
+	return false
 }
 
 // reloadLocked adopts the grant file when it changed since it was read.

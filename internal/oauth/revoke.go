@@ -68,7 +68,14 @@ func Revoke(ctx context.Context, o RevokeOptions) (bool, error) {
 		if t.token == "" {
 			continue
 		}
-		if err := revokeToken(ctx, o.HTTPClient, asm.RevocationEndpoint, cl, t.token, t.hint); err != nil {
+		err := revokeToken(ctx, o.HTTPClient, asm.RevocationEndpoint, cl, t.token, t.hint)
+		var unsupported errUnsupportedTokenType
+		if t.hint == "access_token" && g.RefreshToken != "" && errors.As(err, &unsupported) {
+			// Revoking access tokens is optional (RFC 7009, section 2.2.1); the grant ended with
+			// its refresh token.
+			continue
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("revoking the %s: %w", t.hint, err))
 		}
 	}
@@ -101,5 +108,13 @@ func revokeToken(ctx context.Context, hc *http.Client, endpoint string, cl clien
 		msg += " " + errorCode(e.Error)
 	}
 	// The description is the server's text, which could echo the token.
+	if resp.StatusCode == http.StatusBadRequest && e.Error == "unsupported_token_type" {
+		return errUnsupportedTokenType{msg}
+	}
 	return errors.New(msg)
 }
+
+// errUnsupportedTokenType is the answer of a server that does not revoke tokens of that type.
+type errUnsupportedTokenType struct{ msg string }
+
+func (e errUnsupportedTokenType) Error() string { return e.msg }

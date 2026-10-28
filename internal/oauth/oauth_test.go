@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -674,6 +675,146 @@ func TestExpiresInForms(t *testing.T) {
 		g := login(t, srv, config.OAuth{}, nil)
 		if !g.Expiry.IsZero() != tc.want {
 			t.Errorf("expires_in %s: expiry %v", tc.ttl, g.Expiry)
+		}
+	}
+}
+
+// unauthorized answers a request that carried token with 401 and the given challenge, through
+// src.Authorize, as the SDK's transport does.
+func unauthorized(t *testing.T, src *oauth.Source, token, challenge string) error {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://127.0.0.1/mcp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp := &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}
+	if challenge != "" {
+		resp.Header.Set("WWW-Authenticate", challenge)
+	}
+	return src.Authorize(t.Context(), req, resp)
+}
+
+// accepted reports a successful response to a request that carried token ("" for none).
+func accepted(t *testing.T, src *oauth.Source, token string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://127.0.0.1/mcp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	src.Accepted(req)
+}
+
+func current(t *testing.T, src *oauth.Source) string {
+	t.Helper()
+	tok, err := src.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok.AccessToken
+}
+
+// Only a success with the token the last 401 refresh obtained starts the count of 401s again.
+func TestAcceptedResetsOnlyForTheRefreshedToken(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}})
+	store := oauth.NewStore(t.TempDir())
+	g := login(t, srv, config.OAuth{}, nil)
+	if err := store.Save("notes", g); err != nil {
+		t.Fatal(err)
+	}
+
+	src := newSource(t, store, srv.URL(), nil, nil)
+	t0 := current(t, src)
+	if err := unauthorized(t, src, t0, ""); err != nil {
+		t.Fatal(err)
+	}
+	t1 := current(t, src)
+	accepted(t, src, t0) // the old token
+	accepted(t, src, "") // no token
+	if err := unauthorized(t, src, t1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := unauthorized(t, src, current(t, src), ""); !errors.Is(err, oauth.ErrLoginRequired) || !src.LoginRequired() {
+		t.Fatalf("the third 401 in a row = %v; a success with another token reset the count", err)
+	}
+
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, g)); err != nil {
+		t.Fatal(err)
+	}
+	src = newSource(t, store, srv.URL(), nil, nil)
+	if err := unauthorized(t, src, current(t, src), ""); err != nil {
+		t.Fatal(err)
+	}
+	accepted(t, src, current(t, src)) // the refreshed token works
+	for i := range 2 {
+		if err := unauthorized(t, src, current(t, src), ""); err != nil || src.LoginRequired() {
+			t.Fatalf("401 %d after the refreshed token was accepted: %v", i+1, err)
+		}
+	}
+	if err := unauthorized(t, src, current(t, src), ""); !errors.Is(err, oauth.ErrLoginRequired) {
+		t.Errorf("the third 401 in a row after the reset = %v", err)
+	}
+}
+
+// A 401 with error="insufficient_scope" refreshes nothing and does not count against the grant.
+func TestInsufficientScopeIsNotARejection(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Fake: testkit.Fake{Name: "notes"}})
+	store := oauth.NewStore(t.TempDir())
+	if err := store.Save("notes", login(t, srv, config.OAuth{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	src := newSource(t, store, srv.URL(), nil, nil)
+	for range 5 {
+		err := unauthorized(t, src, current(t, src), `Bearer error="insufficient_scope", scope="mail.send"`)
+		if err == nil || errors.Is(err, oauth.ErrLoginRequired) || !strings.Contains(err.Error(), "scopes") {
+			t.Fatalf("insufficient_scope = %v", err)
+		}
+	}
+	if srv.Refreshes() != 0 || src.LoginRequired() {
+		t.Errorf("%d refreshes, login required %v", srv.Refreshes(), src.LoginRequired())
+	}
+}
+
+// Revoke reports what stops it, and treats an access token the server does not revoke as done
+// once the refresh token is revoked.
+func TestRevoke(t *testing.T) {
+	revoke := func(srv *testkit.OAuthServer, g *oauth.Grant, conf config.OAuth) (bool, error) {
+		return oauth.Revoke(t.Context(), oauth.RevokeOptions{Grant: g, Config: conf, HTTPClient: httpClient(t)})
+	}
+
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true, RevokeRefreshOnly: true})
+	g := login(t, srv, config.OAuth{}, nil)
+	if has, err := revoke(srv, g, config.OAuth{}); !has || err != nil || srv.Valid(g.RefreshToken) {
+		t.Errorf("refresh-only revocation = %v, %v", has, err)
+	}
+
+	srv = testkit.NewOAuthServer(t, testkit.OAuthOptions{RevocationEndpoint: "http://auth.example.com/revoke"})
+	g = login(t, srv, config.OAuth{}, nil)
+	if has, err := revoke(srv, g, config.OAuth{}); !has || err == nil || !strings.Contains(err.Error(), "neither https nor loopback") {
+		t.Errorf("plain-http endpoint = %v, %v", has, err)
+	}
+
+	srv = testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true})
+	g = login(t, srv, config.OAuth{}, nil)
+	other := testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true})
+	if has, err := revoke(srv, g, config.OAuth{AuthServerMetadataURL: other.MetadataURL()}); has || err == nil || !strings.Contains(err.Error(), "another issuer") {
+		t.Errorf("metadata of another issuer = %v, %v", has, err)
+	}
+	srv.BreakMetadata()
+	if has, err := revoke(srv, g, config.OAuth{}); has || err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Errorf("unreadable metadata = %v, %v", has, err)
+	}
+	if !srv.Valid(g.RefreshToken) || len(srv.Revocations()) != 0 {
+		t.Error("a revocation was sent")
+	}
+	for _, secret := range []string{g.AccessToken, g.RefreshToken} {
+		if _, err := revoke(srv, g, config.OAuth{}); err != nil && strings.Contains(err.Error(), secret) {
+			t.Error("an error names a token")
 		}
 	}
 }
