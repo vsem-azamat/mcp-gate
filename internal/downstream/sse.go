@@ -1,13 +1,17 @@
 package downstream
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -147,7 +151,53 @@ func (c *sseConn) Write(ctx context.Context, m jsonrpc.Message) error {
 type legacyTransport struct {
 	origin string
 	auth   Authorizer
+	seen   *endpointLog
 	next   http.RoundTripper
+}
+
+// maxEndpoints bounds the URLs an endpointLog keeps.
+const maxEndpoints = 8
+
+// endpointLog keeps the URLs last requested of a legacy server, refused ones too, so that
+// Supervisor.HideURL replaces them exactly as the HTTP client renders them in its errors, whatever
+// characters the server put in them.
+type endpointLog struct {
+	mu   sync.Mutex
+	urls []string // newest last
+}
+
+func (l *endpointLog) record(u *url.URL) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, f := range []string{u.String(), u.Redacted()} {
+		if i := slices.Index(l.urls, f); i >= 0 {
+			l.urls = slices.Delete(l.urls, i, i+1)
+		}
+		l.urls = append(l.urls, f)
+	}
+	if n := len(l.urls) - 2*maxEndpoints; n > 0 {
+		l.urls = slices.Delete(l.urls, 0, n)
+	}
+}
+
+// forms returns the kept URLs as they are, as Go quotes them (%q, as in a url.Error) and as JSON
+// escapes them, longest first, so that no form leaves a part of a longer one behind.
+func (l *endpointLog) forms() []string {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	urls := slices.Clone(l.urls)
+	l.mu.Unlock()
+	var out []string
+	for _, u := range urls {
+		out = append(out, u, strings.Trim(strconv.Quote(u), `"`))
+		if j, err := json.Marshal(u); err == nil {
+			out = append(out, strings.Trim(string(j), `"`))
+		}
+	}
+	slices.SortFunc(out, func(a, b string) int { return cmp.Or(len(b)-len(a), strings.Compare(a, b)) })
+	return slices.Compact(out)
 }
 
 // originOf returns the scheme, host and port of u, lower-cased, with the default port made
@@ -167,6 +217,7 @@ func originOf(u *url.URL) string {
 }
 
 func (t *legacyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.seen.record(req.URL)
 	if originOf(req.URL) != t.origin {
 		if req.Body != nil {
 			_ = req.Body.Close()

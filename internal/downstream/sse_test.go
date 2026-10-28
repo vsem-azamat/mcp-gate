@@ -463,3 +463,53 @@ func TestSSEFailedWriteForgetsTheRequest(t *testing.T) {
 		}
 	}
 }
+
+// TestSSEHideHostIsLinear hides URLs in a 1 MiB text of URLs glued together, as a server could
+// put in an error, in time linear in its length.
+func TestSSEHideHostIsLinear(t *testing.T) {
+	t.Parallel()
+	s, err := New(Options{Name: "remote", HTTP: &HTTP{URL: "https://mcp.example.com/sse", SSE: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unit := range []string{"https://a", "https://mcp.example.comx", "http:\\/\\/a", "https://mcp.example.com/"} {
+		text := strings.Repeat(unit, (1<<20)/len(unit))
+		began := time.Now()
+		got := s.HideURL(text)
+		if d := time.Since(began); d > 5*time.Second {
+			t.Errorf("%q repeated: HideURL took %s", unit, d)
+		}
+		if strings.HasSuffix(unit, "/") && strings.Contains(got, "mcp.example.com") {
+			t.Errorf("%q repeated: a URL of the host is left", unit)
+		}
+	}
+}
+
+// TestSSEHideRequestedEndpoint hides the session id of a message endpoint whose query holds
+// characters a URL does not, which Go sends as they are: the URL as requested is replaced whole.
+func TestSSEHideRequestedEndpoint(t *testing.T) {
+	t.Parallel()
+	for _, query := range []string{"a=|{}^`", "a=<b>", "a=x y", `a="q"`, "a=é"} {
+		s, err := New(Options{Name: "remote", HTTP: &HTTP{URL: "https://mcp.example.com/sse", SSE: true}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lt, ok := s.http.Transport.(*legacyTransport)
+		if !ok {
+			t.Fatalf("transport %T", s.http.Transport)
+		}
+		lt.next = roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, io.EOF })
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://mcp.example.com/messages?"+query+"&sessionid=sess-secret", nil)
+		if err != nil {
+			t.Fatalf("%q: %v", query, err)
+		}
+		resp, rtErr := lt.RoundTrip(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		text := (&url.Error{Op: "Post", URL: req.URL.Redacted(), Err: rtErr}).Error()
+		if got := s.HideURL(text); strings.Contains(got, "secret") || !strings.Contains(got, "<servers.remote.http.url>") {
+			t.Errorf("HideURL(%q) = %q", text, got)
+		}
+	}
+}

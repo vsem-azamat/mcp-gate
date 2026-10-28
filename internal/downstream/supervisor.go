@@ -334,14 +334,15 @@ func (e *NotReadyError) Error() string {
 
 // Supervisor keeps one downstream server connected.
 type Supervisor struct {
-	opts     Options
-	logger   *slog.Logger
-	redactor atomic.Pointer[redact.Engine]
-	client   *mcp.Client
-	stderr   *procutil.LineLog
-	http     *http.Client
-	httpBase *http.Transport
-	pending  *pendingCalls // the requests in flight on the legacy HTTP+SSE transport
+	opts      Options
+	logger    *slog.Logger
+	redactor  atomic.Pointer[redact.Engine]
+	client    *mcp.Client
+	stderr    *procutil.LineLog
+	http      *http.Client
+	httpBase  *http.Transport
+	pending   *pendingCalls // the requests in flight on the legacy HTTP+SSE transport
+	endpoints *endpointLog  // the URLs last requested on the legacy HTTP+SSE transport
 
 	mu         sync.Mutex
 	state      State
@@ -408,7 +409,8 @@ func New(opts Options) (*Supervisor, error) {
 			if err != nil || !u.IsAbs() {
 				return nil, errors.New("downstream: the URL of an SSE server must be absolute")
 			}
-			s.http.Transport = &legacyTransport{origin: originOf(u), auth: opts.HTTP.OAuth, next: s.http.Transport}
+			s.endpoints = &endpointLog{}
+			s.http.Transport = &legacyTransport{origin: originOf(u), auth: opts.HTTP.OAuth, seen: s.endpoints, next: s.http.Transport}
 		}
 	}
 	if opts.Disabled {
@@ -454,8 +456,13 @@ func (s *Supervisor) HideURL(text string) string {
 	}
 	placeholder := "<servers." + s.opts.Name + ".http.url>"
 	if h.SSE {
-		// First, so that no literal form of the URL leaves the query after it, which on the
-		// SDK's own endpoint (the stream's URL with ?sessionid=) holds the session id.
+		// The URLs last requested, exactly as the HTTP client quotes them, whatever characters
+		// their query holds; then every URL on the host. Both before the literal forms of the
+		// configured URL, so that none of those leaves a query behind, which on the SDK's own
+		// endpoint (the stream's URL with ?sessionid=) holds the session id.
+		for _, f := range s.endpoints.forms() {
+			text = strings.ReplaceAll(text, f, placeholder)
+		}
 		text = hideHost(text, h.URL, placeholder)
 	}
 	forms := []string{h.URL, strings.Trim(strconv.Quote(h.URL), `"`)}
@@ -503,13 +510,22 @@ func hideHost(text, raw, placeholder string) string {
 		if st[0] < pos {
 			continue // inside a URL already hidden
 		}
-		end := st[1]
+		// The authority alone is read first: it ends before the next URL's slashes, so each byte
+		// is read once however many URLs are glued together.
+		authEnd := st[1]
+		for authEnd < len(text) && urlByte(text[authEnd]) && strings.IndexByte(`/?#\`, text[authEnd]) < 0 {
+			authEnd++
+		}
+		if hostOf(text[st[1]:authEnd]) != host {
+			continue
+		}
+		end := authEnd
 		for end < len(text) && urlByte(text[end]) {
 			end++
 		}
-		authEnd := st[1] + strings.IndexAny(text[st[1]:end]+"/", `/?#\`)
-		if hostOf(text[st[1]:authEnd]) != host {
-			continue
+		// Punctuation that ends a sentence after a URL is not part of it.
+		for end > authEnd && strings.IndexByte(".,:;!?", text[end-1]) >= 0 {
+			end--
 		}
 		b.WriteString(text[pos:st[0]])
 		b.WriteString(placeholder)
