@@ -322,35 +322,73 @@ func TestCrashRestarts(t *testing.T) {
 	mustEcho(t, s)
 }
 
+// TestBackoff checks the real delays between restarts of a server that exits at once. Timers
+// never fire early, so the time to a number of restarts is at least the sum of the delays; the
+// upper bound is far below the sum the delays would reach without MaxBackoff.
 func TestBackoff(t *testing.T) {
 	t.Parallel()
 	o := stdioOptions(t, testkit.Fake{ExitAtStart: 7})
+	o.InitialBackoff = 50 * time.Millisecond
+	o.MaxBackoff = 100 * time.Millisecond
+	const restarts = 7
+	var capped, uncapped time.Duration // the delays before the restarts, with and without the cap
+	for i := range restarts {
+		d := o.InitialBackoff << i
+		uncapped += d
+		capped += min(d, o.MaxBackoff)
+	}
+	began := time.Now()
 	s := start(t, o)
-	st := waitFor(t, s, "several restarts", func(st Status) bool { return st.Restarts >= 4 && st.State == Backoff })
+	st := waitFor(t, s, "several restarts", func(st Status) bool { return st.Restarts >= restarts })
+	took := time.Since(began)
+	if took < capped {
+		t.Errorf("%d restarts took %v, less than the delays (%v)", restarts, took, capped)
+	}
+	if took > uncapped/2 {
+		t.Errorf("%d restarts took %v; without the cap the delays alone are %v", restarts, took, uncapped)
+	}
 	if st.LastError == "" {
 		t.Error("no error recorded")
 	}
-	var delays []time.Duration
-	d := o.InitialBackoff
-	for range 5 {
-		delays = append(delays, d)
-		d = min(d*2, o.MaxBackoff)
-	}
-	if want := []int64{20, 40, 80, 100, 100}; !equalMs(delays, want) {
-		t.Errorf("delays = %v", delays)
-	}
+	waitFor(t, s, "backoff", func(st Status) bool { return st.State == Backoff })
 	if _, err := callTool(t, s, "echo", nil); !errors.As(err, new(*NotReadyError)) {
 		t.Errorf("call during backoff: err = %v, want NotReadyError", err)
 	}
 }
 
-func equalMs(got []time.Duration, want []int64) bool {
-	for i := range got {
-		if got[i].Milliseconds() != want[i] {
-			return false
+// TestBackoffResetsAfterStableSession checks that the backoff grows over sessions that crash
+// soon and starts over after a session that lived StableAfter. Each recovery is timed from
+// before the crash, so it is at least the delay; without the reset the last recovery would wait
+// the grown delay.
+func TestBackoffResetsAfterStableSession(t *testing.T) {
+	t.Parallel()
+	o := stdioOptions(t, testkit.Fake{})
+	o.InitialBackoff = 50 * time.Millisecond
+	o.MaxBackoff = 5 * time.Second
+	o.StableAfter = time.Second
+	s := start(t, o)
+	waitReady(t, s)
+	crash := func(n int) time.Duration {
+		t.Helper()
+		began := time.Now()
+		if _, err := callTool(t, s, "crash", nil); err == nil {
+			t.Fatal("the crashing call succeeded")
 		}
+		waitFor(t, s, "restart", func(st Status) bool { return st.State == Ready && st.Restarts == n })
+		return time.Since(began)
 	}
-	return true
+	delay := o.InitialBackoff
+	const quick = 5
+	for n := 1; n <= quick; n++ {
+		if took := crash(n); took < delay {
+			t.Fatalf("recovery %d took %v, less than its delay %v", n, took, delay)
+		}
+		delay *= 2
+	}
+	time.Sleep(o.StableAfter + 100*time.Millisecond)
+	if took := crash(quick + 1); took >= delay {
+		t.Errorf("recovery after a stable session took %v, the grown delay is %v", took, delay)
+	}
 }
 
 func TestNoProbesWhileCallsRun(t *testing.T) {

@@ -30,7 +30,9 @@ const (
 	// MaxLineBytes is the longest line kept; the rest of a longer line is dropped.
 	MaxLineBytes = 4 << 10
 	// readBytes is how much of a line is read and redacted before it is cut, so that a secret
-	// across the cut is still found; the last cutMargin bytes read are dropped unscanned.
+	// across the cut is still found. Of a line longer than that, only the start that the filter
+	// turns into the same text with and without the last cutMargin bytes read is kept: a secret
+	// that ends past the read is not seen whole, and its start may be in those bytes.
 	readBytes = 2 * MaxLineBytes
 	cutMargin = 256
 	// DefaultTailBytes is the default size of the ring buffer.
@@ -60,8 +62,11 @@ func (l *LineLog) Consume(r io.Reader) {
 	for {
 		line, err := br.ReadSlice('\n')
 		truncated := errors.Is(err, bufio.ErrBufferFull)
-		if len(line) > 0 {
-			l.add(trimEOL(line), truncated)
+		switch {
+		case truncated:
+			l.add(string(line), true) // a cut line has no line ending: it ends in no newline
+		case len(line) > 0:
+			l.add(trimEOL(line), false)
 		}
 		for errors.Is(err, bufio.ErrBufferFull) {
 			_, err = br.ReadSlice('\n') // drop the rest of a long line
@@ -81,9 +86,10 @@ func trimEOL(b []byte) string {
 
 func (l *LineLog) add(line string, truncated bool) {
 	if truncated {
-		line = line[:len(line)-cutMargin]
+		line = scannedStart(l.filter, line)
+	} else {
+		line = l.filter(line)
 	}
-	line = l.filter(line)
 	if len(line) > MaxLineBytes {
 		line, truncated = line[:MaxLineBytes], true
 	}
@@ -121,6 +127,24 @@ func (l *LineLog) add(line string, truncated bool) {
 		l.logger.Warn("child stderr lines dropped by the rate limit", "count", dropped)
 	}
 	l.logger.Info("child stderr", "line", line)
+}
+
+// scannedStart filters the start of a line that was cut at the read. It filters the line as read
+// and without its last cutMargin bytes, and returns the longest start the two agree on. That
+// start is a start of the line filtered without the margin, so it holds no part of a secret of
+// up to cutMargin bytes that continues past the read; and a secret that ends inside the margin,
+// which only the whole read shows, is redacted in the first and not in the second, so the start
+// ends before it. This holds however much the filter shrinks or grows the text.
+func scannedStart(filter func(string) string, line string) string {
+	if len(line) <= cutMargin {
+		return "" // nothing lies before the margin
+	}
+	whole, short := filter(line), filter(line[:len(line)-cutMargin])
+	n := 0
+	for n < len(whole) && n < len(short) && whole[n] == short[n] {
+		n++
+	}
+	return whole[:n]
 }
 
 // Tail returns the most recent lines, oldest first.

@@ -220,32 +220,57 @@ type bigFrame struct {
 
 const frameEdge = 1 << 10
 
-// readFrame reads one line. A line longer than limit is consumed up to its newline and returned
-// as a bigFrame instead, so it never takes more than limit bytes of memory.
+// readFrame reads one line. A line whose frame (the line without its "\n" or "\r\n") is longer
+// than limit is consumed up to its newline and returned as a bigFrame instead, so it never takes
+// more than limit bytes of memory and its line ending.
 func readFrame(br *bufio.Reader, limit int) ([]byte, *bigFrame, error) {
 	var line []byte
 	var big *bigFrame
 	for {
 		chunk, err := br.ReadSlice('\n')
-		if big == nil && len(line)+len(chunk) > limit {
-			big = &bigFrame{size: len(line)}
-			big.head = append([]byte(nil), line[:min(len(line), frameEdge)]...)
-			big.tail = keepTail(nil, line[max(0, len(line)-frameEdge):])
+		if big == nil && len(line)+len(chunk) > limit+len("\r\n") {
+			big = newBigFrame(line)
 			line = nil
 		}
 		if big != nil {
-			if n := frameEdge - len(big.head); n > 0 {
-				big.head = append(big.head, chunk[:min(len(chunk), n)]...)
-			}
-			big.size += len(chunk)
-			big.tail = keepTail(big.tail, chunk)
+			big.add(chunk)
 		} else {
 			line = append(line, chunk...)
 		}
 		if !errors.Is(err, bufio.ErrBufferFull) {
+			if big == nil && len(trimLineEnding(line)) > limit {
+				big = newBigFrame(line)
+				line = nil
+			}
 			return line, big, err
 		}
 	}
+}
+
+// trimLineEnding returns line without its "\n" or "\r\n".
+func trimLineEnding(line []byte) []byte {
+	if bytes.HasSuffix(line, []byte("\r\n")) {
+		return line[:len(line)-2]
+	}
+	return bytes.TrimSuffix(line, []byte("\n"))
+}
+
+// newBigFrame starts a bigFrame with the bytes of a frame read so far.
+func newBigFrame(line []byte) *bigFrame {
+	return &bigFrame{
+		head: append([]byte(nil), line[:min(len(line), frameEdge)]...),
+		tail: keepTail(nil, line[max(0, len(line)-frameEdge):]),
+		size: len(line),
+	}
+}
+
+// add counts the next chunk of a frame and keeps what its head and tail need.
+func (f *bigFrame) add(chunk []byte) {
+	if n := frameEdge - len(f.head); n > 0 {
+		f.head = append(f.head, chunk[:min(len(chunk), n)]...)
+	}
+	f.size += len(chunk)
+	f.tail = keepTail(f.tail, chunk)
 }
 
 // keepTail appends chunk to tail and keeps the last frameEdge bytes.

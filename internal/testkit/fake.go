@@ -35,8 +35,10 @@ import (
 //   - env: returns the process environment, one variable per line, sorted;
 //   - pids: returns {"pid", "pgid", "grandchild"} of the stdio fake, and "sockets", how many of
 //     its open descriptors are sockets;
-//   - stats: returns {"pingsDuringCalls", "cancelled"}: the pings that arrived while a tool call
-//     ran, and the calls of sleep, hang and progress that ended because they were cancelled;
+//   - stats: returns {"pingsDuringCalls", "cancelled"}: the pings that arrived well inside a
+//     tool call (once calls had been running without a pause for callSettle, so that a probe
+//     sent just before a call began is not counted), and the calls of sleep, hang and progress
+//     that ended because they were cancelled;
 //   - progress {"steps": number, "ms": number, "size": number}: sends that many progress
 //     notifications for the call's progress token, waiting ms before each, with messages
 //     "step <n>" padded with dots to size bytes, then returns "done";
@@ -393,17 +395,49 @@ func openSockets() int {
 	return n
 }
 
-// behaviour applies the scripted request handling of f.
+// callSettle is how long tool calls must have been running before a ping counts as sent during
+// them: a ping sent just before a call may arrive just after it.
+const callSettle = 100 * time.Millisecond
+
 // fakeStats counts what a fake saw.
 type fakeStats struct {
-	calls            atomic.Int64 // tool calls running, the stats call excluded
+	mu        sync.Mutex
+	calls     int       // tool calls running, the stats call excluded
+	busySince time.Time // when calls last went from 0 to 1
+
 	pingsDuringCalls atomic.Int64
 	cancelled        atomic.Int64
+}
+
+// callStarted records a tool call that began; the returned function records its end.
+func (st *fakeStats) callStarted() func() {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.calls == 0 {
+		st.busySince = time.Now()
+	}
+	st.calls++
+	return func() {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		st.calls--
+	}
+}
+
+// ping counts a ping that arrived well inside a tool call.
+func (st *fakeStats) ping() {
+	st.mu.Lock()
+	inside := st.calls > 0 && time.Since(st.busySince) >= callSettle
+	st.mu.Unlock()
+	if inside {
+		st.pingsDuringCalls.Add(1)
+	}
 }
 
 // requestKey carries the tool call request to the fake's tool functions.
 type requestKey struct{}
 
+// behaviour applies the scripted request handling of f.
 func behaviour(f Fake, stop <-chan struct{}, st *fakeStats) mcp.Middleware {
 	var handshake atomic.Int64 // when the handshake was first answered, in Unix nanoseconds
 	frozen := func(method string) bool {
@@ -422,13 +456,12 @@ func behaviour(f Fake, stop <-chan struct{}, st *fakeStats) mcp.Middleware {
 			if (f.SilentDiscover && method == "server/discover") || frozen(method) {
 				return nil, unanswered(ctx, stop)
 			}
-			switch {
-			case method == "ping" && st.calls.Load() > 0:
-				st.pingsDuringCalls.Add(1)
-			case method == "tools/call":
+			switch method {
+			case "ping":
+				st.ping()
+			case "tools/call":
 				if r, ok := req.(*mcp.CallToolRequest); !ok || r.Params.Name != "stats" {
-					st.calls.Add(1)
-					defer st.calls.Add(-1)
+					defer st.callStarted()()
 				}
 			}
 			if f.RejectListen && method == "subscriptions/listen" {

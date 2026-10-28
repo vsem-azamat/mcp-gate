@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -317,6 +318,61 @@ func TestLineLogLimits(t *testing.T) {
 	}
 	if n := strings.Count(logs.String(), "child stderr\""); n == 0 || n > lineBurst+5 {
 		t.Errorf("%d lines logged, want at most about %d", n, lineBurst)
+	}
+}
+
+// TestLineLogCutAfterShrinkingFilter checks that a secret across the edge of what is scanned is
+// not half kept when the filter shrinks the line so much that the edge falls inside the kept
+// part. The filter drops every "~" and redacts a 46-byte secret, which here begins 36 bytes
+// before the margin at the cut and ends past it.
+func TestLineLogCutAfterShrinkingFilter(t *testing.T) {
+	t.Parallel()
+	secret := regexp.MustCompile(`SECRET[0-9]{40}`)
+	filter := func(s string) string {
+		return secret.ReplaceAllString(strings.ReplaceAll(s, "~", ""), "[R]")
+	}
+	ll := NewLineLog(slog.New(slog.DiscardHandler), filter, 0, nil)
+	edge := readBytes - cutMargin
+	line := "start " + strings.Repeat("~", edge-36-len("start ")) + "SECRET" + strings.Repeat("0123456789", 4)
+	line += strings.Repeat("y", readBytes+1000-len(line)) + "\nnext\n"
+	ll.Consume(strings.NewReader(line))
+	tail := ll.Tail()
+	if len(tail) != 2 || !strings.HasPrefix(tail[0], "start ") || !strings.HasSuffix(tail[0], " [truncated]") || tail[1] != "next" {
+		t.Fatalf("tail = %.80q", tail)
+	}
+	if strings.Contains(tail[0], "SECRET") || strings.Contains(tail[0], "0123") {
+		t.Errorf("part of the secret was kept: %.80q", tail[0])
+	}
+}
+
+// TestLineLogSecretInMargin checks that a secret that begins in the margin at the cut and goes
+// on past the read is kept in no part, even though the filter, which sees only its start, does
+// not redact it.
+func TestLineLogSecretInMargin(t *testing.T) {
+	t.Parallel()
+	secret := regexp.MustCompile(`SECRET[0-9]{300}`)
+	filter := func(s string) string {
+		return secret.ReplaceAllString(strings.ReplaceAll(s, "~", ""), "[R]")
+	}
+	ll := NewLineLog(slog.New(slog.DiscardHandler), filter, 0, nil)
+	line := "start " + strings.Repeat("~", readBytes-cutMargin/2-len("start ")) + "SECRET" + strings.Repeat("0123456789", 30)
+	ll.Consume(strings.NewReader(line + "\nnext\n"))
+	tail := ll.Tail()
+	if len(tail) != 2 || tail[0] != "start  [truncated]" || tail[1] != "next" {
+		t.Errorf("tail = %.80q", tail)
+	}
+}
+
+// TestLineLogLongRunOfCR checks that a line cut at the read that ends in carriage returns is
+// kept as read: its "\r" bytes are no line ending, and stripping them must not leave less than
+// the margin at the cut.
+func TestLineLogLongRunOfCR(t *testing.T) {
+	t.Parallel()
+	ll := NewLineLog(slog.New(slog.DiscardHandler), nil, 0, nil)
+	ll.Consume(strings.NewReader("x" + strings.Repeat("\r", 3*readBytes/2) + "\nnext\n"))
+	tail := ll.Tail()
+	if len(tail) != 2 || !strings.HasPrefix(tail[0], "x\r") || !strings.HasSuffix(tail[0], " [truncated]") || tail[1] != "next" {
+		t.Errorf("tail = %.80q", tail)
 	}
 }
 

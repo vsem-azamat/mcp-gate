@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -65,5 +67,81 @@ func TestOOMScoreAdjRetriesDeniedOpen(t *testing.T) {
 	err := setOOMScoreAdj(p.PID(), ChildOOMScoreAdj)
 	if took := time.Since(start); !errors.Is(err, fs.ErrPermission) || took < oomRetryFor/2 {
 		t.Errorf("setOOMScoreAdj = %v after %v, want a permission error after retrying for about %v", err, took, oomRetryFor)
+	}
+}
+
+func TestParseChildren(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		in   string
+		want []int
+	}{
+		{"", nil},
+		{"\n", nil},
+		{"42 ", []int{42}},
+		{"42 7 1003 ", []int{42, 7, 1003}},
+		{"42 7\n", []int{42, 7}},
+		{"42 x 7 -1 0 ", []int{42, 7}}, // what is not a PID is skipped
+	} {
+		if got := parseChildren([]byte(c.in)); !slices.Equal(got, c.want) {
+			t.Errorf("parseChildren(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestChildPIDs checks that both ways of listing the gate's children find a child.
+func TestChildPIDs(t *testing.T) {
+	t.Parallel()
+	p := startHelper(t, "sleep", Spec{})
+	if pids := scanChildren(os.Getpid()); !slices.Contains(pids, p.PID()) {
+		t.Errorf("the /proc scan found %v, not the child %d", pids, p.PID())
+	}
+	if _, err := os.Stat("/proc/self/task/" + strconv.Itoa(os.Getpid()) + "/children"); err != nil {
+		t.Skip("the kernel has no /proc/<pid>/task/<tid>/children")
+	}
+	pids, ok := threadChildren()
+	if !ok || !slices.Contains(pids, p.PID()) {
+		t.Errorf("the children files list %v (%v), not the child %d", pids, ok, p.PID())
+	}
+}
+
+// TestReapOrphansSkipsManaged checks that the reaper leaves a zombie child that Start registered
+// to its Process, and reaps it once it is not registered. Not parallel: it reaps the children of
+// the test process.
+func TestReapOrphansSkipsManaged(t *testing.T) {
+	pid, err := syscall.ForkExec("/bin/true", []string{"true"}, &syscall.ProcAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		var ws syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+		managed.Lock()
+		delete(managed.pids, pid)
+		managed.Unlock()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if state, _, ok := procStat(pid); ok && state == 'Z' {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the child did not become a zombie")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	managed.Lock()
+	managed.pids[pid] = true
+	managed.Unlock()
+	reapOrphans()
+	if state, _, ok := procStat(pid); !ok || state != 'Z' {
+		t.Fatalf("a registered zombie was reaped (state %q, found %v)", state, ok)
+	}
+	managed.Lock()
+	delete(managed.pids, pid)
+	managed.Unlock()
+	reapOrphans()
+	if _, _, ok := procStat(pid); ok {
+		t.Error("an unregistered zombie was not reaped")
 	}
 }

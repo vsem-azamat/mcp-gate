@@ -148,7 +148,8 @@ func (r errReader) Read([]byte) (int, error) {
 
 // eventLimiter passes a server-sent event stream through one event at a time. An event over the
 // limit is dropped; if it was the response to the call that opened the stream, an event holding
-// a JSON-RPC error for that call takes its place.
+// a JSON-RPC error for that call takes its place. A complete event is handed to Read without a
+// copy, so the limiter holds it once.
 type eventLimiter struct {
 	src    io.ReadCloser
 	br     *bufio.Reader
@@ -156,25 +157,33 @@ type eventLimiter struct {
 	call   func() (jsonrpc.ID, bool) // the id of the request that opened the stream, if it is a call
 	logger *slog.Logger
 
-	out       bytes.Buffer // bytes ready for Read
-	cur       []byte       // the event being read
-	big       *bigFrame    // set while an oversized event is skipped
+	out       []byte // bytes ready for Read, from off on
+	off       int
+	cur       []byte    // the event being read
+	big       *bigFrame // set while an oversized event is skipped
 	lineStart bool
 	err       error
 }
 
 func (l *eventLimiter) Read(p []byte) (int, error) {
-	for l.out.Len() == 0 && l.err == nil {
+	for len(l.out) == 0 && l.err == nil {
 		l.fill()
 	}
-	if l.out.Len() > 0 {
-		return l.out.Read(p)
+	if len(l.out) > 0 {
+		n := copy(p, l.out[l.off:])
+		l.off += n
+		if l.off == len(l.out) {
+			l.out, l.off = nil, 0 // let the event go once it is read
+		}
+		return n, nil
 	}
 	return 0, l.err
 }
 
 func (l *eventLimiter) Close() error { return l.src.Close() }
 
+// fill reads the next line of the stream. It is called only when out is empty, and sets out to
+// the bytes that line completes.
 func (l *eventLimiter) fill() {
 	chunk, err := l.br.ReadSlice('\n')
 	blank := l.lineStart && (string(chunk) == "\n" || string(chunk) == "\r\n")
@@ -182,11 +191,10 @@ func (l *eventLimiter) fill() {
 	case blank && l.big != nil:
 		l.replace()
 		l.big = nil
-		l.out.Write(chunk)
+		l.out = append(l.out, chunk...)
 	case blank:
-		l.out.Write(l.cur)
-		l.out.Write(chunk)
-		l.cur = l.cur[:0]
+		l.out = append(l.cur, chunk...) // the event itself, not a copy
+		l.cur = nil
 	case l.big != nil:
 		l.big.size += len(chunk)
 		l.big.tail = keepTail(l.big.tail, chunk)
@@ -200,8 +208,8 @@ func (l *eventLimiter) fill() {
 	}
 	l.lineStart = len(chunk) > 0 && chunk[len(chunk)-1] == '\n'
 	if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
-		if l.big == nil {
-			l.out.Write(l.cur)
+		if l.big == nil && len(l.cur) > 0 {
+			l.out = l.cur // the unfinished event; out is empty, since the line was not blank
 		}
 		l.cur = nil
 		l.err = err
@@ -229,7 +237,7 @@ func (l *eventLimiter) replace() {
 		return
 	}
 	l.logger.Warn("dropped an event over maxMessageBytes; its request fails", "bytes", l.big.size, "limit", l.limit)
-	l.out.WriteString("event: message\ndata: ")
-	l.out.Write(oversizedResponse(want, l.limit))
-	l.out.WriteString("\n")
+	l.out = append(l.out, "event: message\ndata: "...)
+	l.out = append(l.out, oversizedResponse(want, l.limit)...)
+	l.out = append(l.out, '\n')
 }
