@@ -121,9 +121,10 @@ func (l *logLines) messages(msg string) []map[string]any {
 }
 
 // TestBinary runs the binary as systemd does (state directory from $STATE_DIRECTORY, secrets in
-// the environment) with a stdio fake that has a grandchild and an HTTP fake behind it, then
-// checks health and readiness, listing and calls on both routes, redaction and an escrow round
-// trip, /_status, and that SIGTERM stops the gate with status 0 and leaves no child behind.
+// the environment) with a stdio fake that has a grandchild, an HTTP fake and a legacy stdio fake
+// that ignores server/discover behind it, then checks health and readiness, listing and calls on
+// both routes, redaction and an escrow round trip, /_status, the legacy server's learned pin in
+// the state directory, and that SIGTERM stops the gate with status 0 and leaves no child behind.
 func TestBinary(t *testing.T) {
 	bin := gateBinary(t)
 	dir := t.TempDir()
@@ -135,6 +136,11 @@ func TestBinary(t *testing.T) {
 	web := testkit.NewFakeHTTP(t, testkit.Fake{Name: "web"}, testkit.FakeHTTPOptions{})
 	cmd, args := testkit.StdioCommand(t, testkit.Fake{Name: "local", Grandchild: true})
 	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyCmd, legacyArgs := testkit.StdioCommand(t, testkit.Fake{Name: "legacy", SilentDiscover: true})
+	legacyJSON, err := json.Marshal(legacyArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +163,11 @@ servers:
   web:
     http:
       url: %q
-`, cmd, argsJSON, web.URL())
+  legacy:
+    stdio:
+      command: %q
+      args: %s
+`, cmd, argsJSON, web.URL(), legacyCmd, legacyJSON)
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +225,7 @@ servers:
 				ServerCount int    `json:"serverCount"`
 				Status      string `json:"status"`
 			}
-			if err := json.Unmarshal([]byte(body), &r); err != nil || r.Name != "smoke" || r.ServerCount != 2 || r.Status != "ok" {
+			if err := json.Unmarshal([]byte(body), &r); err != nil || r.Name != "smoke" || r.ServerCount != 3 || r.Status != "ok" {
 				t.Errorf("/_readyz = %s (%v)", body, err)
 			}
 			break
@@ -291,6 +301,27 @@ servers:
 	}
 	if code, _ := get("/_status", clientToken); code != http.StatusUnauthorized && code != http.StatusForbidden {
 		t.Errorf("/_status with a client token = %d", code)
+	}
+	// The legacy server leaves server/discover unanswered, so the gate pins its protocol version
+	// and keeps the pin in the state directory.
+	var pins struct {
+		Version int `json:"version"`
+		Pins    map[string]struct {
+			Version   string `json:"version"`
+			Transport string `json:"transport"`
+		} `json:"pins"`
+	}
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		data, err := os.ReadFile(filepath.Join(stateDir, "pins.json"))
+		if err == nil && json.Unmarshal(data, &pins) == nil && pins.Pins["legacy"].Version != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no learned pin in the state directory: %s, %v\n%s", data, err, logs)
+		}
+	}
+	if pins.Version != 2 || len(pins.Pins) != 1 || pins.Pins["legacy"].Transport == "" {
+		t.Errorf("pins.json = %+v", pins)
 	}
 	for _, cs := range sessions {
 		_ = cs.Close()

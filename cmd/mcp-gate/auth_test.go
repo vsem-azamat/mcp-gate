@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -110,7 +112,7 @@ func TestAuthLoginStatusLogout(t *testing.T) {
 	}
 
 	r = runCmd(t, noEnv, "auth", "logout", "-state-dir", state, path, "mail")
-	if r.code != exitOK || !strings.Contains(r.stdout, "Logged out of mail") {
+	if r.code != exitOK || !strings.Contains(r.stdout, "Logged out of mail: its grant is deleted. The authorization server offers no revocation endpoint") {
 		t.Errorf("logout = %+v", r)
 	}
 	if _, err := os.Stat(filepath.Join(state, "oauth", "mail.json")); !os.IsNotExist(err) {
@@ -119,6 +121,115 @@ func TestAuthLoginStatusLogout(t *testing.T) {
 	r = runCmd(t, noEnv, "auth", "logout", "-state-dir", state, path, "mail")
 	if r.code != exitOK || !strings.Contains(r.stdout, "was not logged in") {
 		t.Errorf("second logout = %+v", r)
+	}
+}
+
+func TestAuthLogoutRevokes(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true})
+	path := oauthConfig(t, srv)
+	state := t.TempDir()
+	if code, out, stderr := playLogin(t, srv, path, state); code != exitOK {
+		t.Fatalf("auth login = %d\n%s\n%s", code, out, stderr)
+	}
+	g, err := oauth.NewStore(state).Load("mail")
+	if err != nil || g == nil || g.RefreshToken == "" {
+		t.Fatalf("grant = %+v, %v", g, err)
+	}
+	r := runCmd(t, noEnv, "auth", "logout", "-state-dir", state, path, "mail")
+	if r.code != exitOK || !strings.Contains(r.stdout, "Logged out of mail: its grant is deleted. The authorization server revoked it.") || r.stderr != "" {
+		t.Errorf("logout = %+v", r)
+	}
+	if srv.Valid(g.RefreshToken) || srv.Valid(g.AccessToken) {
+		t.Error("the authorization server still honours the grant's tokens")
+	}
+	revs := srv.Revocations()
+	if len(revs) != 2 || revs[0].Get("token_type_hint") != "refresh_token" || revs[1].Get("token_type_hint") != "access_token" || revs[0].Get("client_id") != g.ClientID {
+		t.Errorf("revocation requests = %v", revs)
+	}
+
+	// A revocation that fails is reported, and the grant is deleted all the same.
+	if code, out, stderr := playLogin(t, srv, path, state); code != exitOK {
+		t.Fatalf("second auth login = %d\n%s\n%s", code, out, stderr)
+	}
+	g, _ = oauth.NewStore(state).Load("mail")
+	srv.RefuseRevocation(http.StatusServiceUnavailable)
+	r = runCmd(t, noEnv, "auth", "logout", "-state-dir", state, path, "mail")
+	if r.code != exitOK || !strings.Contains(r.stdout, "Revoking it at the authorization server failed") ||
+		!strings.Contains(r.stderr, "the revocation endpoint answered 503") {
+		t.Errorf("logout with a failing revocation = %+v", r)
+	}
+	if strings.Contains(r.stdout+r.stderr, g.RefreshToken) || strings.Contains(r.stdout+r.stderr, g.AccessToken) {
+		t.Error("logout printed a token")
+	}
+	if _, err := os.Stat(filepath.Join(state, "oauth", "mail.json")); !os.IsNotExist(err) {
+		t.Errorf("the grant file is still there: %v", err)
+	}
+}
+
+// Logout lets the grant lock go before it talks to the authorization server, so that a
+// refresh waiting for the lock is not held up by the revocation.
+func TestAuthLogoutReleasesTheLockBeforeRevoking(t *testing.T) {
+	hold := make(chan struct{})
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true, HoldRevocation: hold})
+	path := oauthConfig(t, srv)
+	state := t.TempDir()
+	if code, out, stderr := playLogin(t, srv, path, state); code != exitOK {
+		t.Fatalf("auth login = %d\n%s\n%s", code, out, stderr)
+	}
+	done := make(chan result, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		code := run(context.WithoutCancel(t.Context()), []string{"auth", "logout", "-state-dir", state, path, "mail"}, noEnv, &stdout, &stderr)
+		done <- result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}()
+	released := false
+	defer func() {
+		if !released {
+			close(hold)
+		}
+	}()
+	select {
+	case <-srv.RevocationArrived():
+	case r := <-done:
+		t.Fatalf("logout ended before revoking: %+v", r)
+	case <-time.After(20 * time.Second):
+		t.Fatal("logout sent no revocation")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	unlock, err := oauth.NewStore(state).Lock(ctx, "mail")
+	if err != nil {
+		t.Fatalf("the grant lock is held while revoking: %v", err)
+	}
+	unlock()
+	close(hold)
+	released = true
+	if r := <-done; r.code != exitOK || !strings.Contains(r.stdout, "The authorization server revoked it.") {
+		t.Errorf("logout = %+v", r)
+	}
+}
+
+func TestAuthLogoutOfAnUnreadableGrant(t *testing.T) {
+	srv := testkit.NewOAuthServer(t, testkit.OAuthOptions{Revocation: true})
+	path := oauthConfig(t, srv)
+	state := t.TempDir()
+	if code, out, stderr := playLogin(t, srv, path, state); code != exitOK {
+		t.Fatalf("auth login = %d\n%s\n%s", code, out, stderr)
+	}
+	file := filepath.Join(state, "oauth", "mail.json")
+	if err := os.Chmod(file, 0o644); err != nil { //nolint:gosec // the test makes the grant file readable by others on purpose
+		t.Fatal(err)
+	}
+	r := runCmd(t, noEnv, "auth", "logout", "-state-dir", state, path, "mail")
+	if r.code != exitOK || !strings.Contains(r.stdout, "The grant could not be read, so it was not revoked") ||
+		!strings.Contains(r.stderr, "readable or writable by others") {
+		t.Errorf("logout = %+v", r)
+	}
+	if n := len(srv.Revocations()); n != 0 {
+		t.Errorf("%d revocation requests for a grant that could not be read", n)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("the grant file is still there: %v", err)
 	}
 }
 

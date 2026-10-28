@@ -85,6 +85,9 @@ type Authorizer interface {
 	Reason() string
 	// Close ends a wait for the grant lock in progress and later refreshes; Stop calls it.
 	Close()
+	// Accepted is called with every request the server answers with success, so that the
+	// authorizer knows which tokens the server accepts.
+	Accepted(req *http.Request)
 }
 
 // LoginRequiredError is the error of a connect that found no usable OAuth grant.
@@ -385,7 +388,11 @@ func New(opts Options) (*Supervisor, error) {
 	if opts.Stdio != nil {
 		s.stderr = procutil.NewLineLog(logger, s.scrub, 0, s.changedStatus)
 	} else {
-		s.http, s.httpBase = newHTTPClient(opts.HTTP.Headers, opts.MaxMessageBytes, logger)
+		var accepted func(*http.Request)
+		if opts.HTTP.OAuth != nil {
+			accepted = opts.HTTP.OAuth.Accepted
+		}
+		s.http, s.httpBase = newHTTPClient(opts.HTTP.Headers, opts.MaxMessageBytes, logger, accepted)
 	}
 	if opts.Disabled {
 		s.state = Disabled

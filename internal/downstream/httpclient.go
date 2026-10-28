@@ -19,15 +19,16 @@ const errorBodyLimit = 64 << 10
 
 // newHTTPClient returns the HTTP client for one server: it adds the configured headers, follows
 // no redirects (they would carry the headers elsewhere), and limits every response body and
-// event to limit bytes so that an oversized response fails only its own request.
-func newHTTPClient(headers map[string]string, limit int, logger *slog.Logger) (*http.Client, *http.Transport) {
+// event to limit bytes so that an oversized response fails only its own request. accepted, if
+// set, is called with each request that gets a 2xx answer.
+func newHTTPClient(headers map[string]string, limit int, logger *slog.Logger, accepted func(*http.Request)) (*http.Client, *http.Transport) {
 	base := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the standard library's default transport
 	h := http.Header{}
 	for k, v := range headers {
 		h.Set(k, v)
 	}
 	return &http.Client{
-		Transport: &limitTransport{base: base, headers: h, limit: limit, logger: logger},
+		Transport: &limitTransport{base: base, headers: h, limit: limit, logger: logger, accepted: accepted},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -35,10 +36,11 @@ func newHTTPClient(headers map[string]string, limit int, logger *slog.Logger) (*
 }
 
 type limitTransport struct {
-	base    http.RoundTripper
-	headers http.Header
-	limit   int
-	logger  *slog.Logger
+	base     http.RoundTripper
+	headers  http.Header
+	limit    int
+	logger   *slog.Logger
+	accepted func(*http.Request)
 }
 
 func (t *limitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -52,6 +54,9 @@ func (t *limitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
+	}
+	if t.accepted != nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		t.accepted(req)
 	}
 	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	switch {

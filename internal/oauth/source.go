@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"golang.org/x/oauth2"
 )
 
@@ -51,27 +52,26 @@ type Source struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 
-	mu       sync.Mutex
-	grant    *Grant
-	loaded   bool      // the grant file was read at stamp
-	stamp    stamp     // of the file grant was read from
-	dead     bool      // the authorization server or the server rejected grant
-	reason   string    // why there is no usable grant, for status
-	forced   string    // the access token a refresh after a 401 obtained
-	forcedAt time.Time // when the last 401 to it came
-	forcedN  int       // refreshes after a 401 in a row, each soon after the one before
+	mu     sync.Mutex
+	grant  *Grant
+	loaded bool   // the grant file was read at stamp
+	stamp  stamp  // of the file grant was read from
+	dead   bool   // the authorization server or the server rejected grant
+	reason string // why there is no usable grant, for status
+
+	// fmu guards forced and forcedN. It is a leaf, taken under mu or alone, so that Accepted,
+	// called as responses arrive, never waits for a refresh.
+	fmu     sync.Mutex
+	forced  string // the access token a refresh after a 401 obtained, until the server accepts it
+	forcedN int    // refreshes after a 401 in a row, each to a token the server never accepted
 }
 
-// A 401 to a token that a refresh after a 401 obtained, within retryWindow of the previous 401,
-// is counted; the maxForced-th in a row means the server rejects the grant's tokens. A single
-// one is no proof: the token may have been dropped in its turn, as a server restart does. The
-// window outlasts the time between connect attempts (restart.maxBackoff, at most
-// config.MaxMaxBackoff, plus the connect timeout), so a server that rejects every token is
-// noticed however its attempts are spaced.
-const (
-	retryWindow = 10 * time.Minute
-	maxForced   = 3
-)
+// A 401 to a token that a refresh after a 401 obtained, before the server accepted any request
+// with it, is counted; the maxForced-th in a row means the server rejects the grant's tokens. A
+// single one is no proof: the token may have been dropped in its turn, as a server restart
+// does. A request with that token that succeeds (see Accepted) resets the count, however the
+// attempts are spaced.
+const maxForced = 3
 
 // NewSource returns the token source of a server.
 func NewSource(opts SourceOptions) *Source {
@@ -153,7 +153,9 @@ func (s *Source) validLocked(g *Grant) bool {
 func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Response) error {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
+	if resp.StatusCode != http.StatusUnauthorized || insufficientScope(resp) {
+		// A 401 with error="insufficient_scope" refuses this request, not the token: like a
+		// 403, a refresh would not help and must not count against the grant.
 		return errors.New("oauth: the server refused the request (" + http.StatusText(resp.StatusCode) + "); the grant's scopes may not cover it")
 	}
 	used, _ := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
@@ -166,13 +168,18 @@ func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Re
 	case used != s.grant.AccessToken:
 		return nil // the token changed since the request was sent: retry with the new one
 	}
-	now := s.opts.Now()
-	if used == s.forced && now.Sub(s.forcedAt) < retryWindow {
+	// fmu is let go during the refresh, so an Accepted for the token that got this 401 (another
+	// request with it, answered before) can reset the count meanwhile: the count then ends one
+	// lower than it might, which errs towards keeping the grant, never towards dropping it.
+	s.fmu.Lock()
+	if used == s.forced {
 		s.forcedN++
 	} else {
 		s.forcedN = 1
 	}
-	if s.forcedN >= maxForced {
+	n := s.forcedN
+	s.fmu.Unlock()
+	if n >= maxForced {
 		s.rejectLocked("the server rejects the grant's tokens")
 		return ErrLoginRequired
 	}
@@ -181,8 +188,39 @@ func (s *Source) Authorize(ctx context.Context, req *http.Request, resp *http.Re
 	if err := s.refreshLocked(context.WithoutCancel(ctx)); err != nil {
 		return err
 	}
-	s.forced, s.forcedAt = s.grant.AccessToken, now
+	s.fmu.Lock()
+	s.forced = s.grant.AccessToken
+	s.fmu.Unlock()
 	return nil
+}
+
+// Accepted tells the source that the server answered req with success: when req carried the
+// token a refresh after a 401 obtained, the server accepts it, and the count of such refreshes
+// starts again. The supervisor's HTTP client calls it for every successful response.
+func (s *Source) Accepted(req *http.Request) {
+	used, ok := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
+	if !ok || used == "" {
+		return
+	}
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	if s.forced != "" && used == s.forced {
+		s.forced, s.forcedN = "", 0
+	}
+}
+
+// insufficientScope reports a 401 whose Bearer challenge names the error insufficient_scope.
+func insufficientScope(resp *http.Response) bool {
+	cs, err := oauthex.ParseWWWAuthenticate(resp.Header.Values("WWW-Authenticate"))
+	if err != nil {
+		return false
+	}
+	for _, c := range cs {
+		if c.Scheme == "bearer" && c.Params["error"] == "insufficient_scope" {
+			return true
+		}
+	}
+	return false
 }
 
 // reloadLocked adopts the grant file when it changed since it was read.
@@ -199,7 +237,10 @@ func (s *Source) reloadLocked() {
 	if st.fi == nil {
 		st = cur
 	}
-	s.loaded, s.stamp, s.dead, s.forced, s.forcedN = true, st, false, "", 0
+	s.loaded, s.stamp, s.dead = true, st, false
+	s.fmu.Lock()
+	s.forced, s.forcedN = "", 0
+	s.fmu.Unlock()
 	switch {
 	case err != nil:
 		s.grant, s.reason = nil, err.Error()

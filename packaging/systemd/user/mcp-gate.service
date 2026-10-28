@@ -49,16 +49,17 @@ TimeoutStopSec=40s
 #   RestrictNamespaces      breaks Chromium's user-namespace sandbox
 #   PrivateDevices, ProtectClock, ProtectKernelLogs, CapabilityBoundingSet  need privileges a
 #                           user manager may not have; a system service sets them
+#   ProtectKernelModules    an unprivileged user cannot load modules anyway, and the setting
+#                           fails with 218/CAPABILITIES under AppArmor-restricted user namespaces
 # A child that talks to another program through /tmp (an X11 or other socket there) needs
-# PrivateTmp=no in a drop-in. In a user manager, PrivateTmp, ProtectSystem, ProtectKernel* and
-# ProtectControlGroups run the service in a user namespace (an implicit PrivateUsers=yes): the
-# host needs unprivileged user namespaces, and files of other users show as owned by nobody.
-# See docs/operations/systemd.md for the drop-in without them.
+# PrivateTmp=no in a drop-in. In a user manager, PrivateTmp, ProtectSystem, ProtectKernelTunables
+# and ProtectControlGroups run the service in a user namespace (an implicit PrivateUsers=yes):
+# files of other users show as owned by nobody. See docs/operations/systemd.md for the drop-in
+# without them, for a host without unprivileged user namespaces.
 NoNewPrivileges=yes
 ProtectSystem=full
 PrivateTmp=yes
 ProtectKernelTunables=yes
-ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
