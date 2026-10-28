@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
@@ -62,6 +63,50 @@ func TestReadFrameUnderLimit(t *testing.T) {
 	}
 }
 
+// TestReadFrameLimitExcludesLineEnding checks that the limit applies to a frame without its
+// line ending: a frame of exactly the limit passes, one byte more is too big.
+func TestReadFrameLimitExcludesLineEnding(t *testing.T) {
+	t.Parallel()
+	const limit = 100
+	for _, c := range []struct {
+		name, input string
+		big         bool
+	}{
+		{"limit with newline", strings.Repeat("a", limit) + "\n", false},
+		{"limit with CRLF", strings.Repeat("a", limit) + "\r\n", false},
+		{"limit at EOF", strings.Repeat("a", limit), false},
+		{"one over with newline", strings.Repeat("a", limit+1) + "\n", true},
+		{"one over with CRLF", strings.Repeat("a", limit+1) + "\r\n", true},
+		{"one over at EOF", strings.Repeat("a", limit+1), true},
+		{"limit and a stray CR", strings.Repeat("a", limit) + "\r\r\n", true},
+	} {
+		atEOF := !strings.HasSuffix(c.input, "\n")
+		input := c.input
+		if !atEOF {
+			input += "next\n"
+		}
+		br := bufio.NewReaderSize(strings.NewReader(input), 16)
+		line, f, err := readFrame(br, limit)
+		if err != nil && (!atEOF || !errors.Is(err, io.EOF)) {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := f != nil; got != c.big {
+			t.Errorf("%s: big = %v, want %v", c.name, got, c.big)
+		}
+		if c.big && f.size != len(c.input) {
+			t.Errorf("%s: size = %d, want %d", c.name, f.size, len(c.input))
+		}
+		if !c.big && string(line) != c.input {
+			t.Errorf("%s: line = %q", c.name, line)
+		}
+		if !atEOF {
+			if next, _, _ := readFrame(br, limit); string(next) != "next\n" {
+				t.Errorf("%s: next frame = %q", c.name, next)
+			}
+		}
+	}
+}
+
 func TestEventLimiter(t *testing.T) {
 	t.Parallel()
 	id, _ := jsonrpc.MakeID(float64(4))
@@ -69,20 +114,30 @@ func TestEventLimiter(t *testing.T) {
 	stream := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"m\":\"" + big + "\"}}\n\n" +
 		"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n" +
 		"id: 9\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"t\":\"" + big + "\"}}\n\n"
-	l := &eventLimiter{
-		src: io.NopCloser(strings.NewReader(stream)), limit: 1024, call: func() (jsonrpc.ID, bool) { return id, true },
-		logger: slog.New(slog.DiscardHandler), lineStart: true,
-	}
-	l.br = bufio.NewReaderSize(l.src, 64)
-	out, err := io.ReadAll(l)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(out)
 	want := "\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n" +
 		"event: message\ndata: " + string(oversizedResponse(id, 1024)) + "\n\n"
-	if got != want {
-		t.Errorf("stream =\n%q\nwant\n%q", got, want)
+	// The stream is read in large reads and one byte at a time, which hands each event over in
+	// many parts. An unfinished event at the end of the stream is passed on as it is.
+	for _, c := range []struct {
+		name, tail string
+		read       func(io.Reader) io.Reader
+	}{
+		{"large reads", "", func(r io.Reader) io.Reader { return r }},
+		{"one byte reads", "", iotest.OneByteReader},
+		{"unfinished event", "data: {}", iotest.OneByteReader},
+	} {
+		l := &eventLimiter{
+			src: io.NopCloser(strings.NewReader(stream + c.tail)), limit: 1024, call: func() (jsonrpc.ID, bool) { return id, true },
+			logger: slog.New(slog.DiscardHandler), lineStart: true,
+		}
+		l.br = bufio.NewReaderSize(l.src, 64)
+		out, err := io.ReadAll(c.read(l))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(out); got != want+c.tail {
+			t.Errorf("%s: stream =\n%q\nwant\n%q", c.name, got, want+c.tail)
+		}
 	}
 }
 

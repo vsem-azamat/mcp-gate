@@ -96,18 +96,16 @@ func (r *Reaper) Close() {
 	reapOrphans()
 }
 
-// reapOrphans waits for every zombie child of the gate that Start did not start.
+// reapOrphans waits for every zombie child of the gate that Start did not start. The children
+// are listed without the lock; the lock is held only to check each one that Start did not
+// register and reap it, so that a child Start is registering is never taken for an orphan.
 func reapOrphans() {
 	self := os.Getpid()
+	pids := childPIDs(self)
 	managed.Lock()
 	defer managed.Unlock()
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || managed.pids[pid] {
+	for _, pid := range pids {
+		if managed.pids[pid] {
 			continue
 		}
 		state, ppid, ok := procStat(pid)
@@ -117,6 +115,64 @@ func reapOrphans() {
 		var ws unix.WaitStatus
 		_, _ = unix.Wait4(pid, &ws, unix.WNOHANG, nil)
 	}
+}
+
+// childPIDs lists the children of the gate, self: from the children files of its threads, or,
+// on a kernel without them (CONFIG_PROC_CHILDREN), by scanning /proc.
+func childPIDs(self int) []int {
+	if pids, ok := threadChildren(); ok {
+		return pids
+	}
+	return scanChildren(self)
+}
+
+// threadChildren reads /proc/self/task/<tid>/children of every thread of the gate: an orphan
+// reparented to the gate becomes the child of one of its threads. ok is false when no such
+// file could be read.
+func threadChildren() (pids []int, ok bool) {
+	tasks, err := os.ReadDir("/proc/self/task")
+	if err != nil {
+		return nil, false
+	}
+	for _, task := range tasks {
+		data, err := os.ReadFile("/proc/self/task/" + task.Name() + "/children")
+		if err != nil {
+			continue // the thread is gone, or the kernel has no children files
+		}
+		ok = true
+		pids = append(pids, parseChildren(data)...)
+	}
+	return pids, ok
+}
+
+// parseChildren parses a children file: PIDs separated by spaces.
+func parseChildren(data []byte) []int {
+	var pids []int
+	for _, f := range bytes.Fields(data) {
+		if pid, err := strconv.Atoi(string(f)); err == nil && pid > 0 {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// scanChildren lists the processes in /proc whose parent is self.
+func scanChildren(self int) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if _, ppid, ok := procStat(pid); ok && ppid == self {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 // procStat reads the state and the parent PID from /proc/<pid>/stat.
