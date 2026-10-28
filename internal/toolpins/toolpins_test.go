@@ -360,3 +360,49 @@ func TestVisible(t *testing.T) {
 		t.Errorf("plain: %q", got)
 	}
 }
+
+// TestBacklogReportedFirst checks that a change a window left unreported is reported, and named
+// in a summary, before the changes of tools that keep changing, so that they cannot starve it.
+func TestBacklogReportedFirst(t *testing.T) {
+	s := New(t.TempDir())
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	s.now = func() time.Time { return at }
+	listing := func(round int, zz string) []*mcp.Tool {
+		tools := []*mcp.Tool{tool("zz", zz)}
+		for i := range ReportLimit + 3 {
+			tools = append(tools, tool(fmt.Sprintf("a%02d", i), strconv.Itoa(round)))
+		}
+		return tools
+	}
+	s.Check("srv", false, listing(0, "0"))
+	at = at.Add(time.Second)
+	res := s.Check("srv", false, listing(1, "changed"))
+	if slices.ContainsFunc(res.Changes, func(c Change) bool { return c.Tool == "zz" }) {
+		t.Fatal("zz reported in the first window; the test needs it held back")
+	}
+	if res.Suppressed != 4 {
+		t.Fatalf("held back %d: %v", res.Suppressed, res.SuppressedTools)
+	}
+	// In the next window the four tools held back come first, zz among them, although every
+	// a.. tool changed again and sorts before it.
+	at = at.Add(ReportWindow)
+	res = s.Check("srv", false, listing(2, "changed"))
+	var first []string
+	for _, c := range res.Changes[:4] {
+		first = append(first, c.Tool)
+	}
+	if !slices.Equal(first, []string{"a20", "a21", "a22", "zz"}) {
+		t.Errorf("reported first %v", first)
+	}
+	// The summary of this window names the tools it holds back, the backlog of the next.
+	if len(res.SuppressedTools) == 0 || slices.Contains(res.SuppressedTools, "zz") {
+		t.Errorf("summary %v", res.SuppressedTools)
+	}
+}
+
+// TestVisibleBackslash checks that text reading like an escape is escaped itself.
+func TestVisibleBackslash(t *testing.T) {
+	if got := Visible(`a\u{200B}b \n`); got != `a\u{005C}u{200B}b \n` {
+		t.Errorf("%q", got)
+	}
+}

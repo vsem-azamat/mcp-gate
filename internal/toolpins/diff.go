@@ -102,10 +102,13 @@ func show(v json.RawMessage) []string {
 // points, line and paragraph separators, and the blank letters that render as nothing (U+034F,
 // U+115F, U+1160, U+2800, U+3164, U+FFA0). A definition thus cannot hide text from the terminal
 // it is shown on.
+//
+// A backslash that starts "u{" is written as \u{005C} too, so that text that reads like an escape
+// cannot be taken for one: every \u{XXXX} in the result is an escape.
 func Visible(s string) string {
 	var b strings.Builder
-	for _, r := range s {
-		if r != '\t' && hidden(r) {
+	for i, r := range s {
+		if r != '\t' && hidden(r) || r == '\\' && strings.HasPrefix(s[i+1:], "u{") {
 			fmt.Fprintf(&b, "\\u{%04X}", r)
 			continue
 		}

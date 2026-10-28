@@ -43,6 +43,9 @@ type Source struct {
 	events   chan event
 	stats    stats
 
+	// listGap is the least time between the starts of two listings.
+	listGap time.Duration
+
 	cancel context.CancelFunc // set by Start; ends the workers and the listings
 	wg     sync.WaitGroup
 }
@@ -55,7 +58,7 @@ func NewSource(name string, logger *slog.Logger) *Source {
 	}
 	return &Source{
 		name: name, logger: logger.With("server", name),
-		kick: make(chan struct{}, 1), progress: newProgressTable(), events: make(chan event, eventQueue),
+		kick: make(chan struct{}, 1), progress: newProgressTable(), events: make(chan event, eventQueue), listGap: listGap,
 	}
 }
 
@@ -191,13 +194,15 @@ func (s *Source) current() *Mirror {
 	return s.mirrors[len(s.mirrors)-1]
 }
 
-// syncLoop lists what is dirty whenever it is kicked, and retries failed listings with backoff
-// while the session lasts.
+// syncLoop lists what is dirty whenever it is kicked, at most once per listGap, the kicks that
+// arrive meanwhile merged into the next listing, and retries failed listings with backoff while
+// the session lasts.
 func (s *Source) syncLoop(ctx context.Context) {
 	defer s.wg.Done()
 	retry := retryFirst
 	var timer *time.Timer
 	var timerC <-chan time.Time
+	var last time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -209,6 +214,21 @@ func (s *Source) syncLoop(ctx context.Context) {
 		case <-timerC:
 			timerC = nil
 		}
+		// A server that sends list-changed notifications back to back gets one listing per gap,
+		// which lists what it has then.
+		if wait := s.listGap - time.Since(last); !last.IsZero() && wait > 0 {
+			gap := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				gap.Stop()
+				if timer != nil {
+					timer.Stop()
+				}
+				return
+			case <-gap.C:
+			}
+		}
+		last = time.Now()
 		s.mu.Lock()
 		kinds := s.dirty
 		s.dirty = 0

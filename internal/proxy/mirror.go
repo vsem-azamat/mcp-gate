@@ -40,6 +40,10 @@ import (
 const (
 	// listTimeout bounds one catalog listing.
 	listTimeout = 60 * time.Second
+	// listGap is the least time between the starts of two listings of a server, so that one
+	// that keeps sending list-changed notifications cannot have its catalog, and its tool pins,
+	// read and written back to back.
+	listGap = time.Second
 	// The delay before a failed listing is tried again, doubling up to the maximum.
 	retryFirst = 2 * time.Second
 	retryLast  = time.Minute

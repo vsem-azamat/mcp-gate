@@ -45,7 +45,8 @@ var acceptRE = regexp.MustCompile(`^(.+)=(sha256:[0-9a-f]{64})$`)
 var escapeRE = regexp.MustCompile(`\\u\{([0-9A-F]{4,6})\}`)
 
 // unescapeName undoes toolpins.Visible, so that a name diff shows with escapes is accepted as
-// the server lists it.
+// the server lists it; Visible escapes a backslash that would read as an escape, so every
+// \u{XXXX} is one.
 func unescapeName(name string) string {
 	return escapeRE.ReplaceAllStringFunc(name, func(esc string) string {
 		var r rune

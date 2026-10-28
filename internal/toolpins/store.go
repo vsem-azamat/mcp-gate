@@ -74,6 +74,9 @@ type serverState struct {
 	window     time.Time
 	reports    int
 	summarized bool
+	// backlog are the tools whose change a window left unreported; they are reported, and
+	// named in a summary, before the others.
+	backlog map[string]bool
 }
 
 // New returns the store under a state directory; with an empty one it keeps the pins in memory.
@@ -93,7 +96,7 @@ func (s *Store) state(server string) *serverState {
 	s.mu.Lock()
 	st := s.servers[server]
 	if st == nil {
-		st = &serverState{reported: map[string]string{}}
+		st = &serverState{reported: map[string]string{}, backlog: map[string]bool{}}
 		s.servers[server] = st
 	}
 	s.mu.Unlock()
@@ -115,7 +118,8 @@ type Change struct {
 type Result struct {
 	// Held are the tools to leave out of the catalog, by name.
 	Held map[string]bool
-	// Changes are the changes to report, sorted by tool.
+	// Changes are the changes to report: those left unreported before first, each part sorted
+	// by tool.
 	Changes []Change
 	// Suppressed, set once per ReportWindow, counts the changes this listing leaves unreported
 	// because the server went over ReportLimit, and SuppressedTools names a few of them.
@@ -132,9 +136,8 @@ type Result struct {
 // server without pins has every listed tool pinned; a tool whose definition differs from its
 // accepted one, or that has none, gets the listed definition as pending; a pending definition of
 // a tool listed as accepted again or no longer listed is dropped, and a tool no longer listed
-// with nothing accepted is forgotten. With
-// hold, the changed and added tools are held. A name listed more than once counts once, as
-// first listed.
+// with nothing accepted is forgotten. With hold, the changed and added tools are held. A name
+// listed more than once counts once, as first listed.
 func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 	st := s.state(server)
 	defer st.mu.Unlock()
@@ -175,6 +178,7 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 			f.Tools[name] = &Entry{Accepted: p}
 		}
 		clear(st.reported)
+		clear(st.backlog)
 		if err := s.write(server, f); err != nil {
 			// Nothing was pinned: trusting the listing would trust every later one too.
 			return holdAll(err)
@@ -194,7 +198,19 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 	}
 	dirty := false
 	var suppressed []string
-	for _, name := range slices.Sorted(maps.Keys(listed)) {
+	// The tools left unreported in an earlier window go first, so that tools that change more
+	// often cannot keep them from being reported.
+	order := slices.Sorted(maps.Keys(listed))
+	slices.SortStableFunc(order, func(a, b string) int {
+		switch {
+		case st.backlog[a] == st.backlog[b]:
+			return 0
+		case st.backlog[a]:
+			return -1
+		}
+		return 1
+	})
+	for _, name := range order {
 		p := listed[name]
 		e := f.Tools[name]
 		if e != nil && e.Accepted != nil && e.Accepted.Hash == p.Hash {
@@ -203,6 +219,7 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 				dirty = true
 			}
 			delete(st.reported, name)
+			delete(st.backlog, name)
 			continue
 		}
 		if e == nil {
@@ -222,8 +239,10 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 		if key := p.Hash + " " + action; st.reported[name] != key {
 			if st.reports >= ReportLimit {
 				suppressed = append(suppressed, name)
+				st.backlog[name] = true
 				continue
 			}
+			delete(st.backlog, name)
 			st.reported[name] = key
 			st.reports++
 			c := Change{Tool: name, Kind: e.Change(), Listed: p.Hash}
@@ -242,6 +261,7 @@ func (s *Store) Check(server string, hold bool, tools []*mcp.Tool) Result {
 			continue
 		}
 		delete(st.reported, name)
+		delete(st.backlog, name)
 		if e.Pending != nil {
 			e.Pending = nil
 			dirty = true

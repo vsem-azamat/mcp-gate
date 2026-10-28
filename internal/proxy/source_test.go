@@ -3,8 +3,11 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -144,5 +147,68 @@ func TestCollectBounds(t *testing.T) {
 	}
 	if got, err := collect(t.Context(), two); err != nil || len(got) != 3 {
 		t.Errorf("two pages = %d entries, %v", len(got), err)
+	}
+}
+
+// listingDown is a downstream served by an in-memory server, which counts its sessions' uses.
+type listingDown struct {
+	stubDown
+	cs    *mcp.ClientSession
+	lists atomic.Int32
+}
+
+func (d *listingDown) Call(ctx context.Context, fn func(context.Context, *mcp.ClientSession) error) error {
+	d.lists.Add(1)
+	return fn(ctx, d.cs)
+}
+
+// TestListingsMergedWithinGap checks that list-changed notifications sent back to back are merged
+// into one listing per listGap, and that the last listing reads what the server has then.
+func TestListingsMergedWithinGap(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "1"}, nil)
+	add := func(name string) {
+		server.AddTool(&mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}},
+			func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				return &mcp.CallToolResult{}, nil
+			})
+	}
+	add("a")
+	ct, st := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(t.Context(), st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "1"}, nil).Connect(t.Context(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close(); _ = ss.Close() })
+	down := &listingDown{cs: cs}
+	src := NewSource("s", nil)
+	src.listGap = 300 * time.Millisecond
+	src.Attach(onSession{down})
+	m := New(Options{Name: "s", Policy: policy.New(&config.Server{}), Source: src})
+	src.Start(t.Context())
+	defer src.Close()
+	src.OnSession(nil)
+	for !m.Ready() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := down.lists.Load()
+	for i := range 50 {
+		add(fmt.Sprintf("t%d", i))
+		src.Notifications().ToolsChanged()
+		time.Sleep(2 * time.Millisecond)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for catalogOf(m).Tools["t49"] == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("the last tool is not listed: %d tools", len(catalogOf(m).Tools))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 50 notifications over about 100ms: the one listed at once, and one after the gap.
+	if n := down.lists.Load() - start; n > 3 {
+		t.Errorf("%d listings for 50 notifications", n)
 	}
 }

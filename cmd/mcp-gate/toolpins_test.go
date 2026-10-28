@@ -134,7 +134,7 @@ func TestToolpinsRefusesForeignStateDir(t *testing.T) {
 func TestToolpinsAcceptEscapedName(t *testing.T) {
 	dir := t.TempDir()
 	s := toolpins.New(dir)
-	name := "echo\u200b"
+	name := "echo" + string(rune(0x200b))
 	s.Check("notes", true, []*mcp.Tool{{Name: "sleep", InputSchema: map[string]any{"type": "object"}}})
 	s.Check("notes", true, []*mcp.Tool{{Name: "sleep", InputSchema: map[string]any{"type": "object"}}, {Name: name, InputSchema: map[string]any{"type": "object"}}})
 	r := runCmd(t, noEnv, "toolpins", "diff", "-state-dir", dir, "notes")
@@ -145,5 +145,13 @@ func TestToolpinsAcceptEscapedName(t *testing.T) {
 	}
 	if r := runCmd(t, noEnv, "toolpins", "accept", "-state-dir", dir, "notes", line); r.code != exitOK {
 		t.Errorf("accept %q: %d %q", line, r.code, r.stderr)
+	}
+}
+
+func TestUnescapeName(t *testing.T) {
+	for _, name := range []string{"echo", "echo" + string(rune(0x200b)), `echo\u{200B}`, "a\\b"} {
+		if got := unescapeName(toolpins.Visible(name)); got != name {
+			t.Errorf("%q: %q", name, got)
+		}
 	}
 }
