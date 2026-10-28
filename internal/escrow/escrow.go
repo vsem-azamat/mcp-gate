@@ -182,20 +182,25 @@ type Replacer struct {
 
 	mu      sync.Mutex
 	handles []string          // the handles it returned, each once
-	issued  map[string]string // the marker it returned, by kind and value
+	issued  map[string]string // the marker it returned, by issuedKey
 }
+
+// issuedKey is the key of a finding in Replacer.issued: its kind and the SHA-256 of its value,
+// so that the memo holds no second copy of the value.
+func issuedKey(kind string, sum [sha256.Size]byte) string { return kind + "\x00" + string(sum[:]) }
 
 // Replace implements redact.Replacer. A value it has replaced before gets the same marker
 // again, without a second insert.
 func (r *Replacer) Replace(f redact.Finding) string {
-	key := f.Kind + "\x00" + f.Value
+	sum := sha256.Sum256([]byte(f.Value))
+	key := issuedKey(f.Kind, sum)
 	r.mu.Lock()
 	marker, seen := r.issued[key]
 	r.mu.Unlock()
 	if seen {
 		return marker
 	}
-	marker, handle := r.keep(f)
+	marker, handle := r.keep(f, sum)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.issued == nil {
@@ -209,11 +214,10 @@ func (r *Replacer) Replace(f redact.Finding) string {
 }
 
 // keep inserts a finding and returns its marker, and its handle when it was kept.
-func (r *Replacer) keep(f redact.Finding) (marker, handle string) {
+func (r *Replacer) keep(f redact.Finding, sum [sha256.Size]byte) (marker, handle string) {
 	if len(f.Value) > MaxValueBytes {
 		return redact.MarkerText(f.Kind), ""
 	}
-	sum := sha256.Sum256([]byte(f.Value))
 	handle, err := r.e.store.insert(&entry{
 		kind: f.Kind, server: r.src.Server, tool: r.src.Tool, source: r.summary(),
 		value:    []byte(f.Value),
@@ -237,7 +241,7 @@ func (r *Replacer) Issued() redact.Replacer {
 	return redact.ReplacerFunc(func(f redact.Finding) string {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		if marker, ok := r.issued[f.Kind+"\x00"+f.Value]; ok {
+		if marker, ok := r.issued[issuedKey(f.Kind, sha256.Sum256([]byte(f.Value)))]; ok {
 			return marker
 		}
 		return f.Value

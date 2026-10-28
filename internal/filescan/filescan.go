@@ -14,6 +14,7 @@ package filescan
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -231,7 +233,43 @@ func (s *Scanner) forms(paths []string, rep redact.Replacer) []string {
 			out = append(out, r)
 		}
 	}
-	return out
+	// A JSON text may escape a path: "/" as "\/", other than ASCII as \uXXXX.
+	for _, p := range slices.Clone(out) {
+		out = append(out, jsonForms(p)...)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// jsonForms returns the ways a JSON encoder may write s inside a string, other than as it is:
+// with "/" escaped, with every character beyond ASCII escaped (lower- or upper-case hex), both,
+// and as encoding/json writes it.
+func jsonForms(s string) []string {
+	unicodeEsc := func(upper bool) string {
+		var b strings.Builder
+		for _, r := range s {
+			if r < utf8.RuneSelf {
+				b.WriteRune(r)
+				continue
+			}
+			units := utf16.Encode([]rune{r})
+			for _, u := range units {
+				if upper {
+					fmt.Fprintf(&b, `\u%04X`, u)
+				} else {
+					fmt.Fprintf(&b, `\u%04x`, u)
+				}
+			}
+		}
+		return b.String()
+	}
+	slash := func(s string) string { return strings.ReplaceAll(s, "/", `\/`) }
+	lower, upper := unicodeEsc(false), unicodeEsc(true)
+	forms := []string{slash(s), lower, upper, slash(lower), slash(upper)}
+	if data, err := json.Marshal(s); err == nil {
+		forms = append(forms, string(data[1:len(data)-1]))
+	}
+	return slices.DeleteFunc(forms, func(f string) bool { return f == s })
 }
 
 // opened is a file to scan, opened under its root.

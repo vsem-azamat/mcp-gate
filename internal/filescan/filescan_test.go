@@ -460,8 +460,8 @@ func TestNoFileIsKeptWhenAnotherCannotBeScanned(t *testing.T) {
 	}
 }
 
-// freshMarkers gives every finding a marker of its own, as a replacer whose markers cannot be
-// reproduced would; Issued fails the test, since the scan must not need it to find blocks.
+// freshMarkers gives every finding a marker of its own. It has no Issued, so forms cannot
+// reproduce its markers, and the blocks must be found by index.
 type freshMarkers struct{ n int }
 
 func (r *freshMarkers) Replace(f redact.Finding) string {
@@ -515,6 +515,40 @@ func TestEscapedJSONPathIsWithheld(t *testing.T) {
 	res, n, err := f.scan(t, "download_media", nil, in)
 	if err != nil || n != 1 || !strings.HasPrefix(text(t, res), "[REDACTED:file] ") {
 		t.Fatalf("escaped JSON = %q, %d, %v", text(t, res), n, err)
+	}
+}
+
+// An escaped mention is withheld wherever it is, not only in the block the path was found in.
+func TestEscapedMentionsElsewhereAreWithheld(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, 0, false)
+	path := filepath.Join(f.dir, "ф-notes.txt")
+	writeFile(t, path, "DB_PASS"+"WORD="+"hunter2!x\n")
+	escaped := strings.ReplaceAll(strings.ReplaceAll(path, "/", `\/`), "ф", `\u0444`)
+
+	// A JSON text names it; an embedded resource repeats it, escaped, under another member.
+	in := &mcp.CallToolResult{Content: []mcp.Content{
+		&mcp.TextContent{Text: `{"path":"` + escaped + `"}`},
+		&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{URI: "note://1", MIMEType: "application/json", Text: `{"saved":"` + escaped + `"}`}},
+	}}
+	res, n, err := f.scan(t, "download_media", nil, in)
+	if err != nil || n != 1 {
+		t.Fatalf("scan = %d, %v", n, err)
+	}
+	for i, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); !ok || !strings.HasPrefix(tc.Text, "[REDACTED:file] ") {
+			t.Errorf("block %d = %#v", i, c)
+		}
+	}
+
+	// Structured content names it; a text that is not JSON quotes it escaped.
+	in = &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: `result: {"path":"` + escaped + `"}`}},
+		StructuredContent: map[string]any{"path": path},
+	}
+	res, n, err = f.scan(t, "download_media", nil, in)
+	if err != nil || n != 1 || !strings.HasPrefix(text(t, res), "[REDACTED:file] ") {
+		t.Errorf("escaped quote in text = %q, %d, %v", text(t, res), n, err)
 	}
 }
 
