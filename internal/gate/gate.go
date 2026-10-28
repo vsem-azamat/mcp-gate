@@ -89,7 +89,10 @@ type Gate struct {
 	audit      audit.Sink
 	metricsSrv *upstream.Server
 	pins       *pinStore
-	started    atomic.Bool
+	// startedAt is when the gate was built; file scanning keeps in the escrow only files written
+	// since then, across reloads.
+	startedAt time.Time
+	started   atomic.Bool
 	// startupOver is closed when the startup watcher returns: started, or shutting down first.
 	startupOver chan struct{}
 	// drain is closed when shutdown begins; it ends the subscriptions/listen streams, which
@@ -135,7 +138,7 @@ func New(opts Options) (*Gate, error) {
 	cfg := opts.Config
 	g := &Gate{
 		opts: opts, boot: cfg, logger: opts.Logger, drain: make(chan struct{}), startupOver: make(chan struct{}),
-		running: make(chan struct{}), drained: make(chan struct{}),
+		running: make(chan struct{}), drained: make(chan struct{}), startedAt: time.Now(),
 	}
 	g.retireCtx, g.stopRetiring = context.WithCancel(context.Background())
 	g.metrics = metrics.New()
@@ -188,6 +191,7 @@ func New(opts Options) (*Gate, error) {
 		return nil, err
 	}
 	g.snap.Store(sn)
+	g.prunePins(cfg)
 	if cfg.Metrics.Addr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("GET "+metricsRoute, g.metricsHandler())
@@ -198,6 +202,13 @@ func New(opts Options) (*Gate, error) {
 	g.srv = upstream.NewServer(cfg.Listen.Addr, http.HandlerFunc(g.serveHTTP), g.logger)
 	g.srv.RegisterOnShutdown(func() { g.drainOnce.Do(func() { close(g.drain) }) })
 	return g, nil
+}
+
+// prunePins drops the learned pins that no longer apply under cfg.
+func (g *Gate) prunePins(cfg *config.Config) {
+	if err := g.pins.prune(cfg); err != nil {
+		g.logger.Warn("cannot store the learned protocol pins", "error", err.Error())
+	}
 }
 
 // remoteOf returns how the client address of a request is read under a listen config.

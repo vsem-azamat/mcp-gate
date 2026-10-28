@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -11,6 +10,12 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// decodeError is the error of a value that does not decode, as a *yaml.TypeError, so that the
+// decoder goes on and Parse reports it with every other problem.
+func decodeError(format string, args ...any) error {
+	return &yaml.TypeError{Errors: []string{fmt.Sprintf(format, args...)}}
+}
+
 // FileMode is a file's permission bits, written in octal: 0600, "0600" or "0o600".
 type FileMode uint32
 
@@ -18,11 +23,11 @@ type FileMode uint32
 // YAML type, since YAML reads 0600 as a decimal or octal number depending on the version.
 func (m *FileMode) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind != yaml.ScalarNode {
-		return fmt.Errorf("line %d: a file mode is octal, such as 0600", n.Line)
+		return decodeError("line %d: a file mode is octal, such as 0600", n.Line)
 	}
 	v, err := strconv.ParseUint(strings.TrimPrefix(strings.TrimPrefix(n.Value, "0o"), "0O"), 8, 32)
 	if err != nil {
-		return fmt.Errorf("line %d: a file mode is octal, such as 0600", n.Line)
+		return decodeError("line %d: a file mode is octal, such as 0600", n.Line)
 	}
 	*m = FileMode(v)
 	return nil
@@ -41,14 +46,14 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 // UnmarshalYAML implements yaml.Unmarshaler.
 func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind != yaml.ScalarNode || n.Tag != "!!str" {
-		return fmt.Errorf(`line %d: a duration is a string with a unit, such as "30s"`, n.Line)
+		return decodeError(`line %d: a duration is a string with a unit, such as "30s"`, n.Line)
 	}
 	v, err := time.ParseDuration(n.Value)
 	if err != nil {
-		return fmt.Errorf(`line %d: a duration is a string with a unit, such as "30s"`, n.Line)
+		return decodeError(`line %d: a duration is a string with a unit, such as "30s"`, n.Line)
 	}
 	if v < 0 {
-		return fmt.Errorf("line %d: a duration cannot be negative", n.Line)
+		return decodeError("line %d: a duration cannot be negative", n.Line)
 	}
 	*d = Duration(v)
 	return nil
@@ -79,13 +84,13 @@ var byteUnits = map[string]int64{"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 
 
 // UnmarshalYAML implements yaml.Unmarshaler.
 func (b *ByteSize) UnmarshalYAML(n *yaml.Node) error {
-	msg := fmt.Sprintf(`line %d: a size is a string with a unit B, KiB, MiB or GiB, such as "16MiB"`, n.Line)
+	const msg = `line %d: a size is a string with a unit B, KiB, MiB or GiB, such as "16MiB"`
 	if n.Kind != yaml.ScalarNode || n.Tag != "!!str" {
-		return errors.New(msg)
+		return decodeError(msg, n.Line)
 	}
 	v, err := ParseByteSize(n.Value)
 	if err != nil {
-		return errors.New(msg)
+		return decodeError(msg, n.Line)
 	}
 	*b = v
 	return nil

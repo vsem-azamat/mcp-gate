@@ -8,7 +8,7 @@
 
 ### Requirement: serve
 
-`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid, and also when the escrow key hash cannot be resolved (see the escrow spec). Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server (OAuth servers with the grants in the `oauth` directory of the state directory, see the oauth spec), listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. When systemd passes it a socket (`LISTEN_FDS` set and `LISTEN_PID` naming the gate's process), it SHALL serve that socket instead of opening `listen.addr`, logging a warning when the socket is on another address; more than one socket, or one that is not a listening TCP socket, SHALL make it exit with status 2. When `NOTIFY_SOCKET` is set it SHALL send `READY=1` there once startup is over (see Health) and `STOPPING=1` when it begins to shut down. SIGHUP reloads the config (see the reload spec). Neither these variables nor the passed socket SHALL reach the stdio servers. On SIGINT or SIGTERM it SHALL stop accepting connections, leaving those that wait on a socket systemd holds to the next process, end the `subscriptions/listen` streams, and for up to 1 second still serve the requests that arrive on open connections, answering each request from then on with `Connection: close`; it SHALL then close the connections that are idle or on which no request has arrived, give calls in flight up to 10 seconds from the start of the shutdown (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0; it SHALL exit with status 2 when it cannot listen or the listener fails.
+`mcp-gate serve [-state-dir DIR] <config.yaml>` SHALL load the config as `check` does and exit with status 2, printing every problem, when it is invalid, and also when the escrow key hash cannot be resolved (see the escrow spec). Otherwise it SHALL make itself non-dumpable and a child subreaper, start a supervisor for every enabled server (OAuth servers with the grants in the `oauth` directory of the state directory, see the oauth spec), listen on `listen.addr`, and log JSON lines to stderr at `logLevel` and above. When systemd passes it a socket (`LISTEN_FDS` set and `LISTEN_PID` naming the gate's process), it SHALL serve that socket instead of opening `listen.addr`, logging a warning when the socket is on another address; more than one socket, or one that is not a listening TCP socket, SHALL make it exit with status 2. When `NOTIFY_SOCKET` is set it SHALL send `READY=1` there once startup is over (see Health) and `STOPPING=1` when it begins to shut down. SIGHUP reloads the config (see the reload spec). Neither these variables nor the passed socket SHALL reach the stdio servers. On SIGINT or SIGTERM it SHALL stop accepting connections, leaving those that wait on a socket systemd holds to the next process, end the `subscriptions/listen` streams, and for up to 1 second still serve the requests that arrive on open connections, answering each request from then on with `Connection: close`; it SHALL then close the connections that are idle or on which no request has arrived, give calls in flight up to 10 seconds from the start of the shutdown (their progress still delivered), stop every server in parallel, logging one that does not stop within 15 seconds, and exit with status 0. It SHALL exit with status 2 when it cannot listen or the listener fails. A second SIGINT or SIGTERM during the shutdown SHALL end the process at once: without waiting for calls in flight, it SHALL send SIGKILL to the process group of every stdio server that may still have members, also when the server itself has already exited, so that their own children in the group go too, and then die of the signal.
 
 #### Scenario: Shutdown with a listening client
 
@@ -40,6 +40,16 @@
 - **WHEN** `serve` is given a config whose server accepts no token
 - **THEN** it exits with status 2, naming `servers.<name>.auth`
 
+#### Scenario: Second signal during the shutdown
+
+- **WHEN** the gate shuts down on SIGINT while a call is in flight and gets SIGINT again
+- **THEN** it exits at once, killed by the signal, and the server's process group, a child of the server included, is gone
+
+#### Scenario: Second signal while a server's child ignores SIGTERM
+
+- **WHEN** the gate shuts down on SIGINT, a stdio server exits as its stdin closes and leaves a child in its group that ignores SIGTERM, and the gate gets SIGINT again
+- **THEN** that child is gone when the gate has exited
+
 ### Requirement: Health
 
 `GET` and `HEAD` of `/_healthz` and `/_readyz` SHALL need no token and answer on any Host; other methods SHALL get 405. GET SHALL return a JSON object with `name` (the config's `name`), `serverCount` (the enabled servers), `status`, `unhealthy` (only when not empty), `needsLogin` (only when not empty) and `version` (the build's), HEAD only the status code. `/_healthz` SHALL be 200 `ok` while the process serves. `/_readyz` SHALL be 503 `initializing` until every enabled server has had its catalog listed or is in `needs-login`, or `startupGracePeriod` has passed since start; then 503 `degraded`, naming them sorted in `unhealthy`, while any server whose catalog was listed is in a state other than `ready` and `degraded`; 503 `unavailable` when servers are enabled but none was ever listed; 503 `degraded` while any server is in `needs-login`; and 200 `ok` otherwise. After startup, `needsLogin` SHALL name, sorted, every server in `needs-login`, whether its catalog was listed or not.
@@ -70,9 +80,14 @@ When `admin.tokens` is set, `GET /_status` SHALL return, to a request carrying o
 
 ### Requirement: Learned protocol pins
 
-With a state directory (`-state-dir`, by default the first entry of `$STATE_DIRECTORY`), a protocol pin a supervisor learns SHALL be written to `pins.json` in it, as `{"version": 1, "pins": {"<server>": "<version>"}}`, through a temporary file that is synced and renamed. At start the file SHALL be read and each pin to a version the SDK supports given to its server, which then connects on it without the discover sub-deadline. A missing file SHALL be no pins; a file that cannot be read or parsed SHALL be logged and ignored. Without a state directory, pins SHALL be kept only while the process runs.
+With a state directory (`-state-dir`, by default the first entry of `$STATE_DIRECTORY`), a protocol pin a supervisor learns SHALL be written to `pins.json` in it, as `{"version": 2, "pins": {"<server>": {"version": "<version>", "transport": "<hash>"}}}`, where the hash is the SHA-256 of the server's transport as written in the config, before variables are expanded (the `command`, `args` and `cwd` of a stdio server, the `url` of an HTTP one; not `env` or `headers`), so that the file holds nothing derived from variable values, through a temporary file that is synced and renamed, after which the directory SHALL be synced. At start the file SHALL be read and each pin to a version the SDK supports given to its server when the server's transport has the same hash, so that it connects on it without the discover sub-deadline; a pin learned on another transport SHALL NOT be used. At start and after each reload, the pins of servers the config does not have and of servers whose transport changed SHALL be dropped from the file. A missing file and a file of version 1 SHALL be no pins; a file that cannot be read or parsed SHALL be logged and ignored. Without a state directory, pins SHALL be kept only while the process runs.
 
 #### Scenario: Pin survives a restart
 
 - **WHEN** a server that ignores discover is pinned automatically and the gate is restarted with the same state directory
 - **THEN** the server connects on `2025-11-25` at once and is reported as automatically pinned
+
+#### Scenario: Pin of a changed transport
+
+- **WHEN** the command or arguments of a pinned server change, or the server is removed from the config, and the gate is restarted or reloaded
+- **THEN** its pin is dropped from `pins.json` and the server connects by discover

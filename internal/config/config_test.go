@@ -783,3 +783,92 @@ func TestLoopbackAddr(t *testing.T) {
 		}
 	}
 }
+
+// TestDecodeErrorsWithTheRest checks that problems the YAML decoder finds are reported together
+// with those of expansion and validation.
+func TestDecodeErrorsWithTheRest(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nlogLevel: loud\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: '${NOPE}'}\n" +
+		"    escrow: {ttl: 1h}\n    callTimeout: 30\n    maxMessageBytes: 1024\n" +
+		"policies: {t: {servers: {a: {tools: allow}}}}\n"
+	_, err := Parse([]byte(doc), noEnv)
+	if err == nil {
+		t.Fatal("no error")
+	}
+	for _, want := range []string{
+		"field escrow not found", "a duration is a string with a unit", "a size is a string",
+		"stdio.command: environment variable NOPE is unset", "logLevel: must be one of",
+		"policies.t.servers.a.tools: must be none or a mapping",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v\nwant it to contain %q", err, want)
+		}
+	}
+	if n := strings.Count(err.Error(), "policy filter"); n != 0 {
+		t.Errorf("the policy filter is reported twice: %v", err)
+	}
+
+	// A filter of the wrong form is reported once, by its field, and the decoder's other errors
+	// on its line are kept.
+	doc = "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x}\n" +
+		"policies: {t: {servers: {a: {tools: {allow: [x], deny: [y], other: 1}, bogus: 1}}}}\n"
+	_, err = Parse([]byte(doc), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "field bogus not found") ||
+		strings.Count(err.Error(), "policies.t.servers.a.tools") != 1 || strings.Contains(err.Error(), "policy filter") {
+		t.Errorf("filter of the wrong form: %v", err)
+	}
+
+	// A duplicate key drops its whole mapping, so only the decoder's errors are reported.
+	doc = "version: 1\nlogLevel: loud\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x}\n" +
+		"    disabled: true\n    disabled: false\n    callTimeout: 30\n"
+	_, err = Parse([]byte(doc), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "already defined") || strings.Contains(err.Error(), "at least one server") {
+		t.Errorf("duplicate key: %v", err)
+	}
+}
+
+// TestServerTransport checks that Server.Transport holds the transport as written: variables are
+// not expanded in it, and the environment and headers are not part of it.
+func TestServerTransport(t *testing.T) {
+	t.Parallel()
+	parse := func(server string) string {
+		t.Helper()
+		c, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n"+server), func(name string) (string, bool) {
+			return "value-of-" + name, true
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Servers["a"].Transport
+	}
+	stdio := parse("    stdio: {command: /bin/a, args: ['--token=${TOKEN}'], env: {K: v}}\n")
+	if strings.Contains(stdio, "value-of") || !strings.Contains(stdio, "${TOKEN}") {
+		t.Errorf("stdio transport = %s", stdio)
+	}
+	if other := parse("    stdio: {command: /bin/a, args: ['--token=${TOKEN}'], env: {K: other}}\n"); other != stdio {
+		t.Errorf("the environment changes the transport: %s", other)
+	}
+	for _, changed := range []string{
+		"    stdio: {command: /bin/b, args: ['--token=${TOKEN}']}\n",
+		"    stdio: {command: /bin/a, args: ['--token=${OTHER}']}\n",
+		"    stdio: {command: /bin/a, args: ['--token=${TOKEN}'], cwd: /srv}\n",
+	} {
+		if parse(changed) == stdio {
+			t.Errorf("%q keeps the transport", changed)
+		}
+	}
+	if h := parse("    http: {url: 'https://${HOST}/mcp', headers: {X-Key: '${KEY}'}}\n"); h != `{"url":"https://${HOST}/mcp"}` {
+		t.Errorf("http transport = %s", h)
+	}
+}
+
+// TestDecodeErrorHidesValueWithBacktick checks that a value with a backtick in it does not end
+// the part of a decoder error that is hidden.
+func TestDecodeErrorHidesValueWithBacktick(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: x}\n    disabled: \"a`hunter2-long-secret`b\"\n"
+	_, err := Parse([]byte(doc), noEnv)
+	if err == nil || strings.Contains(err.Error(), "hunt") || !strings.Contains(err.Error(), "value not shown") {
+		t.Errorf("error = %v", err)
+	}
+}

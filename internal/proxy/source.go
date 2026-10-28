@@ -289,19 +289,43 @@ func (s *Source) list(ctx context.Context, cs *mcp.ClientSession, kinds, shows k
 	}
 	var err error
 	if kinds.has(audit.Tool) && caps.Tools != nil {
-		if l.tools, err = collect(cs.Tools(ctx, nil)); err != nil {
+		if l.tools, err = collect(ctx, func(ctx context.Context, c string) ([]*mcp.Tool, string, error) {
+			r, err := cs.ListTools(ctx, &mcp.ListToolsParams{Cursor: c})
+			if err != nil {
+				return nil, "", err
+			}
+			return r.Tools, r.NextCursor, nil
+		}); err != nil {
 			fail(audit.Tool, "tools", err)
 		}
 	}
 	if kinds.has(audit.Prompt) && caps.Prompts != nil && shows.has(audit.Prompt) {
-		if l.prompts, err = collect(cs.Prompts(ctx, nil)); err != nil {
+		if l.prompts, err = collect(ctx, func(ctx context.Context, c string) ([]*mcp.Prompt, string, error) {
+			r, err := cs.ListPrompts(ctx, &mcp.ListPromptsParams{Cursor: c})
+			if err != nil {
+				return nil, "", err
+			}
+			return r.Prompts, r.NextCursor, nil
+		}); err != nil {
 			fail(audit.Prompt, "prompts", err)
 		}
 	}
 	if kinds.has(audit.Resource) && caps.Resources != nil && shows.has(audit.Resource) {
-		if l.resources, err = collect(cs.Resources(ctx, nil)); err != nil {
+		if l.resources, err = collect(ctx, func(ctx context.Context, c string) ([]*mcp.Resource, string, error) {
+			r, err := cs.ListResources(ctx, &mcp.ListResourcesParams{Cursor: c})
+			if err != nil {
+				return nil, "", err
+			}
+			return r.Resources, r.NextCursor, nil
+		}); err != nil {
 			fail(audit.Resource, "resources", err)
-		} else if l.templates, err = collect(cs.ResourceTemplates(ctx, nil)); err != nil && !methodNotFound(err) {
+		} else if l.templates, err = collect(ctx, func(ctx context.Context, c string) ([]*mcp.ResourceTemplate, string, error) {
+			r, err := cs.ListResourceTemplates(ctx, &mcp.ListResourceTemplatesParams{Cursor: c})
+			if err != nil {
+				return nil, "", err
+			}
+			return r.ResourceTemplates, r.NextCursor, nil
+		}); err != nil && !methodNotFound(err) {
 			fail(audit.Resource, "resource templates", err)
 		}
 	}

@@ -306,8 +306,9 @@ func sameSet(a, b []string) bool {
 var tokenVarRE = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 // nameTokens names every client token. A token read from a variable is named after the variable
-// with the prefix all token variables share removed, lower-cased: ${HUB_TOKEN_LAPTOP} and
-// ${HUB_TOKEN_PHONE} become laptop and phone. When that leaves a name empty, invalid or taken
+// with the prefix the global token variables share (all token variables, with fewer than two
+// global ones) removed, lower-cased: ${HUB_TOKEN_LAPTOP} and ${HUB_TOKEN_PHONE} become laptop
+// and phone. When that leaves a name empty, invalid or taken
 // twice, or a token is written out, the tokens are named token1, token2 and so on.
 func (im *importer) nameTokens(doc *document) {
 	var order []string
@@ -341,9 +342,15 @@ func (im *importer) nameTokens(doc *document) {
 	if literal {
 		im.warn("a client token is written in the config; move it to the environment and reference it as ${NAME}")
 	}
+	// The prefix comes from the global tokens when there are at least two, so that a server's
+	// own token named otherwise (MAIL_TOKEN) does not keep the others from losing it.
+	from := vars
+	if global := tokenVars(doc.tokens); len(global) > 1 {
+		from = global
+	}
 	prefix := ""
-	if len(vars) > 1 {
-		prefix = commonPrefix(vars)
+	if len(from) > 1 {
+		prefix = commonPrefix(from)
 		if i := strings.LastIndex(prefix, "_"); i >= 0 {
 			prefix = prefix[:i+1]
 		} else {
@@ -372,6 +379,17 @@ func (im *importer) nameTokens(doc *document) {
 			doc.names[v] = "token" + strconv.Itoa(i+1)
 		}
 	}
+}
+
+// tokenVars returns the names of the variables that tokens are read from.
+func tokenVars(tokens []string) []string {
+	var out []string
+	for _, v := range tokens {
+		if m := tokenVarRE.FindStringSubmatch(v); m != nil {
+			out = append(out, m[1])
+		}
+	}
+	return out
 }
 
 func commonPrefix(vs []string) string {

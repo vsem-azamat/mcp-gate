@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -95,5 +97,52 @@ func TestMirrorAttachedDuringListing(t *testing.T) {
 	}
 	if catalogOf(shows).Prompts["p"] == nil {
 		t.Errorf("the prompt is missing: %v", catalogOf(shows).Prompts)
+	}
+}
+
+// TestCollectBounds checks that a listing whose cursor never ends, or that has too many
+// entries, fails instead of growing.
+func TestCollectBounds(t *testing.T) {
+	t.Parallel()
+	type entry struct{}
+	pages := 0
+	endless := func(context.Context, string) ([]*entry, string, error) {
+		pages++
+		return nil, "again", nil
+	}
+	if _, err := collect(t.Context(), endless); !errors.Is(err, errListTooLong) || pages != maxListPages {
+		t.Errorf("endless cursor: %v after %d pages", err, pages)
+	}
+	big := func(_ context.Context, c string) ([]*entry, string, error) {
+		next := "more"
+		if c == "more" {
+			next = ""
+		}
+		return make([]*entry, maxListEntries/2+1), next, nil
+	}
+	if _, err := collect(t.Context(), big); !errors.Is(err, errListTooLong) {
+		t.Errorf("too many entries: %v", err)
+	}
+	type text struct{ T string }
+	pageOf := strings.Repeat("x", 1<<20)
+	heavyPages := 0
+	heavy := func(context.Context, string) ([]*text, string, error) { // 30 pages of 1 MiB
+		heavyPages++
+		if heavyPages == 30 {
+			return []*text{{T: pageOf}}, "", nil
+		}
+		return []*text{{T: pageOf}}, "more", nil
+	}
+	if _, err := collect(t.Context(), heavy); !errors.Is(err, errListTooLong) {
+		t.Errorf("too many bytes: %v", err)
+	}
+	two := func(_ context.Context, c string) ([]*entry, string, error) {
+		if c == "" {
+			return []*entry{{}}, "p2", nil
+		}
+		return []*entry{{}, {}}, "", nil
+	}
+	if got, err := collect(t.Context(), two); err != nil || len(got) != 3 {
+		t.Errorf("two pages = %d entries, %v", len(got), err)
 	}
 }
