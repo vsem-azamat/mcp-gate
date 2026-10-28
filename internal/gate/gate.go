@@ -22,6 +22,7 @@ import (
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
 	"github.com/vsem-azamat/mcp-gate/internal/escrow"
+	"github.com/vsem-azamat/mcp-gate/internal/limit"
 	"github.com/vsem-azamat/mcp-gate/internal/metrics"
 	"github.com/vsem-azamat/mcp-gate/internal/oauth"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
@@ -92,6 +93,9 @@ type Gate struct {
 	metricsSrv *upstream.Server
 	pins       *pinStore
 	toolPins   *toolpins.Store
+	// limits holds the buckets of the limits for the life of the process; every mirror shares
+	// it, and a reload sets its rules in place, keeping the buckets of unchanged entries.
+	limits *limit.Limiter
 	// startedAt is when the gate was built; file scanning keeps in the escrow only files written
 	// since then, across reloads.
 	startedAt time.Time
@@ -147,6 +151,7 @@ func New(opts Options) (*Gate, error) {
 	g.metrics = metrics.New()
 	g.audit = audit.Tee(audit.Log(g.logger), g.metrics)
 	g.toolPins = toolpins.New(opts.StateDir)
+	g.limits = limit.New(nil)
 	var err error
 	if g.pins, err = loadPins(opts.StateDir); err != nil {
 		g.logger.Warn("cannot read the learned protocol pins; starting without them", "error", err.Error())
@@ -194,6 +199,7 @@ func New(opts Options) (*Gate, error) {
 	if err != nil {
 		return nil, err
 	}
+	g.limits.Set(limit.Rules(cfg))
 	g.snap.Store(sn)
 	g.prunePins(cfg)
 	if cfg.Metrics.Addr != "" {

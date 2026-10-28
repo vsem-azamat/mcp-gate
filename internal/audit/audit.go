@@ -85,6 +85,8 @@ const (
 	Withheld Outcome = "withheld"
 	// InputRequired is a result that asks the client for input, which the gate does not forward.
 	InputRequired Outcome = "input_required"
+	// Limited is a request that a rate or concurrency limit refused before it was forwarded.
+	Limited Outcome = "limited"
 )
 
 // Failed reports whether the outcome counts as a failed call: every one but ok and tool_error.

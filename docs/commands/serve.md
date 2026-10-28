@@ -2,7 +2,7 @@
 
 [Docs](../README.md) / [Commands](README.md) / **serve**
 
-`mcp-gate serve <file>` runs the gate: it starts every enabled server of the config and serves each at `/<name>/mcp` on `listen.addr`. The behaviour is specified in [`gate-lifecycle`](../../openspec/specs/gate-lifecycle/spec.md), [`routes-and-auth`](../../openspec/specs/routes-and-auth/spec.md), [`serving`](../../openspec/specs/serving/spec.md), [`aggregate-endpoint`](../../openspec/specs/aggregate-endpoint/spec.md), [`token-policies`](../../openspec/specs/token-policies/spec.md) and [`reload`](../../openspec/specs/reload/spec.md); the keys are in [Configuration](../configuration/README.md).
+`mcp-gate serve <file>` runs the gate: it starts every enabled server of the config and serves each at `/<name>/mcp` on `listen.addr`. The behaviour is specified in [`gate-lifecycle`](../../openspec/specs/gate-lifecycle/spec.md), [`routes-and-auth`](../../openspec/specs/routes-and-auth/spec.md), [`serving`](../../openspec/specs/serving/spec.md), [`aggregate-endpoint`](../../openspec/specs/aggregate-endpoint/spec.md), [`token-policies`](../../openspec/specs/token-policies/spec.md), [`rate-limits`](../../openspec/specs/rate-limits/spec.md) and [`reload`](../../openspec/specs/reload/spec.md); the keys are in [Configuration](../configuration/README.md).
 
 ```sh
 mcp-gate check gate.yaml        # validate first
@@ -135,7 +135,7 @@ Every forwarded call writes one `call` line with the server, the token name (`pr
 {"time":"…","level":"INFO","msg":"call","server":"notes","principal":"laptop","method":"tools/call","tool":"search","durMs":412,"outcome":"ok","tokenPolicy":"none","redactions":0}
 ```
 
-A call a token's policy hides is a line with outcome `denied` and `tokenPolicy` `deny`.
+A call a token's policy hides is a line with outcome `denied` and `tokenPolicy` `deny`. A call a [limit](../configuration/README.md#limits) refused is a line with outcome `limited`; it was not forwarded.
 
 When a server lists a tool whose definition differs from its pin, or a tool it has not listed before, the gate writes one `toolPin` line at warn level, once per definition and action and at most 20 a minute per server: the server, the tool, the change (`changed` or `added`), the hashes of the accepted (`pinned`, empty for `added`) and the listed definition, and what the gate does (`served`, or `held` under `toolPins: hold`). Changes beyond 20 in a minute are recorded all the same and logged in a later minute, first, while the server still lists them; meanwhile one line says how many were left out and names up to three. [toolpins](toolpins.md) shows what changed and accepts it.
 
@@ -154,7 +154,7 @@ SIGHUP (`systemctl reload mcp-gate`) makes the gate read its config file again. 
 | A server's `stdio` or `http` (command, arguments, environment, URL, headers, OAuth), `callTimeout`, `maxMessageBytes`, `protocolVersion`, `probeInterval`, `restart`, `disabled`, or the config's `name` | The server restarts once the requests in flight on the routes that reach it have ended (at most 10 seconds); meanwhile requests to it are held until it is back, at most `startupGracePeriod`. Added servers start after that, and a replacement waits for an old process that is slow to end |
 | A server's `tools`, `prompts`, `resources`, `redact`, `forwardMeta`, `toolPins`; the token policies on it; `escrow.ttl` | At once, the server keeps running; the `subscriptions/listen` streams of its routes end |
 | Tokens (`auth`, a server's `auth`), a server's `log`, `aggregate`, `listen.allowedHosts`, `listen.behindProxy`, `listen.trustedProxies` | At once: a removed token gets 401 from its next request, and a call it began before completes. Only the routes whose tokens or settings changed are replaced, ending their listen streams |
-| `logLevel`, `admin`, `metrics.enabled` | At once; the metrics' counts are kept |
+| `logLevel`, `admin`, `metrics.enabled`, `limits` | At once; the metrics' counts are kept, and the `limits` entries whose `token`, `server` and `tool` are unchanged keep their buckets, capped at a new `burst`, and their calls in flight |
 | `listen.addr`, `metrics.addr`, `escrow` (but `escrow.ttl`), `startupGracePeriod` | Only at the next restart; the reload logs a warning |
 
 A request whose body is still arriving when a reload revokes its token, or that is held while the gate starts, is checked again under the new config. `${VAR}` values come from the environment the gate started with, so a token added to the environment needs a restart. Each reload logs `config reloaded` with the servers added, restarted, removed and kept. Every reload, even one whose config does not load, also reads the tool pins again, which serves the definitions [`toolpins accept`](toolpins.md#accept) accepted. Under systemd, once startup is over, the gate reports `RELOADING=1` and then `READY=1`; `systemctl reload` itself returns as soon as the signal is sent, so the outcome of a reload is in the log. A SIGHUP during startup is applied without a report.

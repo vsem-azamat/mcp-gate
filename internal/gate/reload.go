@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
+	"github.com/vsem-azamat/mcp-gate/internal/limit"
 	"github.com/vsem-azamat/mcp-gate/internal/proxy"
 	"github.com/vsem-azamat/mcp-gate/internal/systemd"
 )
@@ -133,6 +134,7 @@ func (g *Gate) apply(ctx context.Context, cfg *config.Config) error {
 		g.opts.Level.Set(level)
 	}
 
+	g.limits.Set(limit.Rules(cfg))
 	g.snap.Store(sn)
 	g.prunePins(cfg)
 	for _, rt := range replaced {

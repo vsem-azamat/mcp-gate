@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -130,6 +131,84 @@ func (c *Config) validate(errs *[]error, skip map[string]bool, home string) {
 	}
 	c.validateAggregate(add)
 	c.validatePolicies(add)
+	c.validateLimits(add)
+}
+
+// validateLimits checks every entry of limits, and reads its rate.
+func (c *Config) validateLimits(add func(path, format string, args ...any)) {
+	for i, l := range c.Limits {
+		path := fmt.Sprintf("limits[%d]", i)
+		if l == nil {
+			add(path, "is empty")
+			continue
+		}
+		accepted := l.Token != "" && c.acceptedToken(l.Token)
+		if l.Token != "" && !accepted {
+			// Names are what the operator wrote, not values, so they can be shown.
+			add(path+".token", "is not a token any server accepts")
+		}
+		if l.Server != "" {
+			switch s := c.Servers[l.Server]; {
+			case s == nil:
+				add(path+".server", "is not a server in servers")
+			case accepted:
+				if _, ok := c.EffectiveTokens(l.Server)[l.Token]; !ok {
+					add(path+".server", "the server does not accept the token %s", l.Token)
+				}
+			}
+		}
+		switch {
+		case l.Tool == "":
+		case l.Server == "":
+			add(path+".tool", "needs server")
+		case strings.TrimSpace(l.Tool) != l.Tool:
+			add(path+".tool", "cannot have surrounding space")
+		case strings.HasPrefix(l.Tool, l.Server+AggregateSeparator):
+			add(path+".tool", "names the tool as the aggregate endpoint does; write the server's own name for it, without %q", l.Server+AggregateSeparator)
+		}
+		if l.Rate == "" && l.Concurrency == 0 {
+			add(path, "needs at least one of rate and concurrency")
+		}
+		if l.Rate != "" {
+			var ok bool
+			if l.Calls, l.Per, ok = ParseRate(l.Rate); !ok {
+				add(path+".rate", "is <calls>/<period>, a positive whole number and s, m, h or a positive duration, such as 60/m or 5/30s")
+			}
+		}
+		switch {
+		case l.Burst < 0:
+			add(path+".burst", "must be positive")
+		case l.Burst > 0 && l.Rate == "":
+			add(path+".burst", "needs rate")
+		}
+		if l.Concurrency < 0 {
+			add(path+".concurrency", "must be positive")
+		}
+		for j, prev := range c.Limits[:i] {
+			if prev != nil && prev.same(l) {
+				add(path, "is the same as limits[%d]", j)
+				break
+			}
+		}
+	}
+}
+
+// same reports whether two limits entries, with their rates read, select and pass the same
+// requests: 60/m is 60/1m, and a burst left out is the rate's calls.
+func (l *Limit) same(o *Limit) bool {
+	burst := func(l *Limit) int { return cmp.Or(l.Burst, l.Calls) }
+	return l.Token == o.Token && l.Server == o.Server && l.Tool == o.Tool && l.Calls == o.Calls &&
+		l.Per == o.Per && burst(l) == burst(o) && l.Concurrency == o.Concurrency
+}
+
+// acceptedToken reports whether some server accepts a token named name.
+func (c *Config) acceptedToken(name string) bool {
+	for server := range c.Servers {
+		if _, ok := c.EffectiveTokens(server)[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // validatePolicies checks that every policy names a token some server accepts and only servers

@@ -2,14 +2,17 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/limit"
 	"github.com/vsem-azamat/mcp-gate/internal/redact/mcpredact"
 )
 
@@ -21,7 +24,9 @@ import (
 //   - before forward: the kind's before stages, each of which may refuse the request or change
 //     what is sent: today the server's filter with the tools the tool pins hold, then the
 //     caller's token policy, each of which refuses an entry it hides with the error of an
-//     unknown one;
+//     unknown one, and the rate and concurrency limits: after the filters for a tool call or
+//     prompt get, so that a hidden or held entry is never counted, and before them for a
+//     resource read, so that a hidden URI takes a call like an absent one;
 //   - forward: the request goes to the server through the supervisor, with the downstream
 //     _meta and progress (Mirror.forward);
 //   - outcome: the server's answer becomes a result or an error fit for the client, and what
@@ -47,6 +52,8 @@ type exchange struct {
 	forwarded time.Time
 	// downstream is the result the server returned, before the after stages changed it.
 	downstream any
+	// release gives back the places in flight the limits stage took; nil before.
+	release func()
 }
 
 // result is the result of a tool call, prompt get or resource read.
@@ -80,6 +87,11 @@ type pipeline[P any, R result] struct {
 // run takes x and the request p through the pipeline.
 func (pl *pipeline[P, R]) run(ctx context.Context, x *exchange, p P) (R, error) {
 	defer x.end()
+	defer func() {
+		if x.release != nil {
+			x.release()
+		}
+	}()
 	var none R
 	for _, stage := range pl.before {
 		if err := stage(ctx, x, p); err != nil {
@@ -174,6 +186,32 @@ func tokenPolicy[P any](_ context.Context, x *exchange, _ P) error {
 	return nil
 }
 
+// CodeLimited is the JSON-RPC error code of a request a limit refused, in the range JSON-RPC
+// leaves to servers.
+const CodeLimited = -32029
+
+// limits refuses a request over a rate or concurrency limit, and holds the places in flight of
+// one it passes until the pipeline ends: once the gate stops waiting for the server, which a
+// cancelled or timed-out call does before the server has finished. A tool call is matched by
+// the server's own tool name; a prompt get or resource read matches no tool entry.
+func limits[P any](_ context.Context, x *exchange, _ P) error {
+	req := limit.Request{Token: x.principal, Server: x.m.opts.Name}
+	if x.kind == audit.Tool {
+		req.Tool = x.entry
+	}
+	release, refused := x.m.opts.Limits.Acquire(req)
+	if refused != nil {
+		x.outcome = audit.Limited
+		e := &jsonrpc.Error{Code: CodeLimited, Message: refused.Error()}
+		if refused.RetryAfter > 0 {
+			e.Data = json.RawMessage(fmt.Sprintf(`{"retryAfterMs":%d}`, (refused.RetryAfter+time.Millisecond-1)/time.Millisecond))
+		}
+		return e
+	}
+	x.release = release
+	return nil
+}
+
 // The after stages.
 
 // redactWith returns the stage that redacts a result with the server's redaction, if it has
@@ -223,7 +261,7 @@ func toolErrorOutcome(_ context.Context, x *exchange, res *mcp.CallToolResult) (
 // The pipelines of the three kinds.
 
 var toolPipeline = &pipeline[*mcp.CallToolParams, *mcp.CallToolResult]{
-	before: []beforeStage[*mcp.CallToolParams]{serverFilter[*mcp.CallToolParams], tokenPolicy[*mcp.CallToolParams]},
+	before: []beforeStage[*mcp.CallToolParams]{serverFilter[*mcp.CallToolParams], tokenPolicy[*mcp.CallToolParams], limits[*mcp.CallToolParams]},
 	send: func(ctx context.Context, d Downstream, p *mcp.CallToolParams) (*mcp.CallToolResult, error) {
 		return d.CallTool(ctx, p)
 	},
@@ -240,7 +278,7 @@ var toolPipeline = &pipeline[*mcp.CallToolParams, *mcp.CallToolResult]{
 }
 
 var promptPipeline = &pipeline[*mcp.GetPromptParams, *mcp.GetPromptResult]{
-	before: []beforeStage[*mcp.GetPromptParams]{serverFilter[*mcp.GetPromptParams], tokenPolicy[*mcp.GetPromptParams]},
+	before: []beforeStage[*mcp.GetPromptParams]{serverFilter[*mcp.GetPromptParams], tokenPolicy[*mcp.GetPromptParams], limits[*mcp.GetPromptParams]},
 	send: func(ctx context.Context, d Downstream, p *mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
 		return d.GetPrompt(ctx, p)
 	},
@@ -254,7 +292,7 @@ var promptPipeline = &pipeline[*mcp.GetPromptParams, *mcp.GetPromptResult]{
 }
 
 var resourcePipeline = &pipeline[*mcp.ReadResourceParams, *mcp.ReadResourceResult]{
-	before: []beforeStage[*mcp.ReadResourceParams]{serverFilter[*mcp.ReadResourceParams], tokenPolicy[*mcp.ReadResourceParams]},
+	before: []beforeStage[*mcp.ReadResourceParams]{limits[*mcp.ReadResourceParams], serverFilter[*mcp.ReadResourceParams], tokenPolicy[*mcp.ReadResourceParams]},
 	send: func(ctx context.Context, d Downstream, p *mcp.ReadResourceParams) (*mcp.ReadResourceResult, error) {
 		return d.ReadResource(ctx, p)
 	},

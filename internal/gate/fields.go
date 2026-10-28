@@ -26,7 +26,7 @@ const (
 	// from this table (routeKey), so classifying a field here is all a route needs.
 	routeField
 	// snapshotField is applied in place without touching a route: the log level, the health
-	// endpoints, /_status, /_metrics on the listener.
+	// endpoints, /_status, /_metrics on the listener, the limits.
 	snapshotField
 	// bootField keeps its value from the start; a reload that changes it logs a warning.
 	bootField
@@ -61,8 +61,9 @@ var configFields = map[string]fieldClass{
 	"Escrow.Socket":          bootField,
 	"Warnings":               derivedField,
 	"Aggregate":              routeField,
-	"Policies":               mirrorField, // each server's mirror takes the token policies on it
-	"Servers":                0,           // see serverFields
+	"Policies":               mirrorField,   // each server's mirror takes the token policies on it
+	"Limits":                 snapshotField, // set on the gate's limiter, which keeps the buckets of unchanged entries
+	"Servers":                0,             // see serverFields
 }
 
 // serverFields classifies the fields of config.Server.

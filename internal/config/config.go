@@ -91,7 +91,51 @@ type Config struct {
 	Aggregate *Aggregate `yaml:"aggregate,omitempty"`
 	// Policies narrows what a token may reach, by token name.
 	Policies map[string]*TokenPolicy `yaml:"policies,omitempty"`
-	Servers  map[string]*Server      `yaml:"servers"`
+	// Limits caps the rate and the concurrency of the requests that reach the servers; a
+	// request passes only when every entry that matches it does.
+	Limits  []*Limit           `yaml:"limits,omitempty"`
+	Servers map[string]*Server `yaml:"servers"`
+}
+
+// Limit is one entry of limits: the requests it matches and what it lets through of them, all
+// counted together. A selector left out matches anything.
+type Limit struct {
+	// Token is a token name, as the servers know it; it matches no request without a token.
+	Token string `yaml:"token,omitempty"`
+	// Server is a server's name.
+	Server string `yaml:"server,omitempty"`
+	// Tool is a tool's own name on Server; it matches tool calls only.
+	Tool string `yaml:"tool,omitempty"`
+	// Rate is "<calls>/<period>", such as "60/m" or "5/30s"; Calls and Per are what Parse read
+	// from it.
+	Rate  string        `yaml:"rate,omitempty"`
+	Calls int           `yaml:"-"`
+	Per   time.Duration `yaml:"-"`
+	// Burst is the most calls passed at once after a quiet spell; 0 means Calls.
+	Burst int `yaml:"burst,omitempty"`
+	// Concurrency is the most calls in flight at once; 0 sets no limit.
+	Concurrency int `yaml:"concurrency,omitempty"`
+}
+
+// ParseRate reads a rate written "<calls>/<period>": a positive whole number of calls and a
+// period that is s, m, h or a positive duration such as 30s.
+func ParseRate(s string) (calls int, per time.Duration, ok bool) {
+	n, p, found := strings.Cut(s, "/")
+	if !found || n == "" || strings.TrimLeft(n, "0123456789") != "" {
+		return 0, 0, false
+	}
+	calls, err := strconv.Atoi(n)
+	if err != nil || calls <= 0 {
+		return 0, 0, false
+	}
+	if p == "s" || p == "m" || p == "h" {
+		p = "1" + p
+	}
+	per, err = time.ParseDuration(p)
+	if err != nil || per <= 0 {
+		return 0, 0, false
+	}
+	return calls, per, true
 }
 
 // TokenPolicy narrows what one token sees and may call, server by server, on top of each
@@ -752,6 +796,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Escrow.MaxEntries == 0 {
 		c.Escrow.MaxEntries = DefaultEscrowMaxEntries
+	}
+	for _, l := range c.Limits {
+		if l.Rate != "" && l.Burst == 0 {
+			l.Burst = l.Calls
+		}
 	}
 	if c.Escrow.TCP == nil {
 		c.Escrow.TCP = new(true)

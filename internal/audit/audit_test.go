@@ -26,9 +26,11 @@ func TestLogLine(t *testing.T) {
 	})
 	sink.Write(Record{Kind: Prompt, Name: "greet", Outcome: Denied, TokenPolicy: policy.NoPolicy})
 	sink.Write(Record{Server: "s", Kind: Resource, Name: "x://y", Outcome: Withheld, TokenPolicy: policy.Denied})
+	sink.Write(Record{Server: "s", Principal: "phone", Kind: Tool, Name: "echo", Outcome: Limited, TokenPolicy: policy.NoPolicy})
 	want := `{"level":"INFO","msg":"call","server":"s","principal":"laptop","method":"tools/call","tool":"echo","durMs":1,"outcome":"tool_error","tokenPolicy":"allow","redactions":2}
 {"level":"INFO","msg":"call","server":"","principal":"","method":"prompts/get","prompt":"greet","durMs":0,"outcome":"denied","tokenPolicy":"none","redactions":0}
 {"level":"INFO","msg":"call","server":"s","principal":"","method":"resources/read","uri":"x://y","durMs":0,"outcome":"withheld","tokenPolicy":"deny","redactions":0}
+{"level":"INFO","msg":"call","server":"s","principal":"phone","method":"tools/call","tool":"echo","durMs":0,"outcome":"limited","tokenPolicy":"none","redactions":0}
 `
 	if out.String() != want {
 		t.Errorf("lines:\n%s\nwant:\n%s", out.String(), want)
@@ -67,6 +69,7 @@ func TestOutcomeFailed(t *testing.T) {
 		{Unavailable, true},
 		{Withheld, true},
 		{InputRequired, true},
+		{Limited, true},
 	} {
 		if got := c.o.Failed(); got != c.failed {
 			t.Errorf("%s.Failed() = %v", c.o, got)
