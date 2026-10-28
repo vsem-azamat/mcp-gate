@@ -60,7 +60,7 @@ Without a pin, the supervisor SHALL offer the latest protocol version, letting t
 
 ### Requirement: Legacy HTTP+SSE transport
 
-An `http` server with `transport: sse` SHALL be reached over the HTTP+SSE transport of protocol `2024-11-05`: a GET to `url` opens an event stream whose first event names the endpoint that messages are POSTed to, and every message from the server arrives on that stream. The message endpoint SHALL be on the origin (scheme, host and port) of `url`; a request to any other origin SHALL NOT be sent, so that neither the configured headers nor an OAuth token leave for a host the operator did not name, and the connect SHALL fail. The configured headers, OAuth tokens (refreshed after a 401 and the request sent once more), the size limits, redirects not followed, probes and restarts SHALL be as for streamable HTTP. An event of the stream over `maxMessageBytes` SHALL be dropped, and when it is a response whose id names a pending request, that request SHALL fail with the size error while the session goes on. A recorded error SHALL name any URL on the host of `url`, on any port and in any spelling of the host the origin check would compare equal or refuse, such as the message endpoint with its session id and a URL glued onto another, as `<servers.NAME.http.url>`, query and all, and the URLs last requested of the server SHALL be replaced as they were sent, whatever characters their query holds. The time this takes SHALL grow linearly with the length of the error.
+An `http` server with `transport: sse` SHALL be reached over the HTTP+SSE transport of protocol `2024-11-05`: a GET to `url` opens an event stream whose first event names the endpoint that messages are POSTed to, and every message from the server arrives on that stream. The message endpoint SHALL be on the origin (scheme, host and port) of `url`; a request to any other origin SHALL NOT be sent, so that neither the configured headers nor an OAuth token leave for a host the operator did not name, and the connect SHALL fail. A message endpoint with user information, which `url` cannot have, or longer than 8 KiB SHALL be refused the same way. The configured headers, OAuth tokens (refreshed after a 401 and the request sent once more), the size limits, redirects not followed, probes and restarts SHALL be as for streamable HTTP. An event of the stream over `maxMessageBytes` SHALL be dropped, and when it is a response whose id names a pending request, that request SHALL fail with the size error while the session goes on. A recorded error SHALL name any URL on the host of `url`, on any port and in any spelling of the host the origin check would compare equal or refuse, such as the message endpoint with its session id and a URL glued onto another, as `<servers.NAME.http.url>`, query and all, and the URLs last requested of the server SHALL be replaced as they were sent, whatever characters their query holds. The time this takes SHALL grow linearly with the length of the error.
 
 #### Scenario: Legacy server
 
@@ -76,6 +76,11 @@ An `http` server with `transport: sse` SHALL be reached over the HTTP+SSE transp
 
 - **WHEN** the first event of a legacy server's stream names a message endpoint on another host
 - **THEN** no request reaches that host, the server does not become ready, and its error says the endpoint is on another origin
+
+#### Scenario: Message endpoint with user information
+
+- **WHEN** the first event of a legacy server's stream names a message endpoint on its own host with a user and password, and a session id after characters no URL holds
+- **THEN** nothing is sent to it, and the recorded error holds neither the password nor any part of the session id
 
 #### Scenario: Oversized legacy response
 

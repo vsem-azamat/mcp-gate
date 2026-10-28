@@ -11,12 +11,13 @@ import (
 
 // FuzzSSEHideEndpoint checks that the session id of any message endpoint a server can name,
 // added to the endpoint's own query, is hidden in the error of a POST to it, as the SDK builds the
-// request and Go's HTTP client renders the error, whether the origin check sends it or not.
+// request and the gate's HTTP client renders the error, whether the guard sends it or not.
 func FuzzSSEHideEndpoint(f *testing.F) {
 	for _, seed := range []string{
 		"?sessionid=x", "/messages?sessionid=x", "https://MCP.example.com:443/m", "//mcp.example.com./m",
 		"/a'b", "/x,https://other.example/y", "//user:pw@mcp.example.com/m", "/%41%2F?q=1#frag",
 		"/m?a=|{}^`", "/m?a=x y", "https://other.example/m?a=1",
+		"//user:pw@mcp.example.com/m?a=|b", "//user@mcp.example.com/m?a=<x>", "//u:p@other.example/m?a=|b",
 	} {
 		f.Add(seed)
 	}
@@ -45,18 +46,19 @@ func FuzzSSEHideEndpoint(f *testing.F) {
 		}
 		u.RawQuery += "sessionid=" + marker
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, u.String(), nil) // as the SDK posts
-		if err != nil {
-			return
+		if err != nil || len(req.URL.String()) > maxEndpointBytes {
+			return // an overlong endpoint is refused, and never requested
 		}
-		resp, rtErr := lt.RoundTrip(req)
+		resp, err := s.http.Do(req) // the gate's own client renders the error
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
-		for _, rendered := range []string{req.URL.String(), req.URL.Redacted()} {
-			text := fmt.Errorf("calling \"tools/call\": rejected by transport: %w", &url.Error{Op: "Post", URL: rendered, Err: rtErr}).Error()
-			if got := s.HideURL(text); strings.Contains(got, marker) {
-				t.Errorf("HideURL(%q) = %q", text, got)
-			}
+		if err == nil {
+			t.Fatal("the request did not fail")
+		}
+		text := fmt.Errorf("calling \"tools/call\": rejected by transport: %w", err).Error()
+		if got := s.HideURL(text); strings.Contains(got, marker) {
+			t.Errorf("HideURL(%q) = %q", text, got)
 		}
 	})
 }

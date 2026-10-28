@@ -27,6 +27,14 @@ const sseVersion = AutoPinVersion
 // errForeignEndpoint is the error of a request a legacy server directed to another origin.
 var errForeignEndpoint = errors.New("mcp-gate: the server's message endpoint is on another origin than its url; refused")
 
+// errEndpointShape is the error of a request a legacy server directed to a URL with user
+// information or longer than maxEndpointBytes.
+var errEndpointShape = errors.New("mcp-gate: the server's message endpoint has user information or is too long; refused")
+
+// maxEndpointBytes bounds the URL of a request to a legacy server, which the server names; it also
+// bounds what an endpointLog keeps.
+const maxEndpointBytes = 8 << 10
+
 // pendingCalls are the requests sent on a connection and not yet answered, so that a response
 // over the size limit can fail the request it answers.
 type pendingCalls struct {
@@ -155,7 +163,7 @@ type legacyTransport struct {
 	next   http.RoundTripper
 }
 
-// maxEndpoints bounds the URLs an endpointLog keeps.
+// maxEndpoints bounds the URLs an endpointLog keeps, each in up to three forms.
 const maxEndpoints = 8
 
 // endpointLog keeps the URLs last requested of a legacy server, refused ones too, so that
@@ -169,13 +177,18 @@ type endpointLog struct {
 func (l *endpointLog) record(u *url.URL) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for _, f := range []string{u.String(), u.Redacted()} {
+	forms := []string{u.String(), u.Redacted()}
+	if _, ok := u.User.Password(); ok {
+		// net/http's errors write the password as ***, this way (stripPassword).
+		forms = append(forms, strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1))
+	}
+	for _, f := range forms {
 		if i := slices.Index(l.urls, f); i >= 0 {
 			l.urls = slices.Delete(l.urls, i, i+1)
 		}
 		l.urls = append(l.urls, f)
 	}
-	if n := len(l.urls) - 2*maxEndpoints; n > 0 {
+	if n := len(l.urls) - 3*maxEndpoints; n > 0 {
 		l.urls = slices.Delete(l.urls, 0, n)
 	}
 }
@@ -217,12 +230,24 @@ func originOf(u *url.URL) string {
 }
 
 func (t *legacyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	t.seen.record(req.URL)
-	if originOf(req.URL) != t.origin {
+	long := len(req.URL.String()) > maxEndpointBytes
+	if !long {
+		t.seen.record(req.URL) // refused ones too: their error quotes them
+	}
+	var refused error
+	switch {
+	case req.URL.User != nil || long:
+		// The config's url has no user information, so an endpoint the gate should use has
+		// none either; nor is one that long.
+		refused = errEndpointShape
+	case originOf(req.URL) != t.origin:
+		refused = errForeignEndpoint
+	}
+	if refused != nil {
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
-		return nil, errForeignEndpoint
+		return nil, refused
 	}
 	if t.auth == nil {
 		return t.next.RoundTrip(req)

@@ -513,3 +513,42 @@ func TestSSEHideRequestedEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// TestSSEEndpointShapeRefused refuses message endpoints with user information or longer than
+// maxEndpointBytes, and hides the session id of one with user information in the error.
+func TestSSEEndpointShapeRefused(t *testing.T) {
+	t.Parallel()
+	for _, endpoint := range []string{
+		"https://user:pw@mcp.example.com/m?a=|b&sessionid=sess-secret",
+		"https://user@mcp.example.com/m?a=|b&sessionid=sess-secret",
+		"https://mcp.example.com/m?a=" + strings.Repeat("x", maxEndpointBytes) + "&sessionid=sess-secret",
+	} {
+		s, err := New(Options{Name: "remote", HTTP: &HTTP{URL: "https://mcp.example.com/sse", SSE: true}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lt, ok := s.http.Transport.(*legacyTransport)
+		if !ok {
+			t.Fatalf("transport %T", s.http.Transport)
+		}
+		var sent atomic.Int32
+		lt.next = roundTripFunc(func(*http.Request) (*http.Response, error) { sent.Add(1); return nil, io.EOF })
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, endpoint, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := s.http.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if !errors.Is(err, errEndpointShape) || sent.Load() != 0 {
+			t.Errorf("%.60s: err = %v, %d sent", endpoint, err, sent.Load())
+			continue
+		}
+		if len(endpoint) < maxEndpointBytes {
+			if got := s.HideURL(err.Error()); strings.Contains(got, "secret") {
+				t.Errorf("HideURL(%q) = %q", err.Error(), got)
+			}
+		}
+	}
+}
