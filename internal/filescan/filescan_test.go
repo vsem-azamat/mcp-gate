@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -549,6 +550,37 @@ func TestEscapedMentionsElsewhereAreWithheld(t *testing.T) {
 	res, n, err = f.scan(t, "download_media", nil, in)
 	if err != nil || n != 1 || !strings.HasPrefix(text(t, res), "[REDACTED:file] ") {
 		t.Errorf("escaped quote in text = %q, %d, %v", text(t, res), n, err)
+	}
+}
+
+func TestJSONForms(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"/d/я.txt", []string{`\/d\/я.txt`, `/d/\u044f.txt`, `/d/\u044F.txt`, `\/d\/\u044f.txt`, `\/d\/\u044F.txt`}},
+		{"/d/😀", []string{`/d/\ud83d\ude00`, `/d/\uD83D\uDE00`, `\/d\/\ud83d\ude00`}},
+		{"/d/a<b&c", []string{`\/d\/a<b&c`, `/d/a\u003cb\u0026c`}},
+	} {
+		got := jsonForms(c.in)
+		for _, w := range c.want {
+			if !slices.Contains(got, w) {
+				t.Errorf("jsonForms(%q) = %q, missing %q", c.in, got, w)
+			}
+		}
+		if slices.Contains(got, c.in) {
+			t.Errorf("jsonForms(%q) holds the input", c.in)
+		}
+	}
+	if got := jsonForms("/plain"); len(got) != 1 || got[0] != `\/plain` {
+		t.Errorf("jsonForms of an ASCII path = %q", got)
+	}
+	// A path far longer than any real one gets no escaped forms.
+	f := newFixture(t, 0, false)
+	long := "/" + strings.Repeat("ф/../", 100000)
+	if got := f.scanner.forms([]string{long}, redact.Marker{}); len(got) != 1 {
+		t.Errorf("a long path has %d forms", len(got))
 	}
 }
 
