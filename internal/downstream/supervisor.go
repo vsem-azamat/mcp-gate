@@ -2,12 +2,14 @@
 //
 // A Supervisor owns the server's connection: for stdio it starts the child process, in a process
 // group of its own, and speaks to it over a line-framed connection of the gate's own; for HTTP
-// it uses the SDK's streamable client with a size-limited HTTP client. It probes the server,
+// it uses the SDK's streamable client, or its client of the legacy HTTP+SSE transport, with a
+// size-limited HTTP client. It probes the server,
 // restarts it with backoff after a failure, never while calls are in flight, and pins the
 // protocol version to 2025-11-25 when the server does not answer the 2026-07-28 handshake.
 package downstream
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,12 +69,15 @@ type Stdio struct {
 	ParentEnv []string
 }
 
-// HTTP describes a server reached over streamable HTTP.
+// HTTP describes a server reached over streamable HTTP, or over the legacy HTTP+SSE transport.
 type HTTP struct {
 	URL     string
 	Headers map[string]string
 	// OAuth, if set, authorizes the requests.
 	OAuth Authorizer
+	// SSE reaches the server over the HTTP+SSE transport of 2024-11-05: an event stream opened
+	// at URL, and messages POSTed to the endpoint it names, which must be on URL's origin.
+	SSE bool
 }
 
 // Authorizer authorizes the requests to an HTTP server with OAuth. It never starts a login
@@ -335,6 +341,7 @@ type Supervisor struct {
 	stderr   *procutil.LineLog
 	http     *http.Client
 	httpBase *http.Transport
+	pending  *pendingCalls // the requests in flight on the legacy HTTP+SSE transport
 
 	mu         sync.Mutex
 	state      State
@@ -392,7 +399,17 @@ func New(opts Options) (*Supervisor, error) {
 		if opts.HTTP.OAuth != nil {
 			accepted = opts.HTTP.OAuth.Accepted
 		}
-		s.http, s.httpBase = newHTTPClient(opts.HTTP.Headers, opts.MaxMessageBytes, logger, accepted)
+		if opts.HTTP.SSE {
+			s.pending = newPendingCalls()
+		}
+		s.http, s.httpBase = newHTTPClient(opts.HTTP.Headers, opts.MaxMessageBytes, s.pending, logger, accepted)
+		if opts.HTTP.SSE {
+			u, err := url.Parse(opts.HTTP.URL)
+			if err != nil || !u.IsAbs() {
+				return nil, errors.New("downstream: the URL of an SSE server must be absolute")
+			}
+			s.http.Transport = &legacyTransport{origin: originOf(u), auth: opts.HTTP.OAuth, next: s.http.Transport}
+		}
 	}
 	if opts.Disabled {
 		s.state = Disabled
@@ -436,6 +453,11 @@ func (s *Supervisor) HideURL(text string) string {
 		return text
 	}
 	placeholder := "<servers." + s.opts.Name + ".http.url>"
+	if h.SSE {
+		// First, so that no literal form of the URL leaves the query after it, which on the
+		// SDK's own endpoint (the stream's URL with ?sessionid=) holds the session id.
+		text = hideHost(text, h.URL, placeholder)
+	}
 	forms := []string{h.URL, strings.Trim(strconv.Quote(h.URL), `"`)}
 	if u, perr := url.Parse(h.URL); perr == nil {
 		forms = append(forms, u.String(), u.Redacted())
@@ -455,6 +477,80 @@ func (s *Supervisor) HideURL(text string) string {
 	}
 	return text
 }
+
+// schemeRE finds where an http or https URL begins, also with its slashes escaped as JSON may
+// have them.
+var schemeRE = regexp.MustCompile(`(?i)https?:(?:\\?/){2}`)
+
+// hideHost replaces by placeholder every URL whose host is the host of raw, on any port, in any
+// letter case and with any trailing dots, such as the message endpoint of a legacy HTTP+SSE
+// server with its session id, or a spelling of it that the origin check refused. A URL runs
+// from its scheme over the characters a URL may hold (RFC 3986, and the backslash of escapes);
+// a URL of another host ends where the next one begins, so that one glued onto it is found.
+func hideHost(text, raw, placeholder string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return text
+	}
+	host := normalHost(u.Hostname())
+	starts := schemeRE.FindAllStringIndex(text, -1)
+	if len(starts) == 0 {
+		return text
+	}
+	var b strings.Builder
+	pos := 0
+	for _, st := range starts {
+		if st[0] < pos {
+			continue // inside a URL already hidden
+		}
+		end := st[1]
+		for end < len(text) && urlByte(text[end]) {
+			end++
+		}
+		authEnd := st[1] + strings.IndexAny(text[st[1]:end]+"/", `/?#\`)
+		if hostOf(text[st[1]:authEnd]) != host {
+			continue
+		}
+		b.WriteString(text[pos:st[0]])
+		b.WriteString(placeholder)
+		pos = end
+	}
+	b.WriteString(text[pos:])
+	return b.String()
+}
+
+// urlByte reports whether c may be part of a URL: the characters of RFC 3986, and the backslash
+// of escaped slashes and quoted bytes.
+func urlByte(c byte) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return true
+	}
+	return strings.IndexByte("-._~:/?#[]@!$&'()*+,;=%\\", c) >= 0
+}
+
+// hostOf returns the host of a URL's authority, percent-decoded and normalised as normalHost
+// does; userinfo and the port are dropped.
+func hostOf(authority string) string {
+	if dec, err := url.PathUnescape(authority); err == nil {
+		authority = dec
+	}
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		authority = authority[i+1:]
+	}
+	if strings.HasPrefix(authority, "[") {
+		if i := strings.IndexByte(authority, ']'); i >= 0 {
+			return normalHost(authority[1:i])
+		}
+	}
+	if i := strings.IndexByte(authority, ':'); i >= 0 {
+		authority = authority[:i]
+	}
+	return normalHost(authority)
+}
+
+// normalHost lower-cases a host and drops its trailing dots.
+func normalHost(h string) string { return strings.TrimRight(strings.ToLower(h), ".") }
 
 // Start starts supervising in the background. The values of ctx, not its cancellation, carry
 // into the supervisor's requests; Stop ends it. Start does nothing for a disabled server.
@@ -757,6 +853,9 @@ func (s *Supervisor) connect(base context.Context) (*attempt, error) {
 	if h := s.opts.HTTP; h != nil && h.OAuth != nil && h.OAuth.LoginRequired() {
 		return nil, &LoginRequiredError{Name: s.opts.Name, Reason: h.OAuth.Reason()}
 	}
+	if h := s.opts.HTTP; h != nil && h.SSE && s.opts.ProtocolVersion == "" {
+		return s.dial(ctx, sseVersion) // the transport carries no version that has discover
+	}
 	pin := s.opts.ProtocolVersion
 	if pin == "" {
 		pin = s.learned
@@ -844,6 +943,15 @@ func (s *Supervisor) dial(ctx context.Context, version string) (*attempt, error)
 			s.logger.Warn("cannot raise the child's OOM score", "error", err)
 		}
 		transport = connTransport{newLineConn(proc.Stdout(), proc.Stdin(), s.opts.MaxMessageBytes, s.logger)}
+	} else if s.opts.HTTP.SSE {
+		transport = sseTransport{
+			inner: &mcp.SSEClientTransport{
+				Endpoint:     s.opts.HTTP.URL,
+				HTTPClient:   s.http,
+				MaxEventSize: s.opts.MaxMessageBytes + frameEdge*4, // the limiter enforces the limit first
+			},
+			pending: s.pending,
+		}
 	} else {
 		t := &mcp.StreamableClientTransport{
 			Endpoint:     s.opts.HTTP.URL,
@@ -908,7 +1016,7 @@ func (s *Supervisor) serve(base context.Context, a *attempt) error {
 		case <-s.stop:
 			return errors.New("stopped")
 		case <-a.sessDone:
-			return fmt.Errorf("connection closed: %w", a.sessErr)
+			return fmt.Errorf("connection closed: %w", cmp.Or(a.sessErr, errors.New("the session ended")))
 		case <-exited:
 			return fmt.Errorf("process exited: %w", errOrExit(a.proc.ExitErr()))
 		case <-tick.C:

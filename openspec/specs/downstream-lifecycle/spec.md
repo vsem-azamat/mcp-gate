@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A supervisor keeps one downstream MCP server connected: it starts a stdio server as a child process or connects to an HTTP server, negotiates the protocol version, bounds message sizes, probes the server, and restarts it after a failure. One supervisor serves every call to its server. `mcp-gate serve` runs one per enabled server, and `mcp-gate check -connect` uses them to try every server of a config.
+A supervisor keeps one downstream MCP server connected: it starts a stdio server as a child process or connects to an HTTP server, over streamable HTTP or the legacy HTTP+SSE transport, negotiates the protocol version, bounds message sizes, probes the server, and restarts it after a failure. One supervisor serves every call to its server. `mcp-gate serve` runs one per enabled server, and `mcp-gate check -connect` uses them to try every server of a config.
 
 ## Requirements
 
@@ -36,12 +36,12 @@ An HTTP server with an `oauth` block SHALL authorize its requests with its grant
 
 ### Requirement: Protocol version
 
-Without a pin, the supervisor SHALL offer the latest protocol version, letting the SDK try `server/discover` and fall back to `initialize`, and SHALL give that whole handshake 5 seconds. When those 5 seconds pass without an answer, it SHALL tear the attempt down (ending a stdio child) and reconnect offering `2025-11-25`. When that pinned handshake completes within 5 seconds, the server ignored discover: the supervisor SHALL keep the automatic pin for later connects and report it once, so that it can be stored. When it takes longer, the server was only slow, and its next connect SHALL offer the latest version again. Either way the session SHALL be reported as automatically pinned. A `protocolVersion` set in the config SHALL be offered instead, with no discover sub-deadline. The negotiated version SHALL be reported.
+Without a pin, the supervisor SHALL offer the latest protocol version, letting the SDK try `server/discover` and fall back to `initialize`, and SHALL give that whole handshake 5 seconds. When those 5 seconds pass without an answer, it SHALL tear the attempt down (ending a stdio child) and reconnect offering `2025-11-25`. When that pinned handshake completes within 5 seconds, the server ignored discover: the supervisor SHALL keep the automatic pin for later connects and report it once, so that it can be stored. When it takes longer, the server was only slow, and its next connect SHALL offer the latest version again. Either way the session SHALL be reported as automatically pinned. A `protocolVersion` set in the config SHALL be offered instead, with no discover sub-deadline. A server reached over the legacy HTTP+SSE transport (`transport: sse`) SHALL be offered `2025-11-25` with `initialize` when it has no pin, with no discover and no sub-deadline, and its session SHALL NOT be reported as automatically pinned. The negotiated version SHALL be reported.
 
 #### Scenario: Version matrix
 
-- **WHEN** servers supporting only one of `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25` and `2026-07-28` are reached over stdio, HTTP with event streams and HTTP with JSON responses
-- **THEN** each connects with its version and serves calls
+- **WHEN** servers supporting only one of `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25` and `2026-07-28` are reached over stdio, HTTP with event streams and HTTP with JSON responses, and servers supporting only one of the versions before `2026-07-28` over the legacy HTTP+SSE transport
+- **THEN** each connects with its version, is not reported as automatically pinned, and serves calls
 
 #### Scenario: Server ignores discover
 
@@ -57,6 +57,40 @@ Without a pin, the supervisor SHALL offer the latest protocol version, letting t
 
 - **WHEN** `protocolVersion: 2025-06-18` is set for a server that supports every version
 - **THEN** the session runs on `2025-06-18`
+
+### Requirement: Legacy HTTP+SSE transport
+
+An `http` server with `transport: sse` SHALL be reached over the HTTP+SSE transport of protocol `2024-11-05`: a GET to `url` opens an event stream whose first event names the endpoint that messages are POSTed to, and every message from the server arrives on that stream. The message endpoint SHALL be on the origin (scheme, host and port) of `url`; a request to any other origin SHALL NOT be sent, so that neither the configured headers nor an OAuth token leave for a host the operator did not name, and the connect SHALL fail. The configured headers, OAuth tokens (refreshed after a 401 and the request sent once more), the size limits, redirects not followed, probes and restarts SHALL be as for streamable HTTP. An event of the stream over `maxMessageBytes` SHALL be dropped, and when it is a response whose id names a pending request, that request SHALL fail with the size error while the session goes on. A recorded error SHALL name any URL on the host of `url`, on any port and in any spelling of the host the origin check would compare equal or refuse, such as the message endpoint with its session id and a URL glued onto another, as `<servers.NAME.http.url>`, query and all.
+
+#### Scenario: Legacy server
+
+- **WHEN** a server that speaks only the HTTP+SSE transport and protocol `2024-11-05` is configured with `transport: sse`
+- **THEN** it connects on `2024-11-05` without sending `server/discover`, and serves calls and list-changed notifications
+
+#### Scenario: Session id in an error
+
+- **WHEN** a POST to the SDK's own message endpoint, the stream's URL with `?sessionid=` added, fails
+- **THEN** the recorded error names `<servers.NAME.http.url>` and holds no part of the session id
+
+#### Scenario: Message endpoint on another origin
+
+- **WHEN** the first event of a legacy server's stream names a message endpoint on another host
+- **THEN** no request reaches that host, the server does not become ready, and its error says the endpoint is on another origin
+
+#### Scenario: Oversized legacy response
+
+- **WHEN** a legacy server answers a call with 1 MiB while `maxMessageBytes` is 64 KiB
+- **THEN** that call fails with the size error and the same session keeps serving
+
+#### Scenario: Legacy server behind OAuth
+
+- **WHEN** a legacy server takes only OAuth access tokens and the server has a grant, which is later revoked
+- **THEN** its requests carry the access token and calls succeed, and after the revocation it becomes `needs-login`
+
+#### Scenario: Legacy server down and up
+
+- **WHEN** a legacy server answers 503 for a while and then recovers
+- **THEN** the server goes through `backoff` and becomes `ready` again on a new stream
 
 ### Requirement: Stdio children
 

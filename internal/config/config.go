@@ -411,13 +411,30 @@ type Stdio struct {
 	InheritEnv []string `yaml:"inheritEnv"`
 }
 
-// HTTP connects to the server over streamable HTTP.
+// HTTP connects to the server over streamable HTTP, or over the legacy HTTP+SSE transport.
 type HTTP struct {
 	URL     string            `yaml:"url"`
 	Headers map[string]string `yaml:"headers,omitempty"`
+	// Transport is TransportStreamable or TransportSSE; empty is TransportStreamable.
+	Transport Transport `yaml:"transport,omitempty"`
 	// OAuth, if set, authorizes the requests with an OAuth grant obtained by mcp-gate auth login.
 	OAuth *OAuth `yaml:"oauth,omitempty"`
 }
+
+// Transport is the HTTP transport of a server.
+type Transport string
+
+// The HTTP transports.
+const (
+	// TransportStreamable is streamable HTTP, of protocol 2025-03-26 and later.
+	TransportStreamable Transport = "streamable"
+	// TransportSSE is the HTTP+SSE transport of protocol 2024-11-05: an event stream opened with
+	// a GET, and messages POSTed to the endpoint its first event names.
+	TransportSSE Transport = "sse"
+)
+
+// SSE reports whether the server is reached over the legacy HTTP+SSE transport.
+func (h *HTTP) SSE() bool { return h.Transport == TransportSSE }
 
 // OAuth configures the OAuth client of an HTTP server. Every key is optional: by default the
 // authorization server is discovered from the server and the client registers dynamically.

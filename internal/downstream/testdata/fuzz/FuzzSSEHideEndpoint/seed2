@@ -1,0 +1,2 @@
+go test fuzz v1
+string("//MCP.EXAMPLE.COM.:443/m?x=1")

@@ -43,8 +43,7 @@ type lineConn struct {
 	closeOnce sync.Once
 	writeMu   sync.Mutex
 
-	pendingMu sync.Mutex
-	pending   map[jsonrpc.ID]bool // requests sent and not yet answered
+	pending *pendingCalls
 }
 
 var _ mcp.Connection = (*lineConn)(nil)
@@ -55,7 +54,7 @@ func newLineConn(r io.ReadCloser, w io.WriteCloser, limit int, logger *slog.Logg
 		incoming: make(chan jsonrpc.Message),
 		readErr:  make(chan error, 1),
 		closed:   make(chan struct{}),
-		pending:  map[jsonrpc.ID]bool{},
+		pending:  newPendingCalls(),
 	}
 	go c.readLoop()
 	return c
@@ -87,15 +86,7 @@ func (c *lineConn) Write(_ context.Context, msg jsonrpc.Message) error {
 	if err != nil {
 		return err
 	}
-	if req, ok := msg.(*jsonrpc.Request); ok {
-		c.pendingMu.Lock()
-		if req.IsCall() {
-			c.pending[req.ID] = true
-		} else if id, ok := cancelledID(req); ok {
-			delete(c.pending, id) // a cancelled request may never be answered
-		}
-		c.pendingMu.Unlock()
-	}
+	c.pending.sent(msg)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	select {
@@ -118,11 +109,7 @@ func (c *lineConn) Close() error {
 
 // deliver hands m to Read, unless the connection is closed first.
 func (c *lineConn) deliver(m jsonrpc.Message) bool {
-	if resp, ok := m.(*jsonrpc.Response); ok {
-		c.pendingMu.Lock()
-		delete(c.pending, resp.ID)
-		c.pendingMu.Unlock()
-	}
+	c.pending.received(m)
 	select {
 	case c.incoming <- m:
 		return true
@@ -197,12 +184,7 @@ func cancelledID(req *jsonrpc.Request) (jsonrpc.ID, bool) {
 // oversized handles a frame that was too long: a pending request it answers gets an error.
 func (c *lineConn) oversized(f *bigFrame) bool {
 	id, ok := frameID(f)
-	if ok {
-		c.pendingMu.Lock()
-		ok = c.pending[id]
-		c.pendingMu.Unlock()
-	}
-	if !ok {
+	if !ok || !c.pending.has(id) {
 		c.logger.Warn("dropped a message over maxMessageBytes that answers no pending request",
 			"bytes", f.size, "limit", c.limit)
 		return true

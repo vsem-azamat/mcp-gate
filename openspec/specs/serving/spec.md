@@ -71,6 +71,11 @@ A call on a server that is not ready SHALL fail at once: a tool call with a tool
 - **WHEN** clients offering each of `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25` and `2026-07-28` call a tool through the gate on servers supporting only one of those versions, over stdio and over HTTP
 - **THEN** every client negotiates its own version and every call succeeds
 
+#### Scenario: Legacy SSE server
+
+- **WHEN** clients offering each of those versions call a tool through the gate on servers reached over the legacy HTTP+SSE transport, each supporting only one version before `2026-07-28`, and one of those servers adds a tool
+- **THEN** every client negotiates its own version, every call succeeds, and the added tool is listed and can be called
+
 #### Scenario: Progress per call
 
 - **WHEN** three clients of different versions call a tool that reports progress, each with its own token, at the same time

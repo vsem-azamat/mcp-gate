@@ -281,7 +281,7 @@ func DownstreamOptions(cfg *config.Config, name string, s *config.Server, enviro
 			InheritEnv: st.InheritEnv, ParentEnv: environ,
 		}
 	} else {
-		o.HTTP = &downstream.HTTP{URL: s.HTTP.URL, Headers: s.HTTP.Headers}
+		o.HTTP = &downstream.HTTP{URL: s.HTTP.URL, Headers: s.HTTP.Headers, SSE: s.HTTP.SSE()}
 		if oc := s.HTTP.OAuth; oc != nil {
 			o.HTTP.OAuth = oauth.NewSource(oauth.SourceOptions{
 				Name: name, ServerURL: s.HTTP.URL, ClientID: oc.ClientID, ClientSecret: oc.ClientSecret,

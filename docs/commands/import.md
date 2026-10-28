@@ -16,6 +16,7 @@ mcp-gate check gate.yaml
 | `mcpProxy.name` | `name` |
 | `command`, `args`, `env` | `stdio` |
 | `url`, `headers` with `transportType: streamable-http` | `http` |
+| `url`, `headers` with `transportType: sse`, or a `url` without `transportType` | `http` with `transport: sse` |
 | `timeout` | `callTimeout`; none becomes `0s` with a comment |
 | `options.disabled` (any letter case) | `disabled` |
 | `options.pingInterval` | `probeInterval` |
@@ -29,7 +30,7 @@ mcp-gate check gate.yaml
 | `mcpProxy.options.redact.escrowTTL`, `escrowMaxEntries` | `escrow.ttl`, `escrow.maxEntries` |
 | a server's own `redact.escrowTTL` | `redact.escrowTTL` |
 | `redact.fileTools`, `fileRoots`, `fileMaxBytes` | `redact.files.tools`, `roots`, `maxBytes` |
-| `oauth` of a streamable HTTP server: `clientId`, `clientSecret`, `redirectUri`, `scopes`, `authServerMetadataUrl` | `http.oauth`: `clientID`, `clientSecret`, `redirectURL`, `scopes`, `authServerMetadataURL` |
+| `oauth` of an HTTP server: `clientId`, `clientSecret`, `redirectUri`, `scopes`, `authServerMetadataUrl` | `http.oauth`: `clientID`, `clientSecret`, `redirectURL`, `scopes`, `authServerMetadataURL` |
 | `$VAR`, `${VAR}` | `${VAR}`; any other `$` becomes `$$` |
 
 Options set in `mcpProxy.options` are applied to each server, as mcp-proxy did, except filters there, which mcp-proxy ignored. Keys mcp-proxy ignores, `mcpProxy.version`, `mcpProxy.type: streamable-http`, `mcpProxy.baseURL` without a path, `panicIfInvalid`, `autoReconnect`, a `toolFilter` that allows an empty list (no filter in mcp-proxy) and an empty block list are dropped with a comment.
@@ -56,6 +57,6 @@ An `oauth` block is kept, and each OAuth server needs a login after the import: 
 
 ## Keys this build does not implement
 
-Every other key that changes behaviour (a `baseURL` with a path, the OAuth keys above, the SSE transport) makes the import fail, listing the keys and writing nothing. `-partial` writes the config anyway and lists each dropped key in a comment marked `NOT IMPLEMENTED IN THIS BUILD`; `mcp-gate check` rejects that file until those comments are removed, which means accepting that the keys are dropped.
+Every other key that changes behaviour (a `baseURL` with a path, the OAuth keys above, serving clients anything but streamable HTTP, which `mcpProxy.type` absent, `sse` or any value other than `streamable-http` asks for) makes the import fail, listing the keys and writing nothing. `-partial` writes the config anyway and lists each dropped key in a comment marked `NOT IMPLEMENTED IN THIS BUILD`; `mcp-gate check` rejects that file until those comments are removed, which means accepting that the keys are dropped.
 
 Notes go to stderr. Neither they nor errors quote values from the input. Exit status: 0 written, 2 otherwise.

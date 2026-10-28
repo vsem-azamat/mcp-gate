@@ -353,12 +353,15 @@ func (im *importer) server(servers *object, name string, global *options) (*serv
 			s.tNote = "mcp-proxy discarded its sub-millisecond timeout, so it had none"
 			timeout = 0
 		}
-	case "streamable-http":
+	case "streamable-http", "sse":
 		if !hasURL || url == "" {
-			return nil, fmt.Errorf("%s: url is required for streamable-http", o.path)
+			return nil, fmt.Errorf("%s: url is required for %s", o.path, transport)
 		}
 		if err := im.http(o, s, url); err != nil {
 			return nil, err
+		}
+		if transport == "sse" {
+			s.http.Transport = config.TransportSSE
 		}
 		if s.http.OAuth, err = im.oauth(o); err != nil {
 			return nil, err
@@ -366,12 +369,6 @@ func (im *importer) server(servers *object, name string, global *options) (*serv
 		if timeout > 0 && timeout < time.Millisecond {
 			return nil, fmt.Errorf("%s.timeout: is shorter than a millisecond; mcp-proxy rejects it too", o.path)
 		}
-	case "sse":
-		im.notImplemented(o.path + " (sse transport)")
-		_, _, _ = o.get("headers")
-		_, _, _ = o.get("oauth")
-		_, _, _ = o.get("options")
-		return nil, nil
 	default:
 		return nil, fmt.Errorf("%s.transportType: must be stdio, sse or streamable-http", o.path)
 	}

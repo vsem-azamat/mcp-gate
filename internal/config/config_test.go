@@ -107,6 +107,21 @@ func TestParseFull(t *testing.T) {
 	}
 }
 
+func TestHTTPTransport(t *testing.T) {
+	t.Parallel()
+	const head = "version: 1\nauth: {tokens: {t: secret}}\nservers:\n"
+	c, err := Parse([]byte(head+
+		"  legacy:\n    http: {url: 'https://a.example.com/sse', transport: sse}\n    protocolVersion: '2024-11-05'\n"+
+		"  modern:\n    http: {url: 'https://b.example.com/mcp', transport: streamable}\n"+
+		"  plain:\n    http: {url: 'https://c.example.com/mcp'}\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Servers["legacy"].HTTP.SSE() || c.Servers["modern"].HTTP.SSE() || c.Servers["plain"].HTTP.SSE() {
+		t.Errorf("transports = %q %q %q", c.Servers["legacy"].HTTP.Transport, c.Servers["modern"].HTTP.Transport, c.Servers["plain"].HTTP.Transport)
+	}
+}
+
 func TestServingDefaults(t *testing.T) {
 	t.Parallel()
 	c, err := Parse([]byte("version: 1\nauth: {tokens: {t: secret}}\nservers:\n  a:\n    stdio: {command: srv}\n"+
@@ -275,6 +290,8 @@ func TestParseErrors(t *testing.T) {
 		{"bad env name", head + "    stdio: {command: x, env: {'A-B': x}}\n", "valid environment variable name"},
 		{"bad inherit", head + "    stdio: {command: x, inheritEnv: ['*']}\n", "inheritEnv[0]"},
 		{"bad version pin", head + "    stdio: {command: x}\n    protocolVersion: '2023-01-01'\n", "protocolVersion: must be one of"},
+		{"unknown transport", head + "    http: {url: 'https://a.example.com/mcp', transport: websocket}\n", "http.transport: must be streamable or sse"},
+		{"sse stateless pin", head + "    http: {url: 'https://a.example.com/sse', transport: sse}\n    protocolVersion: '2026-07-28'\n", "servers.a.protocolVersion: must be earlier than 2026-07-28"},
 		{"ftp url", head + "    http: {url: 'ftp://a.example.com/mcp'}\n", "http or https"},
 		{"userinfo", head + "    http: {url: 'https://user:hunter22@a.example.com/mcp'}\n", "user information"},
 		{"fragment", head + "    http: {url: 'https://a.example.com/mcp#x'}\n", "fragment"},

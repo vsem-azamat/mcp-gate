@@ -70,6 +70,8 @@ type OAuthOptions struct {
 	// RevocationEndpoint, if set, is the revocation endpoint the metadata names, in place of
 	// the served one.
 	RevocationEndpoint string
+	// SSE serves the MCP endpoint over the legacy HTTP+SSE transport, at the same path.
+	SSE bool
 }
 
 // OAuthServer is a fake MCP server behind OAuth on one loopback listener: protected resource
@@ -117,7 +119,10 @@ func NewOAuthServer(t testing.TB, opts OAuthOptions) *OAuthServer {
 	}
 	stop := make(chan struct{})
 	ms := newFakeServer(opts.Fake, nil, 0, stop)
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return ms }, &mcp.StreamableHTTPOptions{Stateless: true})
+	var handler http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return ms }, &mcp.StreamableHTTPOptions{Stateless: true})
+	if opts.SSE {
+		handler = mcp.NewSSEHandler(func(*http.Request) *mcp.Server { return ms }, nil)
+	}
 	mux := http.NewServeMux()
 	if opts.TrailingSlash {
 		mux.Handle("/mcp/", s.protect(handler))
