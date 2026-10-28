@@ -245,7 +245,7 @@ func (g *Gate) replacer(name string, s *config.Server) proxy.ReplacerFunc {
 	case g.escrowFor(s):
 		ttl := s.Redact.EscrowTTL.D()
 		return func(r proxy.Request) redact.Replacer {
-			return g.escrow.Replacer(escrow.Source{Server: name, Tool: r.Name, TTL: ttl, Arguments: r.Arguments})
+			return g.escrow.Replacer(escrow.Source{Server: name, Tool: r.Name, Recipient: r.Recipient, TTL: ttl, Arguments: r.Arguments})
 		}
 	}
 	return nil

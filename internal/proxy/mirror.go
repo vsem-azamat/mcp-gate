@@ -79,13 +79,22 @@ type Options struct {
 	Policy  *policy.Policy
 	// Tokens are the token policies on the server, applied on top of Policy.
 	Tokens policy.Tokens
+	// OwnTokens are the names of the server's own tokens (its auth.tokens), which identify
+	// another caller than a global token of the same name elsewhere (see Mirror.recipient).
+	OwnTokens map[string]bool
 	// ForwardMeta are the _meta keys of a request passed downstream.
 	ForwardMeta []string
 	// Redaction redacts results; nil passes them unchanged.
 	Redaction *Redaction
 	// Files, if set, scans the files tool calls write, after their results are redacted.
-	Files  FileScanner
-	Logger *slog.Logger
+	Files FileScanner
+	// Arguments is the mode of the argument scan, config.ArgumentsLog or config.ArgumentsBlock;
+	// anything else, or a nil Redaction, scans nothing.
+	Arguments string
+	// Substitution, if set, replaces escrow handles in the arguments of tool calls; it needs
+	// Redaction.
+	Substitution *Substitution
+	Logger       *slog.Logger
 	// Audit receives the audit record of every request; nil writes them as call lines to
 	// Logger.
 	Audit audit.Sink
@@ -788,4 +797,15 @@ func (m *Mirror) Stats() Stats {
 		Resources: len(m.resources), Templates: len(m.templates), LastSync: src.LastSync,
 		Calls: src.Calls, Failed: src.Failed, DroppedNotifications: src.DroppedNotifications,
 	}
+}
+
+// recipient identifies the caller with the token named principal across servers, for the
+// escrow's recipients: a global token by its name, which every server that inherits it knows by,
+// and one of the server's own tokens by "<server>:<name>", since two servers' own tokens of one
+// name are different callers. Token names hold no ':', so the two never meet.
+func (m *Mirror) recipient(principal string) string {
+	if principal != "" && m.opts.OwnTokens[principal] {
+		return m.opts.Name + ":" + principal
+	}
+	return principal
 }

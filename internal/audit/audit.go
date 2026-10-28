@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
@@ -85,6 +86,9 @@ const (
 	Withheld Outcome = "withheld"
 	// InputRequired is a result that asks the client for input, which the gate does not forward.
 	InputRequired Outcome = "input_required"
+	// Refused is a request the gate did not forward for what its arguments hold: a secret, or
+	// an escrow handle that may not go there.
+	Refused Outcome = "refused"
 )
 
 // Failed reports whether the outcome counts as a failed call: every one but ok and tool_error.
@@ -112,6 +116,29 @@ type Record struct {
 	// ended and that the caller's token policy does not hide; false for a resource read and for a
 	// request no server saw.
 	Listed bool
+	// ArgumentSecrets are the kinds of secret the scan found in the request's arguments, or in
+	// a resource read's URI, sorted and joined by ","; "" when it found none. Strings keep the
+	// record comparable.
+	ArgumentSecrets string
+	// Substitutions are the escrow handles whose values were put into the arguments, each
+	// written by Substitution.String, joined by ","; "" when there were none.
+	Substitutions string
+}
+
+// Substitution is one escrow handle whose value was put into a tool call's arguments.
+type Substitution struct {
+	Handle string
+	// Kind is the kind of the finding kept under the handle, and Origin the server whose result
+	// it came from.
+	Kind, Origin string
+	// Argument is the argument path of the rule that allowed it, as the config writes it.
+	Argument string
+}
+
+// String writes the substitution as handle:kind:origin:argument, as Record.Substitutions holds
+// it.
+func (s Substitution) String() string {
+	return s.Handle + ":" + s.Kind + ":" + s.Origin + ":" + s.Argument
 }
 
 // Sink receives the audit records. Write is called once per request, on the request's
@@ -133,13 +160,13 @@ func (t tee) Write(r Record) {
 
 // Log returns the sink that writes each record as one "call" line to logger, at info level:
 // server, principal, method, the entry under its Kind.Key, durMs, outcome, tokenPolicy and
-// redactions, in that order.
+// redactions, in that order, then argumentSecrets and substitutions when they are not empty.
 func Log(logger *slog.Logger) Sink { return logSink{logger} }
 
 type logSink struct{ logger *slog.Logger }
 
 func (s logSink) Write(r Record) {
-	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "call",
+	attrs := []slog.Attr{
 		slog.String("server", r.Server),
 		slog.String("principal", r.Principal),
 		slog.String("method", r.Kind.Method()),
@@ -148,7 +175,23 @@ func (s logSink) Write(r Record) {
 		slog.String("outcome", string(r.Outcome)),
 		slog.String("tokenPolicy", string(r.TokenPolicy)),
 		slog.Int64("redactions", r.Redactions),
-	)
+	}
+	if r.ArgumentSecrets != "" {
+		attrs = append(attrs, slog.String("argumentSecrets", r.ArgumentSecrets))
+	}
+	if r.Substitutions != "" {
+		attrs = append(attrs, slog.String("substitutions", r.Substitutions))
+	}
+	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "call", attrs...)
+}
+
+// Substitutions writes subs as Record.Substitutions holds them.
+func Substitutions(subs []Substitution) string {
+	parts := make([]string, len(subs))
+	for i, s := range subs {
+		parts[i] = s.String()
+	}
+	return strings.Join(parts, ",")
 }
 
 // PinRecord is the audit record of a tool a server lists with a definition other than the one

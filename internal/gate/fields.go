@@ -130,6 +130,9 @@ func mirrorKey(cfg *config.Config, name string, s *config.Server) map[string]any
 		}
 	}
 	k["config.Policies"] = policies
+	// The names of the server's own tokens tell its callers apart in the escrow's recipients
+	// (proxy.Options.OwnTokens), though auth is a route setting.
+	k["ownTokens"] = ownTokens(s)
 	return k
 }
 

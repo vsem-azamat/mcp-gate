@@ -486,3 +486,86 @@ func TestEscrowLoopbackListenerWarning(t *testing.T) {
 		}
 	}
 }
+
+// TestArgumentSubstitution runs a handle from one server's result into another server's tool
+// call: the value reaches the server, its echo comes back as the same marker, and a token that
+// was not shown the handle cannot use it.
+func TestArgumentSubstitution(t *testing.T) {
+	const secret = "Summer-Blue-77!"
+	doc := "version: 1\nauth:\n  tokens: {laptop: \"${LAPTOP}\", phone: \"${PHONE}\"}\nservers:\n" +
+		"  vault:\n" + stdioServer(t, testkit.Fake{}, "") +
+		"  app:\n" + stdioServer(t, testkit.Fake{}, "redact:\n  arguments: block\n  substitute:\n    - {tool: echo, argument: text, from: {vault: [password]}}\n")
+	r := startGate(t, doc, gateOpts{escrowKey: escrowKey})
+	r.waitReady(t, "vault")
+	r.waitReady(t, "app")
+	vault := r.connect(t, "vault", clientOpts{})
+	res, err := vault.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "the password: " + secret}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := escrowMarkerRE.FindStringSubmatch(textOf(t, res))
+	if m == nil {
+		t.Fatalf("no marker in %q", textOf(t, res))
+	}
+	marker, handle := m[0], m[2]
+
+	app := r.connect(t, "app", clientOpts{})
+	res, err = app.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "use " + marker}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := textOf(t, res); got != "use "+marker || res.IsError {
+		t.Fatalf("echo = %q (error %v), want the marker back", got, res.IsError)
+	}
+	phone := r.connect(t, "app", clientOpts{header: "Bearer " + phoneToken})
+	res, err = phone.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "use " + marker}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(textOf(t, res), "is unknown or expired") {
+		t.Fatalf("phone used laptop's handle: %q", textOf(t, res))
+	}
+	calls := r.logs.lines("call")
+	var subs []any
+	var outcomes []any
+	for _, c := range calls {
+		if c["server"] == "app" {
+			subs, outcomes = append(subs, c["substitutions"]), append(outcomes, c["outcome"])
+		}
+	}
+	if len(subs) != 2 || subs[0] != handle+":password:vault:text" || subs[1] != nil || outcomes[1] != "refused" {
+		t.Fatalf("app call lines: substitutions %v, outcomes %v", subs, outcomes)
+	}
+	if strings.Contains(r.logs.String(), secret) {
+		t.Fatal("the secret is in the logs")
+	}
+}
+
+// TestSubstitutionOwnTokensOfOneName checks that two servers' own tokens of one name are two
+// callers: a handle shown to vault's "agent" cannot be used by app's "agent".
+func TestSubstitutionOwnTokensOfOneName(t *testing.T) {
+	const secret = "Summer-Blue-77!"
+	doc := "version: 1\nservers:\n" +
+		"  vault:\n" + stdioServer(t, testkit.Fake{}, "auth:\n  inherit: false\n  tokens: {agent: \"${LAPTOP}\"}\n") +
+		"  app:\n" + stdioServer(t, testkit.Fake{}, "auth:\n  inherit: false\n  tokens: {agent: \"${PHONE}\"}\nredact:\n  substitute:\n    - {tool: echo, argument: text, from: {vault: [password]}}\n")
+	r := startGate(t, doc, gateOpts{escrowKey: escrowKey})
+	r.waitReady(t, "vault")
+	r.waitReady(t, "app")
+	vault := r.connect(t, "vault", clientOpts{header: "Bearer " + laptopToken})
+	res, err := vault.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "the password: " + secret}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := escrowMarkerRE.FindStringSubmatch(textOf(t, res))
+	if m == nil {
+		t.Fatalf("no marker in %q", textOf(t, res))
+	}
+	app := r.connect(t, "app", clientOpts{header: "Bearer " + phoneToken})
+	res, err = app.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": m[0]}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(textOf(t, res), "is unknown or expired") {
+		t.Fatalf("app's agent used vault's handle: %q", textOf(t, res))
+	}
+}

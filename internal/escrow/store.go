@@ -2,9 +2,11 @@ package escrow
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"sync"
@@ -28,6 +30,12 @@ type entry struct {
 	// batch is the replacer whose result the entry was kept for, or nil once another result
 	// has used it too (see Replacer.Discard).
 	batch *batch
+	// recipients counts, by recipient (see Source.Recipient), the results that carried the
+	// handle and were not withheld; only a recipient with a count may have the value
+	// substituted (see Escrow.Secret).
+	recipients map[string]int
+	// substKey is the key of the entry in store.bySubst, once its value was substituted.
+	substKey string
 }
 
 // batch is the set of entries one replacer kept: the findings of one result. It is compared by
@@ -63,10 +71,14 @@ func (c *clock) Now() time.Time {
 
 type store struct {
 	*clock
-	logger     *slog.Logger
-	mu         sync.Mutex
-	entries    map[string]*entry
-	byDedup    map[string]string
+	logger  *slog.Logger
+	mu      sync.Mutex
+	entries map[string]*entry
+	byDedup map[string]string
+	// bySubst maps the SHA-256 of a value substituted into a call to the handle it was
+	// substituted from, so that the value found again in any server's result gets that handle,
+	// and its origin, instead of a new one (see insert).
+	bySubst    map[string]string
 	maxEntries int
 	totalBytes int
 	// stored counts the entries inserted under a new handle.
@@ -79,7 +91,7 @@ func newStore(maxEntries int, logger *slog.Logger) *store {
 	}
 	return &store{
 		clock: &clock{now: time.Now}, logger: logger,
-		entries: map[string]*entry{}, byDedup: map[string]string{}, maxEntries: maxEntries,
+		entries: map[string]*entry{}, byDedup: map[string]string{}, bySubst: map[string]string{}, maxEntries: maxEntries,
 	}
 }
 
@@ -89,6 +101,9 @@ func (s *store) removeLocked(e *entry) {
 	s.totalBytes -= len(e.value)
 	if e.dedupKey != "" && s.byDedup[e.dedupKey] == e.handle {
 		delete(s.byDedup, e.dedupKey)
+	}
+	if e.substKey != "" && s.bySubst[e.substKey] == e.handle {
+		delete(s.bySubst, e.substKey)
 	}
 	e.wipe()
 }
@@ -109,11 +124,13 @@ func (s *store) sweep() {
 	s.sweepLocked(now)
 }
 
-// insert adds e under a fresh handle, to expire after ttl (DefaultTTL when 0). A text value
-// already held from the same server under the same kind keeps its handle, which is then kept
-// alive for a full ttl. When the store is full, expired entries are dropped first and then the
-// oldest ones.
-func (s *store) insert(e *entry, ttl time.Duration) (string, error) {
+// insert adds e under a fresh handle, to expire after ttl (DefaultTTL when 0), and returns the
+// handle and the kind its marker names. A text value that was substituted into a call from a
+// live entry gets that entry's handle and kind, from whichever server it comes, so that the
+// value never gains a new origin; one already held from the same server under the same kind
+// keeps its handle. Either is then kept alive for a full ttl. When the store is full, expired
+// entries are dropped first and then the oldest ones. Recipients are added by show.
+func (s *store) insert(e *entry, ttl time.Duration, valueSum string) (handle, kind string, err error) {
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
@@ -121,17 +138,31 @@ func (s *store) insert(e *entry, ttl time.Duration) (string, error) {
 	expires := now.Add(ttl)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	hit := func(handle string) *entry {
+		existing := s.entries[handle]
+		if existing == nil || !now.Before(existing.expires) {
+			return nil
+		}
+		if expires.After(existing.expires) {
+			existing.expires = expires
+		}
+		if existing.batch != e.batch {
+			existing.batch = nil // another result shows this handle too
+		}
+		e.wipe()
+		return existing
+	}
+	if valueSum != "" {
+		if handle, ok := s.bySubst[valueSum]; ok {
+			if existing := hit(handle); existing != nil {
+				return handle, existing.kind, nil
+			}
+		}
+	}
 	if e.dedupKey != "" {
 		if handle, ok := s.byDedup[e.dedupKey]; ok {
-			if existing := s.entries[handle]; existing != nil && now.Before(existing.expires) {
-				if expires.After(existing.expires) {
-					existing.expires = expires
-				}
-				if existing.batch != e.batch {
-					existing.batch = nil // another result shows this handle too
-				}
-				e.wipe()
-				return handle, nil
+			if existing := hit(handle); existing != nil {
+				return handle, existing.kind, nil
 			}
 		}
 	}
@@ -151,21 +182,22 @@ func (s *store) insert(e *entry, ttl time.Duration) (string, error) {
 	for range 5 {
 		handle, err := newHandle()
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if _, taken := s.entries[handle]; taken {
 			continue
 		}
 		e.handle, e.created, e.expires = handle, now, expires
+		e.recipients = map[string]int{}
 		s.entries[handle] = e
 		s.totalBytes += len(e.value)
 		s.stored.Add(1)
 		if e.dedupKey != "" {
 			s.byDedup[e.dedupKey] = handle
 		}
-		return handle, nil
+		return handle, e.kind, nil
 	}
-	return "", errors.New("could not allocate an escrow handle")
+	return "", "", errors.New("could not allocate an escrow handle")
 }
 
 // len returns the number of entries held, expired ones not yet swept included.
@@ -190,6 +222,7 @@ func (s *store) get(handle string) (entry, bool) {
 	}
 	c := *e
 	c.value = slices.Clone(e.value)
+	c.recipients = maps.Clone(e.recipients)
 	return c, true
 }
 
@@ -207,18 +240,56 @@ func (s *store) remove(handle string) bool {
 	return live
 }
 
-// discard drops the entries among handles that only b's result has used.
-func (s *store) discard(b *batch, handles []string) int {
+// show counts one more result of recipient that carries handle.
+func (s *store) show(handle, recipient string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.entries[handle]; ok {
+		e.recipients[recipient]++
+	}
+}
+
+// discard undoes the results of b, which was withheld: it drops the entries among handles that
+// only b's result has used, and takes one result of recipient off the others.
+func (s *store) discard(b *batch, handles []string, recipient string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
 	for _, h := range handles {
-		if e, ok := s.entries[h]; ok && e.batch == b {
+		e, ok := s.entries[h]
+		switch {
+		case !ok:
+		case e.batch == b:
 			s.removeLocked(e)
 			n++
+		default:
+			if e.recipients[recipient]--; e.recipients[recipient] <= 0 {
+				delete(e.recipients, recipient)
+			}
 		}
 	}
 	return n
+}
+
+// substitute returns a copy of the live text entry under handle when recipient has been shown
+// it, and indexes its value by valueSum (see bySubst).
+func (s *store) substitute(handle, recipient string) (entry, bool) {
+	now := s.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[handle]
+	if !ok || !now.Before(e.expires) || e.file != nil || e.recipients[recipient] <= 0 {
+		return entry{}, false
+	}
+	if e.substKey == "" {
+		sum := sha256.Sum256(e.value)
+		e.substKey = hex.EncodeToString(sum[:])
+	}
+	s.bySubst[e.substKey] = handle
+	c := *e
+	c.value = slices.Clone(e.value)
+	c.recipients = nil
+	return c, true
 }
 
 // errFileChanged is returned when a kept file is not the file that was scanned any more.

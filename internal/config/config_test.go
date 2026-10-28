@@ -227,6 +227,17 @@ func TestServingErrors(t *testing.T) {
 		{"metrics addr localhost", "version: 1\nlisten: {addr: '127.0.0.1:9464'}\nmetrics: {addr: 'localhost:9464'}\nauth: {tokens: {a: s}}\n" + srv, "metrics.addr: must differ from listen.addr"},
 		{"bad tool pins", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    toolPins: block\n", "servers.a.toolPins: must be one of off, warn, hold"},
 		{"files unredacted", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {enabled: false, files: {tools: [x], roots: [/d]}}\n", "servers.a.redact.files: needs redact.enabled"},
+		{"argument mode", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {arguments: warn}\n", "servers.a.redact.arguments: must be off, log or block"},
+		{"block unredacted", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {enabled: false, arguments: block}\n", "servers.a.redact.arguments: needs redact.enabled"},
+		{"substitute unredacted", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {enabled: false, substitute: [{tool: t, argument: p, from: {a: [password]}}]}\n", "servers.a.redact.substitute: needs redact.enabled"},
+		{"substitute no tool", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {substitute: [{argument: p, from: {a: [password]}}]}\n", "servers.a.redact.substitute[0].tool: cannot be empty"},
+		{"substitute bad path", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {substitute: [{tool: t, argument: a..b, from: {a: [password]}}]}\n", "servers.a.redact.substitute[0].argument: must be member names"},
+		{"substitute no origin", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {substitute: [{tool: t, argument: p, from: {}}]}\n", "servers.a.redact.substitute[0].from: must name at least one server"},
+		{"substitute unknown origin", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {substitute: [{tool: t, argument: p, from: {nope: [password]}}]}\n", "servers.a.redact.substitute[0].from.nope: is not a server in servers"},
+		{"substitute no kinds", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {substitute: [{tool: t, argument: p, from: {a: []}}]}\n", "servers.a.redact.substitute[0].from.a: must list at least one kind"},
+		{"substitute unknown kind", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {substitute: [{tool: t, argument: p, from: {a: [file]}}]}\n", "servers.a.redact.substitute[0].from.a[0]: is not a redaction kind"},
+		{"substitute kind twice", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {substitute: [{tool: t, argument: p, from: {a: [jwt, jwt]}}]}\n", "servers.a.redact.substitute[0].from.a[1]: is listed twice"},
+		{"substitute rule twice", "version: 1\nauth: {tokens: {a: s}}\n" + srv + "    redact: {substitute: [{tool: t, argument: p, from: {a: [jwt]}}, {tool: t, argument: p, from: {a: [password]}}]}\n", "servers.a.redact.substitute[1]: has the same tool and argument"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -264,6 +275,9 @@ func TestDefaults(t *testing.T) {
 	}
 	if !slices.Equal(a.Stdio.InheritEnv, DefaultInheritEnv) {
 		t.Errorf("inheritEnv = %v, want the default", a.Stdio.InheritEnv)
+	}
+	if a.Redact.Arguments != ArgumentsLog || a.Redact.Substitute != nil {
+		t.Errorf("redact.arguments = %q, substitute = %v; want log and none", a.Redact.Arguments, a.Redact.Substitute)
 	}
 	if b := c.Servers["b"].Stdio.InheritEnv; b == nil || len(b) != 0 {
 		t.Errorf("explicit empty inheritEnv = %#v, want empty", b)
@@ -897,5 +911,43 @@ func TestDecodeErrorHidesValueWithBacktick(t *testing.T) {
 	_, err := Parse([]byte(doc), noEnv)
 	if err == nil || strings.Contains(err.Error(), "hunt") || !strings.Contains(err.Error(), "value not shown") {
 		t.Errorf("error = %v", err)
+	}
+}
+
+func TestSubstituteRules(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nauth: {tokens: {a: s}}\nservers:\n" +
+		"  vault:\n    stdio: {command: x}\n    redact: {escrow: false}\n" +
+		"  app:\n    stdio: {command: x}\n    redact:\n      arguments: block\n      substitute:\n" +
+		"        - {tool: login, argument: auth.password, from: {vault: [password], app: [password, jwt]}}\n" +
+		"        - {tool: send, argument: 'messages.*.text', from: {app: [github_token]}}\n"
+	c, err := Parse([]byte(doc), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Servers["app"].Redact
+	if r.Arguments != ArgumentsBlock || len(r.Substitute) != 2 || !slices.Equal(r.Substitute[1].Path(), []string{"messages", "*", "text"}) {
+		t.Fatalf("redact = %+v", r)
+	}
+	if !slices.ContainsFunc(c.Warnings, func(w string) bool {
+		return strings.HasPrefix(w, "servers.app.redact.substitute[0].from.vault: the server's results carry no escrow handles")
+	}) {
+		t.Errorf("warnings = %q, want one about vault", c.Warnings)
+	}
+	doc = "version: 1\nauth: {tokens: {a: s}}\nservers:\n" +
+		"  vault:\n    stdio: {command: x}\n    redact: {disableRules: [jwt]}\n" +
+		"  app:\n    stdio: {command: x}\n    redact:\n      substitute:\n" +
+		"        - {tool: vault__login, argument: 'auth. password', from: {vault: [password, jwt]}}\n"
+	if c, err = Parse([]byte(doc), noEnv); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"servers.app.redact.substitute[0].argument: a member name starts or ends with a space",
+		"servers.app.redact.substitute[0].tool: names the tool as /mcp does",
+		"servers.app.redact.substitute[0].from.vault[1]: the server's redact.disableRules turns this kind off",
+	} {
+		if !slices.ContainsFunc(c.Warnings, func(w string) bool { return strings.HasPrefix(w, want) }) {
+			t.Errorf("warnings = %q, want %q", c.Warnings, want)
+		}
 	}
 }

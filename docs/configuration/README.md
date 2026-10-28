@@ -57,7 +57,7 @@ servers:
     maxMessageBytes: 8MiB
     protocolVersion: "2025-11-25"
     resources: {deny: ["shop://orders/private"]}
-    redact: {escrow: false}  # plain [REDACTED:<kind>] markers, nothing kept
+    redact: {escrow: false, arguments: block}  # plain markers, nothing kept; refuse secrets in arguments
     auth:
       inherit: false
       tokens: {shop-bot: "${GATE_TOKEN_SHOP}"}
@@ -66,6 +66,9 @@ servers:
     http:
       url: https://mail.example.com/mcp
       oauth: {}              # discovered, client registered at login
+    redact:
+      substitute:            # escrow handles the agent passes here get their values
+        - {tool: login_imap, argument: auth.password, from: {notes: [password]}}
   docs:
     http:
       url: https://docs.example.com/mcp
@@ -143,6 +146,11 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `redact.files.roots` | required with `files` | Absolute directories the tools write to (not `/`, not `$HOME` or a directory above it); only files under them are read, and a path only the arguments name when written during the call; without a usable `$HOME` the check is skipped with a warning |
 | `redact.files.maxBytes` | `20MiB` | Largest file scanned, `1KiB` to `1GiB`. A larger text file withholds the whole result; a larger binary file passes |
 | `toolPins` | `warn` | What the gate does when the server lists a tool whose definition differs from its pin, or a new one: `warn` logs it and serves it, `hold` logs it and hides it until [`mcp-gate toolpins accept`](../commands/toolpins.md) accepts it (needs a state directory), `off` compares nothing (see [Tool pins](#tool-pins)) |
+| `redact.arguments` | `log` | What a secret found in what a client sends does (a tool call's arguments, a prompt's arguments, a resource URI, scanned with this server's rules): `off` scans nothing, `log` forwards the request and names the kinds in the audit line's `argumentSecrets`, `block` refuses it (a tool error for a tool call). Escrow markers are never findings. `block` needs `redact.enabled` |
+| `redact.substitute` | none | Where an escrow handle in a tool call's arguments is replaced by its value before the call is forwarded (see [Argument secrets](#argument-secrets)). A list of rules, each with `tool`, `argument` and `from`. Needs `redact.enabled` |
+| `substitute[].tool` | required | The server's own name of the tool |
+| `substitute[].argument` | required | Path of member names joined by `.` to a string value in the arguments, such as `auth.password`; `*` matches any member or array element, a number the element at that index |
+| `substitute[].from` | required | Map from the server a handle came from to the redaction kinds from it that may go here, such as `{notes: [password]}`; the server may be this one |
 | `forwardMeta` | none | `_meta` keys of a client request passed to the server, by exact name, such as `example.com/trace`. Others are dropped: they describe the client. `progressToken` and `mcp`/`modelcontextprotocol`-prefixed keys are the gate's and cannot be listed |
 
 Each server has exactly one of `stdio` and `http`. Every server that is not `public` must accept at least one token, and no two tokens a server accepts may have the same value. Token names are lower-case letters, digits, `.`, `_` and `-`; values may not contain spaces or control characters.
@@ -152,6 +160,14 @@ Each server has exactly one of `stdio` and `http`. Every server that is not `pub
 `policies.<token>.servers.<server>` narrows what one token sees and may call on one server. Its `tools`, `prompts` and `resources` are matched like a server's filters of the same name, by the same keys, and apply after them: an entry reaches the token only when both pass it. Each is a non-empty `allow` list, a non-empty `deny` list, or `none`, which hides every entry of its kind (`tools: none`). Empty lists, and a filter written without a value (`tools:` or `tools: ~`), are rejected, since a server's empty tool allow list exposes every tool and a snippet moved from one to the other would then fail open; `mcp-gate check` names `none` in its error. Entries are the server's own names, without the `<server>__` prefix of `/mcp`, and have no surrounding space. A filter left out, and a server the policy does not name, narrow nothing. The policy holds on the server's own route and on `/mcp` alike (see [serve](../commands/serve.md#token-policies)).
 
 The key under `policies` is a token name as each server knows it: a token from `auth.tokens` on the servers that inherit them, and a server's own `auth.tokens` entry on that server. Two servers with `inherit: false` may each have their own token of the same name, with different values; a policy under that name applies on each server to that server's token. Each server named must exist and accept the token; a public server takes no token, so it cannot be named. `mcp-gate check` reports a policy that breaks these rules, such as `policies.phone.servers.nope: is not a server in servers`, and warns about a policy on a disabled server, which has no effect until the server is enabled. It also warns about a server's `tools: {allow: []}`, which exposes every tool.
+
+## Argument secrets
+
+An agent that should use a secret without seeing it passes the marker it was shown, `[REDACTED:password #k3j5abcdefg]`, in a tool call's arguments. When a rule of `redact.substitute` matches the tool and the argument's path, the gate replaces the marker by the value it holds in the escrow, but only when the escrow is on, the handle is live, the caller's token received that handle in a result, and the rule's `from` lists the server the secret came from with its kind. Otherwise the call is refused and nothing is sent. A marker in an argument no rule covers is sent as text. Each substitution is in the audit line's `substitutions` as `<handle>:<kind>:<origin>:<argument>`, never with the value. If the server sends the value back, the answer still carries the marker the agent passed.
+
+Rules decide where secrets may flow: `from: {mail: [password]}` on a messaging server lets a password from `mail` be sent there, so keep rules to the tools and arguments that need them. A rule binds an argument, not a destination: the server sends the value wherever its other arguments say, so a rule on a `fetch` tool's `body` lets the agent post the secret to any `url`. Write rules only for tools whose destination is fixed, such as a login to one service. The value also reaches the client when the server returns it transformed (in another case, split or encoded other than percent-encoding or base64).
+
+With `redact.arguments: block` on the same server, a secret the agent writes out in full is refused, while the handles substitution replaces are not. The scan catches secrets sent by mistake; an agent that means to send one can hide it (behind `[REDACTED`, encoded or split), so `block` is no barrier against a hostile agent.
 
 ## Values
 

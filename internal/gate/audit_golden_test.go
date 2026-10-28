@@ -76,7 +76,7 @@ servers:
 	}
 	want := []string{
 		`{"level":"INFO","msg":"call","server":"cat","principal":"laptop","method":"tools/call","tool":"echo","durMs":0,"outcome":"ok","tokenPolicy":"none","redactions":0}`,
-		`{"level":"INFO","msg":"call","server":"cat","principal":"laptop","method":"tools/call","tool":"echo","durMs":0,"outcome":"ok","tokenPolicy":"none","redactions":1}`,
+		`{"level":"INFO","msg":"call","server":"cat","principal":"laptop","method":"tools/call","tool":"echo","durMs":0,"outcome":"ok","tokenPolicy":"none","redactions":1,"argumentSecrets":"github_token"}`,
 		`{"level":"INFO","msg":"call","server":"cat","principal":"laptop","method":"tools/call","tool":"env","durMs":0,"outcome":"denied","tokenPolicy":"none","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"cat","principal":"laptop","method":"tools/call","tool":"missing","durMs":0,"outcome":"denied","tokenPolicy":"none","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"cat","principal":"phone","method":"tools/call","tool":"echo","durMs":0,"outcome":"ok","tokenPolicy":"allow","redactions":0}`,

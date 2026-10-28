@@ -60,7 +60,7 @@ Every tool call, prompt get and resource read runs through the request pipeline 
 | Stage | What it does |
 | --- | --- |
 | begin | starts the audit record and counts the call (`Mirror.begin`), labels the token policy's decision (`Mirror.start`) |
-| before forward | the kind's `before` stages in order, each of which may refuse the request or change what is sent: the server's filter (`serverFilter`), then the caller's token policy (`tokenPolicy`), each refusing a hidden entry with the error of an unknown one |
+| before forward | the kind's `before` stages in order, each of which may refuse the request or change what is sent: the server's filter (`serverFilter`), then the caller's token policy (`tokenPolicy`), each refusing a hidden entry with the error of an unknown one; then the argument scan (`scanArguments`) and, for a tool call, substitution (`substitute`), both in [`arguments.go`](../../internal/proxy/arguments.go) (see [Escrow](escrow.md#argument-secrets)). Their refusal is a `refusal` error, which a tool call answers with a tool error |
 | forward | sends the typed request through the `proxy.Downstream` the source was attached to, with the downstream `_meta` and progress (`forward`) |
 | outcome | maps the answer: no session is `unavailable`, an error is rebuilt (`call.downstreamError`), no result or one asking for input fails; a tool call answers the first and the last with a tool result |
 | after forward | the kind's `after` stages in order, each of which may change or withhold the result: redaction (`redactWith`), then for a tool call the file scan (`scanFiles`) and the `tool_error` outcome |

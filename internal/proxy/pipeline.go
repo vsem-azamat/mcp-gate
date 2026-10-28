@@ -21,7 +21,9 @@ import (
 //   - before forward: the kind's before stages, each of which may refuse the request or change
 //     what is sent: today the server's filter with the tools the tool pins hold, then the
 //     caller's token policy, each of which refuses an entry it hides with the error of an
-//     unknown one;
+//     unknown one; then the argument scan, which records or refuses secrets in what the client
+//     sends, and, for a tool call, substitution, which puts the values of escrow handles into
+//     the arguments (see arguments.go). A refusal of a tool call is answered with a tool error;
 //   - forward: the request goes to the server through the supervisor, with the downstream
 //     _meta and progress (Mirror.forward);
 //   - outcome: the server's answer becomes a result or an error fit for the client, and what
@@ -83,6 +85,9 @@ func (pl *pipeline[P, R]) run(ctx context.Context, x *exchange, p P) (R, error) 
 	var none R
 	for _, stage := range pl.before {
 		if err := stage(ctx, x, p); err != nil {
+			if isRefusal(err) {
+				return pl.fail(err)
+			}
 			return none, err
 		}
 	}
@@ -107,7 +112,7 @@ func (pl *pipeline[P, R]) forward(ctx context.Context, x *exchange, p P) (R, err
 	m := x.m
 	down := downstreamMeta(x.meta, m.opts.ForwardMeta)
 	if token := progressToken(x.meta); token != nil && x.session != nil {
-		sink := m.src.progress.open(ctx, x.session, token, m.scrub, m.logger)
+		sink := m.src.progress.open(ctx, x.session, token, x.scrub, m.logger)
 		defer m.src.progress.close(sink)
 		if down == nil {
 			down = mcp.Meta{}
@@ -184,7 +189,7 @@ func redactWith[R result](fn func(*mcpredact.Redactor, R, *countingReplacer) (R,
 		if r == nil {
 			return res, nil
 		}
-		out, err := fn(r.results, res, x.replacer())
+		out, err := fn(x.results(), res, x.replacer())
 		if err != nil {
 			return out, x.withheld(err)
 		}
@@ -223,7 +228,9 @@ func toolErrorOutcome(_ context.Context, x *exchange, res *mcp.CallToolResult) (
 // The pipelines of the three kinds.
 
 var toolPipeline = &pipeline[*mcp.CallToolParams, *mcp.CallToolResult]{
-	before: []beforeStage[*mcp.CallToolParams]{serverFilter[*mcp.CallToolParams], tokenPolicy[*mcp.CallToolParams]},
+	before: []beforeStage[*mcp.CallToolParams]{
+		serverFilter[*mcp.CallToolParams], tokenPolicy[*mcp.CallToolParams], scanArguments(toolInput), substitute,
+	},
 	send: func(ctx context.Context, d Downstream, p *mcp.CallToolParams) (*mcp.CallToolResult, error) {
 		return d.CallTool(ctx, p)
 	},
@@ -240,7 +247,9 @@ var toolPipeline = &pipeline[*mcp.CallToolParams, *mcp.CallToolResult]{
 }
 
 var promptPipeline = &pipeline[*mcp.GetPromptParams, *mcp.GetPromptResult]{
-	before: []beforeStage[*mcp.GetPromptParams]{serverFilter[*mcp.GetPromptParams], tokenPolicy[*mcp.GetPromptParams]},
+	before: []beforeStage[*mcp.GetPromptParams]{
+		serverFilter[*mcp.GetPromptParams], tokenPolicy[*mcp.GetPromptParams], scanArguments(promptInput),
+	},
 	send: func(ctx context.Context, d Downstream, p *mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
 		return d.GetPrompt(ctx, p)
 	},
@@ -254,7 +263,9 @@ var promptPipeline = &pipeline[*mcp.GetPromptParams, *mcp.GetPromptResult]{
 }
 
 var resourcePipeline = &pipeline[*mcp.ReadResourceParams, *mcp.ReadResourceResult]{
-	before: []beforeStage[*mcp.ReadResourceParams]{serverFilter[*mcp.ReadResourceParams], tokenPolicy[*mcp.ReadResourceParams]},
+	before: []beforeStage[*mcp.ReadResourceParams]{
+		serverFilter[*mcp.ReadResourceParams], tokenPolicy[*mcp.ReadResourceParams], scanArguments(resourceInput),
+	},
 	send: func(ctx context.Context, d Downstream, p *mcp.ReadResourceParams) (*mcp.ReadResourceResult, error) {
 		return d.ReadResource(ctx, p)
 	},
@@ -285,7 +296,7 @@ func (m *Mirror) callTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.C
 func (m *Mirror) callToolAs(ctx context.Context, req *mcp.CallToolRequest, shown string) (*mcp.CallToolResult, error) {
 	name := req.Params.Name
 	x := m.start(ctx, audit.Tool, req.Extra, name, shown, req.Session, req.Params.Meta)
-	x.req = Request{Method: audit.Tool.Method(), Name: name, Arguments: toolArguments(req.Params.Arguments)}
+	x.req = Request{Method: audit.Tool.Method(), Name: name, Arguments: toolArguments(req.Params.Arguments), Recipient: x.m.recipient(x.principal)}
 	params := &mcp.CallToolParams{Name: name}
 	if len(req.Params.Arguments) > 0 {
 		params.Arguments = req.Params.Arguments
@@ -301,13 +312,13 @@ func (m *Mirror) getPrompt(ctx context.Context, req *mcp.GetPromptRequest) (*mcp
 func (m *Mirror) getPromptAs(ctx context.Context, req *mcp.GetPromptRequest, shown string) (*mcp.GetPromptResult, error) {
 	name := req.Params.Name
 	x := m.start(ctx, audit.Prompt, req.Extra, name, shown, req.Session, req.Params.Meta)
-	x.req = Request{Method: audit.Prompt.Method(), Name: name, Arguments: promptArguments(req.Params.Arguments)}
+	x.req = Request{Method: audit.Prompt.Method(), Name: name, Arguments: promptArguments(req.Params.Arguments), Recipient: x.m.recipient(x.principal)}
 	return promptPipeline.run(ctx, x, &mcp.GetPromptParams{Name: name, Arguments: req.Params.Arguments})
 }
 
 func (m *Mirror) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	uri := req.Params.URI
 	x := m.start(ctx, audit.Resource, req.Extra, uri, uri, req.Session, req.Params.Meta)
-	x.req = Request{Method: audit.Resource.Method(), Name: uri}
+	x.req = Request{Method: audit.Resource.Method(), Name: uri, Recipient: x.m.recipient(x.principal)}
 	return resourcePipeline.run(ctx, x, &mcp.ReadResourceParams{URI: uri})
 }
