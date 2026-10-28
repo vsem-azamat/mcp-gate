@@ -33,6 +33,10 @@ policies:
     servers:
       notes: {tools: {allow: [search]}, resources: none}
       mail: {tools: {deny: [send_message, delete_message]}}
+limits:
+  - {token: phone, rate: 60/m, burst: 10}                  # every request of phone
+  - {server: mail, tool: send_message, rate: 5/h}           # shared by every token
+  - {server: shop, concurrency: 2}                          # calls in flight at once
 servers:
   notes:
     stdio:
@@ -105,6 +109,7 @@ An `oauth` server needs a grant, which `mcp-gate auth login` obtains (see [auth]
 | `aggregate.servers` | every server | The servers served at `/mcp`; not empty, no name twice. A disabled server is left out. A server served there cannot have `__` in its name or end in `_`, and its name is at most 61 characters |
 | `aggregate.log.requests` | `false` | Log each HTTP request to `/mcp`, as `log.requests` does for a server |
 | `policies.<token>.servers.<server>` | none | The token's own filters on that server, applied after the server's (see [Token policies](#token-policies)): `tools`, `prompts` and `resources`, at least one, each a non-empty `allow` or `deny` list or `none` |
+| `limits` | none | Rate and concurrency limits on tool calls, prompt gets and resource reads (see [Limits](#limits)): a list of entries with the selectors `token`, `server` and `tool`, and `rate`, `burst` and `concurrency` |
 | `servers.<name>` | | One downstream server. The name is lower-case letters, digits, `.`, `_` and `-`, up to 63 characters, and becomes the path `/<name>/mcp` |
 | `stdio.command` | required | Program to start, without a shell; a name without `/` is looked up in the gate's `PATH` |
 | `stdio.args` | none | Its arguments |
@@ -152,6 +157,22 @@ Each server has exactly one of `stdio` and `http`. Every server that is not `pub
 `policies.<token>.servers.<server>` narrows what one token sees and may call on one server. Its `tools`, `prompts` and `resources` are matched like a server's filters of the same name, by the same keys, and apply after them: an entry reaches the token only when both pass it. Each is a non-empty `allow` list, a non-empty `deny` list, or `none`, which hides every entry of its kind (`tools: none`). Empty lists, and a filter written without a value (`tools:` or `tools: ~`), are rejected, since a server's empty tool allow list exposes every tool and a snippet moved from one to the other would then fail open; `mcp-gate check` names `none` in its error. Entries are the server's own names, without the `<server>__` prefix of `/mcp`, and have no surrounding space. A filter left out, and a server the policy does not name, narrow nothing. The policy holds on the server's own route and on `/mcp` alike (see [serve](../commands/serve.md#token-policies)).
 
 The key under `policies` is a token name as each server knows it: a token from `auth.tokens` on the servers that inherit them, and a server's own `auth.tokens` entry on that server. Two servers with `inherit: false` may each have their own token of the same name, with different values; a policy under that name applies on each server to that server's token. Each server named must exist and accept the token; a public server takes no token, so it cannot be named. `mcp-gate check` reports a policy that breaks these rules, such as `policies.phone.servers.nope: is not a server in servers`, and warns about a policy on a disabled server, which has no effect until the server is enabled. It also warns about a server's `tools: {allow: []}`, which exposes every tool.
+
+## Limits
+
+`limits` caps how often, and how many at once, requests reach the servers. Each entry selects requests with any of `token` (a token name, as under `policies`), `server` and `tool` (a tool's own name on that `server`, which it needs, without the `<server>__` prefix of `/mcp`), and sets at least one of:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `rate` | none | `<calls>/<period>`: a positive whole number and `s`, `m`, `h` or a duration, such as `60/m` or `5/30s` |
+| `burst` | the `rate`'s calls | Most calls passed at once after a quiet spell; needs `rate`. `60/m` with `burst: 10` passes 10 at once, then one a second |
+| `concurrency` | none | Most calls in flight at once |
+
+A selector left out matches anything: an entry without `tool` counts tool calls, prompt gets and resource reads alike, and one with `token` never matches a public server, which takes no token. Each entry has one bucket, shared by every request it matches, whichever token or server it comes from; to give each token its own limit, write an entry per token. A request passes only when every entry that matches it passes, and only then takes a call from each of them, so a refused request uses nothing.
+
+The limits are checked after the server's filters and the token's policy, so a call of a hidden tool still fails as one of a missing tool. A refused request gets a JSON-RPC error with code `-32029`, a message such as `mcp-gate: rate limit reached: at most 60 calls per 1m; retry in 4s` (the first entry, in order, that refused it), and for a rate limit `{"retryAfterMs": 3750}` as its data. It is logged with outcome `limited` (see [serve](../commands/serve.md#logs)) and is not forwarded.
+
+The buckets are in memory and start full when the gate starts. A reload applies `limits` in place: an entry that is unchanged, every key equal, keeps its bucket and its calls in flight; a changed or new one starts full. Entries must not repeat, a `token` must be one some server accepts, and with `server`, that server must accept it.
 
 ## Values
 

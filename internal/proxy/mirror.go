@@ -31,6 +31,7 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 
 	"github.com/vsem-azamat/mcp-gate/internal/audit"
+	"github.com/vsem-azamat/mcp-gate/internal/limit"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/toolpins"
 	"github.com/vsem-azamat/mcp-gate/internal/upstream"
@@ -84,7 +85,10 @@ type Options struct {
 	// Redaction redacts results; nil passes them unchanged.
 	Redaction *Redaction
 	// Files, if set, scans the files tool calls write, after their results are redacted.
-	Files  FileScanner
+	Files FileScanner
+	// Limits, if set, refuses the requests over a rate or concurrency limit. It is the gate's,
+	// shared by every mirror, and a reload changes its rules in place.
+	Limits *limit.Limiter
 	Logger *slog.Logger
 	// Audit receives the audit record of every request; nil writes them as call lines to
 	// Logger.

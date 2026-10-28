@@ -12,6 +12,7 @@ import (
 
 	"github.com/vsem-azamat/mcp-gate/internal/config"
 	"github.com/vsem-azamat/mcp-gate/internal/downstream"
+	"github.com/vsem-azamat/mcp-gate/internal/limit"
 	"github.com/vsem-azamat/mcp-gate/internal/policy"
 	"github.com/vsem-azamat/mcp-gate/internal/redact"
 )
@@ -235,6 +236,12 @@ func TestAuditMoreOutcomesGolden(t *testing.T) {
 		Name: "s", Policy: policy.New(&config.Server{}), Logger: logger, Redaction: NewRedaction(engine, nil, 1<<20), Files: failingScanner{},
 	}, fullDown(t))
 	tool(scans, t.Context(), "ok") // withheld: the scan failed
+	limits := limit.New(nil)
+	limits.Set([]limit.Rule{{Server: "s", Rate: 1, Per: time.Hour}}) // a bucket of no calls
+	limited := newMirror(Options{Name: "s", Policy: policy.New(&config.Server{}), Logger: logger, Limits: limits}, fullDown(t))
+	tool(limited, t.Context(), "ok") // limited
+	prompt(limited, "p")
+	read(limited, "x://ok")
 	// The SDK refuses a call of a tool the mirror holds: an error, not a denial.
 	refuses := m.receive(func(context.Context, string, mcp.Request) (mcp.Result, error) {
 		return nil, errors.New("invalid params")
@@ -277,6 +284,9 @@ func TestAuditMoreOutcomesGolden(t *testing.T) {
 		`{"level":"INFO","msg":"call","server":"s","principal":"","method":"tools/call","tool":"ok","durMs":0,"outcome":"error","tokenPolicy":"none","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"s","principal":"","method":"tools/call","tool":"ok","durMs":0,"outcome":"error","tokenPolicy":"none","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"s","principal":"","method":"tools/call","tool":"ok","durMs":0,"outcome":"withheld","tokenPolicy":"none","redactions":0}`,
+		`{"level":"INFO","msg":"call","server":"s","principal":"","method":"tools/call","tool":"ok","durMs":0,"outcome":"limited","tokenPolicy":"none","redactions":0}`,
+		`{"level":"INFO","msg":"call","server":"s","principal":"","method":"prompts/get","prompt":"p","durMs":0,"outcome":"limited","tokenPolicy":"none","redactions":0}`,
+		`{"level":"INFO","msg":"call","server":"s","principal":"","method":"resources/read","uri":"x://ok","durMs":0,"outcome":"limited","tokenPolicy":"none","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"s","principal":"","method":"tools/call","tool":"ok","durMs":0,"outcome":"error","tokenPolicy":"none","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"s","principal":"laptop","method":"tools/call","tool":"gone","durMs":0,"outcome":"denied","tokenPolicy":"none","redactions":0}`,
 		`{"level":"INFO","msg":"call","server":"","principal":"laptop","method":"prompts/get","prompt":"s__p","durMs":0,"outcome":"denied","tokenPolicy":"none","redactions":0}`,

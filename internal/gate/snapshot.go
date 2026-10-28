@@ -314,7 +314,7 @@ func (g *Gate) newServer(cfg *config.Config, name string, s *config.Server, old 
 	}
 	mo := proxy.Options{
 		Name: name, Version: g.opts.Version, Policy: policy.New(s), Tokens: policy.NewTokens(cfg, name), ForwardMeta: s.ForwardMeta,
-		Redaction: redaction, Files: files, Logger: g.logger, Audit: g.audit, Source: rt.src,
+		Redaction: redaction, Files: files, Limits: g.limits, Logger: g.logger, Audit: g.audit, Source: rt.src,
 	}
 	if s.ToolPins != config.ToolPinsOff {
 		mo.ToolPins, mo.HoldTools = g.toolPins, s.ToolPins == config.ToolPinsHold

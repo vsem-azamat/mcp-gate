@@ -899,3 +899,88 @@ func TestDecodeErrorHidesValueWithBacktick(t *testing.T) {
 		t.Errorf("error = %v", err)
 	}
 }
+
+func TestLimits(t *testing.T) {
+	const servers = `
+auth: {tokens: {laptop: secret-laptop, phone: secret-phone}}
+servers:
+  a: {stdio: {command: /bin/a}}
+  b: {stdio: {command: /bin/b}, auth: {inherit: false, tokens: {bot: secret-bot}}}
+  pub: {stdio: {command: /bin/p}, auth: {public: true}}
+`
+	c, err := Parse([]byte("version: 1\n"+servers+`
+limits:
+  - {token: phone, server: a, tool: echo, rate: 2/m}
+  - {server: a, rate: 5/30s, burst: 1}
+  - {token: phone, concurrency: 4}
+  - {server: pub, rate: 100/h, concurrency: 2}
+  - {rate: 1/s}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type parsed struct {
+		token, server, tool string
+		calls               int
+		per                 time.Duration
+		burst, concurrency  int
+	}
+	want := []parsed{
+		{"phone", "a", "echo", 2, time.Minute, 2, 0},
+		{"", "a", "", 5, 30 * time.Second, 1, 0},
+		{"phone", "", "", 0, 0, 0, 4},
+		{"", "pub", "", 100, time.Hour, 100, 2},
+		{"", "", "", 1, time.Second, 1, 0},
+	}
+	if len(c.Limits) != len(want) {
+		t.Fatalf("limits %d, want %d", len(c.Limits), len(want))
+	}
+	for i, l := range c.Limits {
+		if got := (parsed{l.Token, l.Server, l.Tool, l.Calls, l.Per, l.Burst, l.Concurrency}); got != want[i] {
+			t.Errorf("limits[%d] = %+v, want %+v", i, got, want[i])
+		}
+	}
+	for _, c := range []struct{ doc, want string }{
+		{"limits: [{tool: echo, rate: 1/s}]", "limits[0].tool: needs server"},
+		{"limits: [{server: a, burst: 3, concurrency: 1}]", "limits[0].burst: needs rate"},
+		{"limits: [{server: a}]", "limits[0]: needs at least one of rate and concurrency"},
+		{"limits: [{server: a, rate: 0/m}]", "limits[0].rate: is <calls>/<period>"},
+		{"limits: [{server: a, rate: 5}]", "limits[0].rate: is <calls>/<period>"},
+		{"limits: [{server: a, rate: 5/0s}]", "limits[0].rate: is <calls>/<period>"},
+		{"limits: [{server: a, rate: 5/x}]", "limits[0].rate: is <calls>/<period>"},
+		{"limits: [{server: a, rate: -1/m}]", "limits[0].rate: is <calls>/<period>"},
+		{"limits: [{server: a, rate: 1/m, burst: -1}]", "limits[0].burst: must be positive"},
+		{"limits: [{server: a, concurrency: -1}]", "limits[0].concurrency: must be positive"},
+		{"limits: [{token: nobody, rate: 1/s}]", "limits[0].token: is not a token in auth.tokens or in a server's auth.tokens"},
+		{"limits: [{server: nope, rate: 1/s}]", "limits[0].server: is not a server in servers"},
+		{"limits: [{token: phone, server: b, rate: 1/s}]", "limits[0].server: the server does not accept the token phone"},
+		{"limits: [{token: phone, server: pub, rate: 1/s}]", "limits[0].server: the server does not accept the token phone"},
+		{"limits: [{server: a, tool: \" x\", rate: 1/s}]", "limits[0].tool: cannot have surrounding space"},
+		{"limits: [{server: a, tool: a__echo, rate: 1/s}]", `limits[0].tool: names the tool as the aggregate endpoint does; write the server's own name for it, without "a__"`},
+		{"limits: [{rate: 1/s}, {server: a}, {rate: 1/s}]", "limits[2]: is the same as limits[0]"},
+		{"limits: [{server: a, rate: 1/s, other: 1}]", "field other not found"},
+		{"limits: [~]", "limits[0]: is empty"},
+	} {
+		_, err := Parse([]byte("version: 1\n"+c.doc+"\n"+servers), noEnv)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%q: err = %v, want %q", c.doc, err, c.want)
+		}
+	}
+}
+
+func TestParseRate(t *testing.T) {
+	for in, want := range map[string]struct {
+		calls int
+		per   time.Duration
+	}{"2/m": {2, time.Minute}, "5/30s": {5, 30 * time.Second}, "100/h": {100, time.Hour}, "1/s": {1, time.Second}, "3/1h30m": {3, 90 * time.Minute}} {
+		calls, per, ok := ParseRate(in)
+		if !ok || calls != want.calls || per != want.per {
+			t.Errorf("%s: %d %v %v", in, calls, per, ok)
+		}
+	}
+	for _, in := range []string{"", "1", "/m", "0/m", "-1/m", "1/0s", "1/-1s", "1/x", "x/m", "1/m/s", " 1/m", "1.5/m"} {
+		if _, _, ok := ParseRate(in); ok {
+			t.Errorf("%q parsed", in)
+		}
+	}
+}
