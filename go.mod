@@ -7,7 +7,7 @@ require (
 	github.com/segmentio/encoding v0.5.4
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	go.uber.org/goleak v1.3.0
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sys v0.49.0
 )
