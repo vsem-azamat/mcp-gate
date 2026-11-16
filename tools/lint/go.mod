@@ -1,6 +1,6 @@
 module github.com/vsem-azamat/mcp-gate/tools/lint
 
-go 1.27.3
+go 1.27.4
 
 tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 
